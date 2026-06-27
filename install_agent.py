@@ -182,10 +182,29 @@ class HostTools:
     def run_bootstrap(self, args: str = "", **_: Any) -> dict[str, Any]:
         """
         Запустить проверенный bootstrap_installer.py (целиком или частями).
-        Это «рычаг» — агент может делегировать сложную оркестрацию готовому коду.
+        Это «рычаг» — делегирование оркестрации готовому ДЕТЕРМИНИРОВАННОМУ коду.
+
+        ЕДИНАЯ МОДЕЛЬ: bootstrap по умолчанию НЕ обращается к LLM. На всякий
+        случай жёстко вырезаем любые флаги, которые могли бы загрузить ВТОРУЮ
+        модель (--use-lmstudio / --model / --lmstudio) — защита от OOM.
         """
         script = str(self.repo_dir / "bootstrap_installer.py")
-        cmd = [sys.executable, script] + args.split()
+        banned_with_value = {"--model", "--lmstudio"}
+        cleaned: list[str] = []
+        skip_next = False
+        for tok in args.split():
+            if skip_next:
+                skip_next = False
+                continue
+            if tok == "--use-lmstudio":
+                continue
+            if tok in banned_with_value:
+                skip_next = True
+                continue
+            if tok.startswith("--model=") or tok.startswith("--lmstudio="):
+                continue
+            cleaned.append(tok)
+        cmd = [sys.executable, script] + cleaned
         return self._run(cmd, timeout=36000)
 
     def get_state(self, **_: Any) -> dict[str, Any]:
@@ -236,8 +255,9 @@ TOOLS_DOC = {
     "read_file": "Прочитать файл. args: {path}",
     "write_file": "Записать файл. args: {path, content}",
     "http_get": "HTTP GET (проверка эндпоинтов/health). args: {url}",
-    "run_bootstrap": "Запустить проверенный bootstrap_installer.py с аргументами. "
-                     "args: {args}  (например '--skip-stack' или '--skip-gpu-check')",
+    "run_bootstrap": "Запустить проверенный bootstrap_installer.py (детерминированный, "
+                     "НЕ загружает вторую модель). args: {args}  (например '--skip-gpu-check' "
+                     "или '--skip-stack'). НЕ передавай --use-lmstudio/--model/--lmstudio.",
     "finish": "Завершить работу. args: {summary}",
 }
 
@@ -254,7 +274,8 @@ class LMClient:
         self.base_url = base_url.rstrip("/")
         self.model = model or self._select_model()
         self.timeout = timeout
-        log.info("Агентная модель: %s", self.model)
+        log.info("ЕДИНАЯ модель для ВСЕЙ установки: %s "
+                 "(в LM Studio должна быть загружена только она)", self.model)
 
     def _select_model(self) -> str:
         try:
@@ -314,6 +335,11 @@ SYSTEM_PROMPT = """\
 ЦЕЛЬ: полностью развернуть систему с нуля на диске {target_root}, чтобы заработали
 сервисы: ядро http://localhost:8000, vLLM Qwen :8001, vLLM UI-TARS :8002, аудио :8003.
 ВЕСЬ «тяжеляк» (веса моделей ~25 ГБ, образы Docker, образ WSL) — на диске {target_drive}.
+
+ЕДИНАЯ МОДЕЛЬ: ВЕСЬ путь установки ведёшь ТЫ — одна и та же локальная модель.
+НИКОГДА не запускай ничего, что загрузило бы вторую LLM в LM Studio (это вызывает
+OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен получать флаги
+--use-lmstudio / --model / --lmstudio (он и так детерминированный).
 
 ТЫ РАБОТАЕШЬ ЦИКЛАМИ. На каждом шаге верни СТРОГО ОДИН JSON-объект (без markdown,
 без лишнего текста, без пошаговых рассуждений — сразу JSON):
@@ -499,10 +525,11 @@ def main() -> int:
         pass
 
     log.info("=" * 70)
-    log.info("JARVIS-OS · АВТОНОМНЫЙ агент-установщик")
+    log.info("JARVIS-OS · ЕДИНАЯ автономная установка на ОДНОЙ локальной модели")
     log.info("Режим: %s | подтверждения: %s | max-шагов: %d",
              "DRY-RUN" if args.dry_run else "БОЕВОЙ",
              "да" if args.require_approval else "нет (полная автономия)", args.max_steps)
+    log.info("Вся установка — одной моделью. bootstrap НЕ грузит вторую модель (защита от OOM).")
     log.info("Катастрофические команды (формат/очистка диска) — ВСЕГДА блокируются.")
     log.info("=" * 70)
 

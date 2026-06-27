@@ -1134,7 +1134,11 @@ def bring_up_stack() -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="JARVIS-OS — автоматический Windows-загрузчик.")
     p.add_argument("--lmstudio", default="http://localhost:1234/v1")
-    p.add_argument("--model", default="", help="ID модели LM Studio (по умолчанию — авто-выбор).")
+    p.add_argument("--model", default="", help="ID модели LM Studio (для --use-lmstudio).")
+    p.add_argument("--use-lmstudio", action="store_true",
+                   help="Опросить LM Studio для генерации профиля. ПО УМОЛЧАНИЮ ВЫКЛ: чтобы "
+                        "не загружать вторую модель (иначе вместе с моделью агента это "
+                        "вызывает OOM на 32 ГБ GPU). Требует явного --model.")
     p.add_argument("--distro", default="", help="Имя дистрибутива WSL (по умолчанию — авто).")
     p.add_argument("--wsl-ram", type=int, default=96)
     p.add_argument("--wsl-cpus", type=int, default=20)
@@ -1219,20 +1223,31 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log.warning("Перенос диска Docker Desktop пропущен (%s).", exc)
 
-    # --- Динамический профиль через LM Studio ---
-    host_facts = {
-        "os": platform.platform(),
-        "cpu": platform.processor() or "Intel Core Ultra 9 285K",
-        "logical_cpus": os.cpu_count(),
-        "target_gpu": "NVIDIA RTX 5090 32GB",
-        "total_ram_gb": 128,
-        "requested_wsl_ram_gb": args.wsl_ram,
-        "requested_wsl_cpus": args.wsl_cpus,
-    }
+    # --- Профиль развёртывания ---
+    # ВАЖНО: по умолчанию bootstrap НЕ обращается к LM Studio и НЕ загружает
+    # никакую модель — иначе вместе с моделью агента-установщика это вызывает OOM
+    # на 32 ГБ GPU. Профиль детерминированный и корректен для RTX 5090.
     base_profile = DeploymentProfile(wsl_memory_gb=args.wsl_ram,
                                      wsl_processors=args.wsl_cpus,
                                      wsl_distro=distro or "")
-    profile = LMStudioClient(args.lmstudio, model=args.model).generate_profile(host_facts, base_profile)
+    if args.use_lmstudio and args.model:
+        host_facts = {
+            "os": platform.platform(),
+            "cpu": platform.processor() or "Intel Core Ultra 9 285K",
+            "logical_cpus": os.cpu_count(),
+            "target_gpu": "NVIDIA RTX 5090 32GB",
+            "total_ram_gb": 128,
+            "requested_wsl_ram_gb": args.wsl_ram,
+            "requested_wsl_cpus": args.wsl_cpus,
+        }
+        log.info("Запрашиваю профиль у LM Studio (модель %s, по явному --use-lmstudio).", args.model)
+        profile = LMStudioClient(args.lmstudio, model=args.model).generate_profile(host_facts, base_profile)
+    else:
+        if args.use_lmstudio and not args.model:
+            log.warning("--use-lmstudio без --model: чтобы НЕ загрузить вторую модель, "
+                        "пропускаю запрос к LM Studio.")
+        log.info("Профиль развёртывания: детерминированный дефолт (без обращения к LLM).")
+        profile = base_profile
     try:
         profile.validate_vram()
     except ValueError as exc:
