@@ -343,9 +343,12 @@ TOOLS_DOC = {
 # Клиент LM Studio (устойчивый: text-режим + извлечение JSON + reasoning_content)
 # --------------------------------------------------------------------------- #
 class LMClient:
-    PREFERRED_AGENT = ("qwen3-coder-30b-a3b-instruct", "devstral-small-2-24b-instruct-2512",
-                       "qwen3-coder-next", "gpt-oss-120b", "gemma-4-31b-it-qat")
-    MAX_TOKENS = 4096
+    # Предпочтение по умолчанию — gemma-4-31b-it-qat (по выбору пользователя).
+    # Это reasoning-модель: ответ может приходить в reasoning_content — это
+    # учтено в chat(), а MAX_TOKENS увеличен, чтобы хватало на рассуждения + JSON.
+    PREFERRED_AGENT = ("gemma-4-31b-it-qat", "qwen3-coder-30b-a3b-instruct",
+                       "devstral-small-2-24b-instruct-2512", "qwen3-coder-next", "gpt-oss-120b")
+    MAX_TOKENS = 6144
 
     def __init__(self, base_url: str, model: str = "", timeout: int = 300) -> None:
         self.base_url = base_url.rstrip("/")
