@@ -26,9 +26,11 @@ x-vllm-base: &vllm-base
   image: vllm/vllm-openai:latest
   restart: unless-stopped
   ipc: host                      # vLLM требует большой /dev/shm
+  # Именованные тома (Docker-managed) — кросс-платформенно, без зависимости
+  # от путей хоста Windows. Кэши моделей переживают пересоздание контейнеров.
   volumes:
-    - ${JARVIS_MODELS_DIR:-~/.cache/jarvis/models}:/models
-    - ${JARVIS_HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    - jarvis-models:/models
+    - jarvis-hf:/root/.cache/huggingface
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -107,7 +109,7 @@ services:
       - KOKORO_VOICE=af_sky
       - NVIDIA_VISIBLE_DEVICES=0
     volumes:
-      - ${JARVIS_HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+      - jarvis-hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
     depends_on:
@@ -164,7 +166,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # управление sandbox
-      - ${HOME}/.jarvis:/root/.jarvis
+      # Каталог ~/.jarvis хоста (токен RPC-моста) пробрасывается в контейнер.
+      # JARVIS_HOME_HOST задаётся bootstrap_installer.py в wsl/.env.
+      - ${JARVIS_HOME_HOST:-~/.jarvis}:/root/.jarvis
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -185,4 +189,6 @@ networks:
     internal: true            # sandbox изолирован от внешней сети
 
 volumes:
-  jarvis-sandbox-data:
+  jarvis-models:              # кэш весов vLLM-моделей
+  jarvis-hf:                  # кэш HuggingFace (Whisper/Kokoro/токенайзеры)
+  jarvis-sandbox-data:        # рабочая ФС изолированного sandbox

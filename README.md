@@ -100,26 +100,49 @@ Audio (CTranslate2/torch, не vLLM):  ~2.0 ГБ  →  занято 26.6 ГБ,  
 | `wsl/docker-compose.agents.yml` | Конфигурация vLLM-инстансов, аудио-слоя и sandbox |
 | `windows_rpc_bridge.py` | Защищённый RPC-демон на хосте: хуки ОС, HITL, git-автоматика |
 | `backend/server.py` | FastAPI-ядро: WS-маршрутизация аудио/токенов/кадров |
+| `backend/entrypoint.sh` | Старт Xvfb (:99) + fluxbox и ядра внутри контейнера |
 | `backend/orchestrator/graph.py` | LangGraph-граф состояний мультиагентной оркестрации |
+| `wsl/.env` | Генерируется bootstrap'ом: переменные для `docker compose` |
 | `dashboard/` | Next.js 15 Command Center (Deployment / OS / Code / Audio) |
 | `docs/vram_matrix.md` | Подробный расчёт VRAM и проверочные команды |
 
 ---
 
-## 5. Порядок запуска
+## 5. Порядок запуска (полностью автоматический)
 
 ```powershell
 # 1. На ХОСТЕ Windows (PowerShell, нативный Python 3.11+)
+pip install requests
 python bootstrap_installer.py --lmstudio http://localhost:1234/v1 --wsl-ram 96 --wsl-cpus 20
 
 # 2. Демон RPC-моста (отдельное окно, на хосте)
+pip install websockets
 python windows_rpc_bridge.py --port 8765
 
-# 3. Дашборд (внутри WSL или на хосте)
+# 3. Дашборд
 cd dashboard && npm install && npm run dev   # http://localhost:3000
 ```
 
-`bootstrap_installer.py` сам вызовет `wsl/wsl_setup_orchestrator.sh` внутри дистрибутива WSL2.
+`bootstrap_installer.py` выполняет ВСЁ автоматически, без ручных шагов:
+
+1. Проверяет хост (Windows / WSL2 / Docker Desktop / драйвер NVIDIA).
+2. Опрашивает LM Studio — **сам выбирает загруженную модель** (или `--model <id>`)
+   и устойчиво обходит ошибку `400` (прогрессивный фолбэк запроса).
+3. **Автоматически определяет имя установленного WSL-дистрибутива**, а при его
+   отсутствии — ставит Ubuntu (`--no-auto-install` отключает).
+4. Пишет оптимальный `.wslconfig`.
+5. **Автоматически доводит поддержку GPU в контейнерах** (Docker Desktop «из
+   коробки» либо авто-установка NVIDIA Container Toolkit для нативного docker).
+6. Генерирует `wsl/.env` и **поднимает весь стек** через хостовый Docker Desktop
+   (`docker compose up -d`), дожидаясь готовности сервисов.
+
+> Тест GPU и подъём стека идут через **хостовый движок Docker Desktop**, поэтому
+> не зависят от конкретного имени WSL-дистрибутива. Альтернативный WSL-native
+> сценарий — `wsl/wsl_setup_orchestrator.sh` (на случай нативного docker без
+> Docker Desktop).
+
+Полезные флаги: `--model <id>` (модель LM Studio), `--distro <name>` (дистрибутив),
+`--skip-stack` (только подготовка), `--qwen-model` / `--uitars-model` (веса агентов).
 
 ---
 

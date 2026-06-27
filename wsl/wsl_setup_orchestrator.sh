@@ -49,27 +49,32 @@ log "================================================================"
 
 # --- ЭТАП 1: проверка зависимостей ----------------------------------------- #
 log "Проверка зависимостей окружения…"
-command -v docker >/dev/null 2>&1 || die "docker не найден внутри WSL2."
+command -v docker >/dev/null 2>&1 || die "docker не найден внутри WSL2 (включите интеграцию Docker Desktop с дистрибутивом)."
 docker compose version >/dev/null 2>&1 || die "docker compose (v2) недоступен."
 
-if ! docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia' \
-   && ! docker info 2>/dev/null | grep -qi 'nvidia'; then
-  warn "NVIDIA runtime не виден в 'docker info'. Настраиваю toolkit…"
-  if command -v nvidia-ctk >/dev/null 2>&1; then
-    sudo nvidia-ctk runtime configure --runtime=docker || warn "nvidia-ctk: не удалось сконфигурировать."
-    sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null || true
-  else
-    warn "nvidia-container-toolkit не установлен. Установка…"
-    distribution=$(. /etc/os-release; echo "$ID$VERSION_ID")
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-      | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" \
-      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-      | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-    sudo apt-get update -y && sudo apt-get install -y nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo service docker restart 2>/dev/null || true
-  fi
+# Определяем движок: Docker Desktop сам обеспечивает GPU и не использует
+# локальный systemd-демон, поэтому установку toolkit и его перезапуск
+# выполняем ТОЛЬКО для нативного docker внутри WSL.
+DOCKER_DESKTOP=0
+if docker info 2>/dev/null | grep -qi 'docker desktop'; then
+  DOCKER_DESKTOP=1
+fi
+
+if [ "$DOCKER_DESKTOP" -eq 1 ]; then
+  ok "Движок: Docker Desktop — поддержка GPU предоставляется автоматически, toolkit не требуется."
+elif docker info 2>/dev/null | grep -qi 'nvidia'; then
+  ok "NVIDIA runtime уже доступен в нативном docker."
+else
+  warn "Нативный docker без NVIDIA runtime. Устанавливаю nvidia-container-toolkit…"
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+  sudo apt-get update -y && sudo apt-get install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo service docker restart 2>/dev/null || true
+  sleep 4
 fi
 ok "Зависимости проверены."
 
