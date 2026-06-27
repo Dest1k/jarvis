@@ -40,7 +40,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Optional
 
 try:
@@ -582,6 +582,68 @@ class RelocationManager:
                         "Disk image location = %s → Apply & Restart. После этого образы будут на D:.",
                         target)
 
+    # ---- Префлайт: фактическое расположение данных Docker -------------- #
+    @staticmethod
+    def _docker_data_location() -> Optional[Path]:
+        """
+        Определить РЕАЛЬНОЕ расположение данных Docker через реестр WSL
+        (HKCU\\...\\Lxss → BasePath дистрибутивов docker-desktop-data/docker-desktop).
+        Версионно-независимо. Возвращает путь или None, если определить не удалось.
+        """
+        try:
+            import winreg  # доступен только на Windows
+        except ImportError:
+            return None
+        lxss = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+        found: dict[str, str] = {}
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, lxss) as root:
+                idx = 0
+                while True:
+                    try:
+                        sub = winreg.EnumKey(root, idx)
+                    except OSError:
+                        break
+                    idx += 1
+                    try:
+                        with winreg.OpenKey(root, sub) as k:
+                            name = winreg.QueryValueEx(k, "DistributionName")[0]
+                            if name in ("docker-desktop-data", "docker-desktop"):
+                                found[name] = winreg.QueryValueEx(k, "BasePath")[0]
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        for name in ("docker-desktop-data", "docker-desktop"):
+            if name in found:
+                bp = found[name]
+                if bp.startswith("\\\\?\\"):   # снимаем префикс расширенного пути
+                    bp = bp[4:]
+                return Path(bp)
+        return None
+
+    def verify_docker_on_target(self) -> Optional[bool]:
+        """
+        True  — данные Docker точно на целевом диске;
+        False — точно на ДРУГОМ диске (например, C:);
+        None  — определить не удалось.
+        """
+        target = self.target_root / "docker"
+        loc = self._docker_data_location()
+        # Сравнение дисков — через PureWindowsPath (не зависит от ОС запуска)
+        target_drive = PureWindowsPath(str(self.target_root)).drive.upper()
+        if loc is not None:
+            loc_str = str(loc)
+            if loc_str.startswith("\\\\?\\"):   # снимаем префикс расширенного пути
+                loc_str = loc_str[4:]
+            loc_drive = PureWindowsPath(loc_str).drive.upper()
+            log.info("  Данные Docker сейчас: %s (диск %s)", loc, loc_drive or "?")
+            return loc_drive == target_drive
+        # Вторичный признак — наличие vhdx в целевой папке или ключ настроек
+        if self._docker_location_ok(self._find_docker_settings(), target):
+            return True
+        return None
+
     # ---- Удаление исходной папки --------------------------------------- #
     def cleanup_source(self, old: Optional[Path]) -> None:
         if not (self.enabled and self.delete_source and old):
@@ -1025,6 +1087,10 @@ def parse_args() -> argparse.Namespace:
                    help="Не переносить проект/данные на целевой диск.")
     p.add_argument("--no-move-docker", action="store_true",
                    help="Не переносить расположение диска Docker Desktop.")
+    p.add_argument("--allow-docker-on-c", action="store_true",
+                   help="Разрешить подъём стека, даже если данные Docker не на целевом "
+                        "диске (по умолчанию bootstrap остановится, чтобы образы не "
+                        "утекли на C:).")
     p.add_argument("--no-move-distro", action="store_true",
                    help="Не переносить WSL-дистрибутив на целевой диск.")
     p.add_argument("--keep-source", action="store_true",
@@ -1133,6 +1199,28 @@ def main() -> int:
         if relocator:
             relocator.cleanup_source(old_source)
         return 0
+
+    # --- ПРЕФЛАЙТ: не дать образам (~10+ ГБ) утечь на C: ---
+    if (relocator and relocator.enabled and relocator.move_docker
+            and not args.allow_docker_on_c):
+        status = relocator.verify_docker_on_target()
+        drive = relocator.target_root.drive or "D:"
+        if status is False:
+            log.error("=" * 70)
+            log.error("СТОП: данные Docker всё ещё НЕ на диске %s.", drive)
+            log.error("Если продолжить, образы Docker (~10+ ГБ) будут скачаны НЕ на %s.", drive)
+            log.error("Как исправить: Docker Desktop → Settings → Resources → Advanced →")
+            log.error("  Disk image location = %s\\docker → Apply & Restart, затем повторите запуск.",
+                      relocator.target_root)
+            log.error("Либо запустите осознанно с флагом --allow-docker-on-c.")
+            log.error("=" * 70)
+            return 4
+        if status is None:
+            log.warning("Не удалось ПОДТВЕРДИТЬ расположение данных Docker. Если вы не "
+                        "переключали Disk image location на %s, образы могут уйти на C:. "
+                        "Продолжаю (отключить проверку: --allow-docker-on-c).", drive)
+        else:
+            log.info("✔ Префлайт: данные Docker на диске %s — продолжаю подъём стека.", drive)
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()
