@@ -1082,25 +1082,45 @@ def compose(*args: str, stream: bool = False, timeout: int = 1800) -> int:
     return proc.returncode
 
 
+VLLM_IMAGE = os.environ.get("JARVIS_VLLM_IMAGE", "vllm/vllm-openai:latest")
+
+
 def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
-                    retries: int = 6) -> None:
+                    retries: int = 4) -> None:
     """
     ВОЗОБНОВЛЯЕМАЯ предзагрузка весов моделей в персистентный кэш HF на целевом
-    диске (data_dir/hf). hf_transfer выключен → при обрыве докачка продолжается
-    с места обрыва, а не с нуля. Идемпотентно: уже скачанные файлы пропускаются.
-    vLLM затем находит модели в кэше и не качает повторно.
+    диске (data_dir/hf).
+
+    ВАЖНО: качаем через ОБРАЗ vLLM (в нём уже есть huggingface_hub) напрямую из
+    HuggingFace — БЕЗ pip и без обращения к PyPI (раньше pip install в одноразовом
+    python:slim падал по SSL к PyPI и блокировал загрузку). Образ vLLM всё равно
+    нужен для стека. hf_transfer выключен → при обрыве докачка продолжается с
+    места обрыва. Идемпотентно: уже скачанные файлы пропускаются.
     """
     hf_cache = _docker_path(data_dir / "hf")
     (data_dir / "hf").mkdir(parents=True, exist_ok=True)
     models = [m for m in (qwen_model, uitars_model) if m]
-    log.info("→ Предзагрузка весов моделей в кэш %s (возобновляемо, с ретраями)…", hf_cache)
+    log.info("→ Предзагрузка весов в кэш %s через образ vLLM (без pip/PyPI, resume)…", hf_cache)
+
+    # Образ vLLM большой — тянем его один раз заранее (с ретраями), потом
+    # переиспользуем и для загрузки весов, и для самого стека.
+    for attempt in range(1, retries + 1):
+        rc, _ = run_streamed(["docker", "pull", VLLM_IMAGE], timeout=7200)
+        if rc == 0:
+            break
+        log.warning("  Загрузка образа vLLM прервана (код %s, попытка %d/%d) — повтор…",
+                    rc, attempt, retries)
+        time.sleep(min(2 ** attempt, 30))
+
     for model in models:
         done = False
         for attempt in range(1, retries + 1):
-            log.info("  Модель %s — попытка %d/%d…", model, attempt, retries)
-            inner = (
-                "pip install -q --no-cache-dir 'huggingface_hub[cli]>=0.24' && "
-                f"huggingface-cli download {model}"
+            log.info("  Модель %s — попытка %d/%d (через huggingface_hub образа vLLM)…",
+                     model, attempt, retries)
+            pycode = (
+                "import sys; from huggingface_hub import snapshot_download; "
+                f"snapshot_download('{model}'); "
+                f"print('PREFETCH_DONE {model}')"
             )
             rc, _ = run_streamed([
                 "docker", "run", "--rm",
@@ -1109,7 +1129,7 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
                 "-e", f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
                 "-e", f"HUGGING_FACE_HUB_TOKEN={os.environ.get('HF_TOKEN', '')}",
                 "-v", f"{hf_cache}:/root/.cache/huggingface",
-                "python:3.11-slim", "bash", "-lc", inner,
+                "--entrypoint", "python", VLLM_IMAGE, "-c", pycode,
             ], timeout=36000)
             if rc == 0:
                 done = True
@@ -1121,8 +1141,8 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
         if done:
             log.info("  ✔ %s — в кэше на D:.", model)
         else:
-            log.warning("  ✗ %s не докачана за %d попыток — vLLM попробует докачать сам "
-                        "при старте (тоже с возобновлением).", model, retries)
+            log.warning("  ✗ %s не докачана за %d попыток — vLLM докачает сам при старте "
+                        "(тоже с возобновлением).", model, retries)
 
 
 def _compose_with_retries(action: list[str], retries: int = 4) -> int:
