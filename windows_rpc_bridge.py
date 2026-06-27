@@ -53,6 +53,25 @@ except ImportError:  # pragma: no cover
     sys.exit(1)
 
 
+def _setup_console_utf8() -> None:
+    """UTF-8 для консоли Windows (иначе кириллица — «ромбики»). До basicConfig."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:  # noqa: BLE001
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_setup_console_utf8()
+
 # --------------------------------------------------------------------------- #
 # Журналирование
 # --------------------------------------------------------------------------- #

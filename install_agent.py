@@ -48,6 +48,29 @@ except ImportError:  # pragma: no cover
     sys.exit(1)
 
 
+def _setup_console_utf8() -> None:
+    """
+    Включить UTF-8 для вывода в консоль Windows, иначе кириллица превращается
+    в «ромбики со знаком вопроса» (консоль по умолчанию использует cp866/cp1251).
+    Должно вызываться ДО создания обработчиков логирования.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)  # codepage UTF-8
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:  # noqa: BLE001
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_setup_console_utf8()
+
 # --------------------------------------------------------------------------- #
 # Журналирование (консоль + файл-транскрипт)
 # --------------------------------------------------------------------------- #
@@ -464,6 +487,27 @@ OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен п
 """
 
 
+# Узкий промпт для режима ПОЧИНКИ: модель вызывается только когда шаг сбоит.
+RECOVERY_PROMPT = """\
+Ты — инженер по устранению неполадок при развёртывании JARVIS-OS на Windows
+({target_root}). Тебе дают КОНКРЕТНЫЙ сбойный шаг и его вывод. Твоя задача —
+диагностировать причину и устранить её минимальными действиями.
+
+Типичные причины и решения:
+- нет node/npm → установи: winget install -e --id OpenJS.NodeJS.LTS (run_cmd);
+- Docker не на целевом диске (префлайт остановил) → проверь docker info / реестр,
+  при необходимости run_bootstrap с args "--allow-docker-on-c" (как крайняя мера);
+- сервис не отвечает → посмотри логи: docker "compose -f wsl/docker-compose.agents.yml logs <svc>";
+- порт занят/процесс не стартовал → проверь и перезапусти через start_background.
+
+Доступные инструменты (верни СТРОГО один JSON {{"thought","action","args"}}):
+{tools}
+
+Когда причина устранена — верни {{"action":"finish","args":{{}}}}.
+НЕ выполняй необратимых разрушительных команд (заблокированы). Только JSON.
+"""
+
+
 class InstallAgent:
     def __init__(self, lm: LMClient, tools: HostTools, *, max_steps: int = 80,
                  require_approval: bool = False, allow_catastrophic: bool = False) -> None:
@@ -473,6 +517,20 @@ class InstallAgent:
         self.require_approval = require_approval
         self.allow_catastrophic = allow_catastrophic
         self.history: list[dict] = []
+        self.dispatch = {
+            "get_state": tools.get_state,
+            "run_powershell": tools.run_powershell,
+            "run_cmd": tools.run_cmd,
+            "run_wsl": tools.run_wsl,
+            "docker": tools.docker,
+            "read_file": tools.read_file,
+            "write_file": tools.write_file,
+            "http_get": tools.http_get,
+            "start_background": tools.start_background,
+            "check_endpoints": tools.check_endpoints,
+            "open_browser": tools.open_browser,
+            "run_bootstrap": tools.run_bootstrap,
+        }
 
     # -- гейты безопасности ---------------------------------------------- #
     def _command_of(self, action: str, args: dict[str, Any]) -> str:
@@ -529,7 +587,139 @@ class InstallAgent:
             "- RPC-мост (хост): ws://localhost:8765\n"
         )
 
-    # -- основной цикл ---------------------------------------------------- #
+    # -- единичное исполнение действия (с гейтом) ------------------------ #
+    def _execute(self, action: str, args: dict[str, Any]) -> tuple[str, Optional[dict]]:
+        """Выполнить одно действие с гейтом безопасности. Вернуть (наблюдение, результат)."""
+        if action not in self.dispatch:
+            return (f"Неизвестное действие '{action}'. Доступные: "
+                    f"{', '.join(self.dispatch)}, finish."), None
+        blocked = self._gate(action, args if isinstance(args, dict) else {})
+        if blocked:
+            return blocked, None
+        try:
+            result = self.dispatch[action](**args) if isinstance(args, dict) else self.dispatch[action]()
+        except Exception as exc:  # noqa: BLE001
+            return f"Ошибка инструмента {action}: {exc}", None
+        obs = f"код={result.get('returncode')}\n{result.get('output', '')}"
+        return _truncate(obs), result
+
+    # -- управляемый режим: детерминированный план + LLM-починка --------- #
+    def run_guided(self) -> int:
+        root = self.tools.target_root
+        drive = root.drive or "D:"
+        log.info("РЕЖИМ: УПРАВЛЯЕМЫЙ — детерминированный план; модель подключается "
+                 "ТОЛЬКО для диагностики/починки сбоев (устойчив к слабым моделям).")
+
+        steps: list[tuple[str, Any, Any]] = [
+            ("Снимок состояния хоста",
+             lambda: self.tools.get_state(),
+             lambda r: True),
+            ("Развёртывание: перенос на D:, .wslconfig, GPU, веса (докачка), docker-стек",
+             lambda: self.tools.run_bootstrap(args=""),
+             lambda r: r.get("returncode") == 0),
+            ("Запуск RPC-моста на хосте (8765)",
+             lambda: self.tools.start_background(command="python windows_rpc_bridge.py",
+                                                 name="jarvis-rpc"),
+             lambda r: r.get("returncode") == 0),
+            ("Установка зависимостей дашборда (npm install)",
+             lambda: self.tools.run_cmd(command=f'cd /d "{root}\\dashboard" && npm install'),
+             lambda r: r.get("returncode") == 0),
+            ("Запуск дашборда (3000)",
+             lambda: self.tools.start_background(command="npm run dev", name="jarvis-dash",
+                                                 cwd=f"{root}\\dashboard"),
+             lambda r: r.get("returncode") == 0),
+        ]
+
+        for name, fn, ok in steps:
+            log.info("═" * 64)
+            log.info("ШАГ: %s", name)
+            res = fn()
+            log.info("  результат: код=%s", res.get("returncode"))
+            if not ok(res):
+                self._recover(name, f"код={res.get('returncode')}\n{res.get('output', '')}")
+                res = fn()  # повтор после починки
+                if not ok(res):
+                    log.warning("  «%s» не зелёный и после починки — продолжаю, проверю в финале.", name)
+
+        # Ожидание готовности всех сервисов (vLLM прогревается долго)
+        log.info("═" * 64)
+        log.info("Ожидание готовности ВСЕХ сервисов (прогрев vLLM может занять минуты)…")
+        ready = False
+        for i in range(80):
+            out = self.tools.check_endpoints().get("output", "")
+            try:
+                ready = json.loads(out).get("_ГОТОВО_ПОЛНОСТЬЮ") == "ДА"
+            except json.JSONDecodeError:
+                ready = False
+            if ready:
+                log.info("  ✔ Все сервисы готовы (проверка %d).", i + 1)
+                break
+            log.info("  ещё не готово (проверка %d/80)…", i + 1)
+            time.sleep(15)
+
+        if not ready:
+            log.warning("Не все сервисы поднялись сами — подключаю модель для финальной диагностики.")
+            self._recover("Финальная готовность всех сервисов",
+                          self.tools.check_endpoints().get("output", ""), max_recovery=20)
+            try:
+                ready = json.loads(self.tools.check_endpoints().get("output", "")).get(
+                    "_ГОТОВО_ПОЛНОСТЬЮ") == "ДА"
+            except json.JSONDecodeError:
+                ready = False
+
+        summary = ("Развёртывание завершено: все сервисы отвечают." if ready
+                   else "Развёртывание завершено частично — см. состояние сервисов в отчёте.")
+        report_path = self._finalize(summary)
+        log.info("═" * 64)
+        log.info("ИТОГ: %s", summary)
+        log.info("Отчёт: %s | Дашборд: http://localhost:3000", report_path)
+        return 0 if ready else 1
+
+    def _recover(self, step_name: str, error_obs: str, max_recovery: int = 12) -> None:
+        """Подключить модель для диагностики и починки конкретного сбоя (узкий цикл)."""
+        log.warning("Сбой шага «%s» — подключаю модель для починки (до %d действий).",
+                    step_name, max_recovery)
+        sys_p = RECOVERY_PROMPT.format(
+            target_root=self.tools.target_root,
+            tools="\n".join(f"  - {k}: {v}" for k, v in TOOLS_DOC.items() if k != "finish"),
+        )
+        messages = [
+            {"role": "system", "content": sys_p},
+            {"role": "user", "content":
+             f"Не удался шаг: «{step_name}».\nВывод:\n{_truncate(error_obs, 3000)}\n"
+             "Диагностируй и устрани причину. Верни ОДНО действие JSON; когда причина "
+             'устранена — верни {"action":"finish","args":{}}.'},
+        ]
+        last_sig, repeat = None, 0
+        for _ in range(max_recovery):
+            ao = extract_action(self.lm.chat(messages))
+            if ao is None:
+                messages.append({"role": "user", "content":
+                                 'Верни СТРОГО один JSON {thought, action, args}.'})
+                continue
+            action = str(ao.get("action", ""))
+            args = ao.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"command": args}
+            if action == "finish":
+                log.info("  Модель сообщила: причина устранена.")
+                return
+            sig = json.dumps([action, args], ensure_ascii=False, sort_keys=True)
+            repeat = repeat + 1 if sig == last_sig else 0
+            last_sig = sig
+            if repeat >= 3:
+                log.warning("  Модель зациклилась в починке — прекращаю.")
+                return
+            log.info("  ПОЧИНКА → %s args=%s", action, _truncate(json.dumps(args, ensure_ascii=False), 200))
+            obs, _ = self._execute(action, args)
+            messages.append({"role": "assistant", "content": json.dumps(ao, ensure_ascii=False)})
+            messages.append({"role": "user", "content": f"НАБЛЮДЕНИЕ:\n{obs}"})
+        log.warning("  Лимит действий починки исчерпан для «%s».", step_name)
+
+    # -- свободный режим (полный ReAct-цикл; для умных моделей) ---------- #
     def run(self, goal: str) -> int:
         sys_prompt = SYSTEM_PROMPT.format(
             target_root=self.tools.target_root,
@@ -538,20 +728,7 @@ class InstallAgent:
         )
         messages = [{"role": "system", "content": sys_prompt},
                     {"role": "user", "content": goal}]
-        dispatch = {
-            "get_state": self.tools.get_state,
-            "run_powershell": self.tools.run_powershell,
-            "run_cmd": self.tools.run_cmd,
-            "run_wsl": self.tools.run_wsl,
-            "docker": self.tools.docker,
-            "read_file": self.tools.read_file,
-            "write_file": self.tools.write_file,
-            "http_get": self.tools.http_get,
-            "start_background": self.tools.start_background,
-            "check_endpoints": self.tools.check_endpoints,
-            "open_browser": self.tools.open_browser,
-            "run_bootstrap": self.tools.run_bootstrap,
-        }
+        dispatch = self.dispatch
         last_signature = None
         repeat = 0
 
@@ -640,6 +817,10 @@ def parse_args() -> argparse.Namespace:
                         "(по умолчанию агент действует сам).")
     p.add_argument("--dry-run", action="store_true",
                    help="Не исполнять команды реально — только показывать намерения.")
+    p.add_argument("--free-agent", action="store_true",
+                   help="Свободный ReAct-режим (модель решает каждый шаг). По умолчанию — "
+                        "УПРАВЛЯЕМЫЙ режим: детерминированный план, модель только чинит сбои "
+                        "(устойчив к слабым моделям).")
     p.add_argument("--goal", default="", help="Доп. цель/уточнение для агента.")
     return p.parse_args()
 
@@ -661,11 +842,12 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    mode = "СВОБОДНЫЙ (ReAct)" if args.free_agent else "УПРАВЛЯЕМЫЙ (план + LLM-починка)"
     log.info("=" * 70)
     log.info("JARVIS-OS · ЕДИНАЯ автономная установка на ОДНОЙ локальной модели")
-    log.info("Режим: %s | подтверждения: %s | max-шагов: %d",
-             "DRY-RUN" if args.dry_run else "БОЕВОЙ",
-             "да" if args.require_approval else "нет (полная автономия)", args.max_steps)
+    log.info("Режим: %s | %s | подтверждения: %s",
+             mode, "DRY-RUN" if args.dry_run else "БОЕВОЙ",
+             "да" if args.require_approval else "нет (полная автономия)")
     log.info("Вся установка — одной моделью. bootstrap НЕ грузит вторую модель (защита от OOM).")
     log.info("Катастрофические команды (формат/очистка диска) — ВСЕГДА блокируются.")
     log.info("=" * 70)
@@ -675,15 +857,15 @@ def main() -> int:
     agent = InstallAgent(lm, tools, max_steps=args.max_steps,
                          require_approval=args.require_approval)
 
-    goal = (f"Разверни JARVIS-OS ПОЛНОСТЬЮ и автономно на диске {target_root}. "
-            f"Начни с get_state. Используй run_bootstrap для docker-стека, затем "
-            f"подними RPC-мост (8765) и дашборд (3000) через start_background. "
-            f"Цель достигнута, когда check_endpoints даёт _ГОТОВО_ПОЛНОСТЬЮ=ДА "
-            f"(backend 8000, vLLM 8001/8002, audio 8003, dashboard 3000, rpc_bridge 8765). "
-            f"Весь тяжеляк — на {target_root.drive or 'D:'}. {args.goal}").strip()
-
     try:
-        return agent.run(goal)
+        if args.free_agent:
+            goal = (f"Разверни JARVIS-OS ПОЛНОСТЬЮ и автономно на диске {target_root}. "
+                    f"Начни с get_state. Используй run_bootstrap для docker-стека, затем "
+                    f"подними RPC-мост (8765) и дашборд (3000) через start_background. "
+                    f"Цель — check_endpoints даёт _ГОТОВО_ПОЛНОСТЬЮ=ДА. "
+                    f"Весь тяжеляк — на {target_root.drive or 'D:'}. {args.goal}").strip()
+            return agent.run(goal)
+        return agent.run_guided()
     except KeyboardInterrupt:
         log.warning("Прервано пользователем (Ctrl+C).")
         return 130
