@@ -1040,13 +1040,72 @@ def compose(*args: str, stream: bool = False, timeout: int = 1800) -> int:
     return proc.returncode
 
 
+def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
+                    retries: int = 6) -> None:
+    """
+    ВОЗОБНОВЛЯЕМАЯ предзагрузка весов моделей в персистентный кэш HF на целевом
+    диске (data_dir/hf). hf_transfer выключен → при обрыве докачка продолжается
+    с места обрыва, а не с нуля. Идемпотентно: уже скачанные файлы пропускаются.
+    vLLM затем находит модели в кэше и не качает повторно.
+    """
+    hf_cache = _docker_path(data_dir / "hf")
+    (data_dir / "hf").mkdir(parents=True, exist_ok=True)
+    models = [m for m in (qwen_model, uitars_model) if m]
+    log.info("→ Предзагрузка весов моделей в кэш %s (возобновляемо, с ретраями)…", hf_cache)
+    for model in models:
+        done = False
+        for attempt in range(1, retries + 1):
+            log.info("  Модель %s — попытка %d/%d…", model, attempt, retries)
+            inner = (
+                "pip install -q --no-cache-dir 'huggingface_hub[cli]>=0.24' && "
+                f"huggingface-cli download {model}"
+            )
+            rc, _ = run_streamed([
+                "docker", "run", "--rm",
+                "-e", "HF_HUB_ENABLE_HF_TRANSFER=0",
+                "-e", "HF_HUB_DOWNLOAD_TIMEOUT=120",
+                "-e", f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
+                "-e", f"HUGGING_FACE_HUB_TOKEN={os.environ.get('HF_TOKEN', '')}",
+                "-v", f"{hf_cache}:/root/.cache/huggingface",
+                "python:3.11-slim", "bash", "-lc", inner,
+            ], timeout=36000)
+            if rc == 0:
+                done = True
+                break
+            wait = min(2 ** attempt, 30)
+            log.warning("  Загрузка %s прервана (код %s). Возобновлю через %d с "
+                        "(уже скачанное не теряется)…", model, rc, wait)
+            time.sleep(wait)
+        if done:
+            log.info("  ✔ %s — в кэше на D:.", model)
+        else:
+            log.warning("  ✗ %s не докачана за %d попыток — vLLM попробует докачать сам "
+                        "при старте (тоже с возобновлением).", model, retries)
+
+
+def _compose_with_retries(action: list[str], retries: int = 4) -> int:
+    """Выполнить compose-операцию с ретраями (для устойчивости к обрывам сети)."""
+    rc = 0
+    for attempt in range(1, retries + 1):
+        rc = compose(*action, stream=True)
+        if rc == 0:
+            return 0
+        wait = min(2 ** attempt, 30)
+        log.warning("  docker compose %s — код %s (попытка %d/%d). Повтор через %d с "
+                    "(готовые слои Docker не качаются заново)…",
+                    " ".join(action), rc, attempt, retries, wait)
+        time.sleep(wait)
+    return rc
+
+
 def bring_up_stack() -> None:
     """Автоматически поднять весь контейнерный стек через Docker Desktop."""
-    log.info("→ Сборка/загрузка образов (docker compose build/pull)…")
-    compose("pull", "--ignore-pull-failures", stream=True)
-    compose("build", stream=True)
+    log.info("→ Загрузка образов (docker compose pull) с ретраями…")
+    _compose_with_retries(["pull", "--ignore-pull-failures"])
+    log.info("→ Сборка образов (docker compose build) с ретраями…")
+    _compose_with_retries(["build"])
     log.info("→ Запуск стека (docker compose up -d)…")
-    compose("up", "-d", "--remove-orphans", stream=True)
+    _compose_with_retries(["up", "-d", "--remove-orphans"])
 
     log.info("→ Ожидание готовности сервисов…")
     for name, url in HEALTH_ENDPOINTS.items():
@@ -1102,6 +1161,8 @@ def parse_args() -> argparse.Namespace:
                    help="Не устанавливать дистрибутив WSL автоматически.")
     p.add_argument("--skip-stack", action="store_true",
                    help="Только подготовка (без подъёма контейнеров).")
+    p.add_argument("--skip-prefetch", action="store_true",
+                   help="Не предзагружать веса моделей (vLLM скачает сам при старте).")
     p.add_argument("--skip-gpu-check", action="store_true",
                    help="Пропустить тест GPU в контейнере (если он долгий/не нужен).")
     p.add_argument("--skip-checks", action="store_true")
@@ -1221,6 +1282,10 @@ def main() -> int:
                         "Продолжаю (отключить проверку: --allow-docker-on-c).", drive)
         else:
             log.info("✔ Префлайт: данные Docker на диске %s — продолжаю подъём стека.", drive)
+
+    # --- Возобновляемая предзагрузка весов моделей (в кэш на D:) ---
+    if not args.skip_prefetch:
+        prefetch_models(data_dir, args.qwen_model, args.uitars_model)
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()

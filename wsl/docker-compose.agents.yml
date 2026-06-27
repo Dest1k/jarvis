@@ -35,6 +35,10 @@ x-vllm-base: &vllm-base
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
     - NVIDIA_VISIBLE_DEVICES=0
+    # hf_transfer НЕ умеет докачку: выключаем, чтобы при обрыве загрузка весов
+    # ВОЗОБНОВЛЯЛАСЬ, а не качалась заново. Кеш персистентен (bind-mount на D:).
+    - HF_HUB_ENABLE_HF_TRANSFER=0
+    - HF_HUB_DOWNLOAD_TIMEOUT=120
   <<: *gpu-all
 
 services:
@@ -108,6 +112,9 @@ services:
       - WHISPER_COMPUTE_TYPE=int8_float16
       - KOKORO_VOICE=af_sky
       - NVIDIA_VISIBLE_DEVICES=0
+      # Возобновляемая загрузка весов (Whisper/Kokoro) — см. комментарий выше
+      - HF_HUB_ENABLE_HF_TRANSFER=0
+      - HF_HUB_DOWNLOAD_TIMEOUT=120
     volumes:
       - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
     ports:
