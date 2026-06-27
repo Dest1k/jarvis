@@ -34,6 +34,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -262,6 +263,81 @@ def _docker_path(p: Path) -> str:
     return str(p).replace("\\", "/")
 
 
+# Каталоги, которые НЕ переносим (сборочные артефакты, кэши, данные)
+RELOCATE_IGNORE_DIRS = {"node_modules", ".next", "out", "__pycache__",
+                        "data", ".pytest_cache", ".mypy_cache"}
+
+
+def _make_writable(path: str) -> None:
+    """Снять атрибут «только чтение» (git помечает pack-файлы read-only)."""
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+
+
+def _force_rmtree(path: Path) -> None:
+    """
+    Рекурсивно удалить каталог, корректно обрабатывая read-only файлы
+    (иначе git pack-файлы на Windows вызывают PermissionError).
+    Совместимо с Python ≥3.12 (onexc) и старее (onerror).
+    """
+    def _handler(func, p, _exc):  # noqa: ANN001
+        _make_writable(p)
+        try:
+            func(p)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_handler)
+    else:  # pragma: no cover
+        shutil.rmtree(path, onerror=lambda f, p, e: _handler(f, p, e))
+
+
+def robust_copytree(src: Path, dst: Path, *, overwrite: bool = False
+                    ) -> tuple[int, int, list[tuple[str, str]]]:
+    """
+    Надёжно скопировать дерево src → dst:
+      • пропускает сборочные каталоги (RELOCATE_IGNORE_DIRS) и *.tar;
+      • по умолчанию НЕ ТРОГАЕТ уже существующие на целевом диске файлы
+        (overwrite=False) — что и требуется: «если что-то уже живёт на D:, не
+        трогаем». Это заодно исключает PermissionError на read-only git-файлах;
+      • при overwrite=True снимает read-only и перезаписывает;
+      • ошибки отдельных файлов НЕ фатальны — собираются и возвращаются.
+    Возвращает (скопировано, пропущено_существующих, список ошибок).
+    """
+    copied = 0
+    skipped = 0
+    errors: list[tuple[str, str]] = []
+    for root, dirs, files in os.walk(src):
+        # Не заходим в игнорируемые подкаталоги
+        dirs[:] = [d for d in dirs if d not in RELOCATE_IGNORE_DIRS]
+        rel = os.path.relpath(root, src)
+        target_dir = dst if rel == "." else dst / rel
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            errors.append((str(target_dir), str(exc)))
+            continue
+        for name in files:
+            if name.endswith(".tar"):
+                continue
+            s = Path(root) / name
+            t = target_dir / name
+            if t.exists():
+                if not overwrite:
+                    skipped += 1          # уже живёт на D: — не трогаем
+                    continue
+                _make_writable(str(t))
+            try:
+                shutil.copy2(s, t)
+                copied += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append((str(s), str(exc)))
+    return copied, skipped, errors
+
+
 class RelocationManager:
     """
     Полный перенос на целевой диск (по умолчанию D:\\jarvis):
@@ -282,11 +358,15 @@ class RelocationManager:
                         "com.docker.service")
 
     def __init__(self, target_root: Path, *, move_docker: bool,
-                 move_distro: bool, delete_source: bool) -> None:
+                 move_distro: bool, delete_source: bool,
+                 overwrite: bool = False) -> None:
         self.target_root = target_root
         self.move_docker = move_docker
         self.move_distro = move_distro
         self.delete_source = delete_source
+        # overwrite=False → «если что-то уже живёт на D:, не трогаем»
+        self.overwrite = overwrite
+        self.copy_had_errors = False
         # Перенос имеет смысл только на Windows и при наличии целевого диска
         self.enabled = (platform.system() == "Windows"
                         and os.path.exists((target_root.drive or "C:") + "\\"))
@@ -305,12 +385,17 @@ class RelocationManager:
             return None
         log.info("→ Перенос файлов проекта: %s → %s", src, self.target_root)
         self.target_root.mkdir(parents=True, exist_ok=True)
-        ignore = shutil.ignore_patterns("node_modules", ".next", "out",
-                                        "__pycache__", "data", "*.tar")
-        shutil.copytree(src, self.target_root, dirs_exist_ok=True, ignore=ignore)
+        # Не перезаписываем то, что уже есть на D: (overwrite=self.overwrite).
+        copied, skipped, errors = robust_copytree(src, self.target_root, overwrite=self.overwrite)
+        log.info("  Скопировано новых файлов: %d; пропущено уже существующих на D:: %d",
+                 copied, skipped)
+        if errors:
+            self.copy_had_errors = True
+            log.warning("  Пропущено по ошибке %d файл(ов) (не критично). Пример: %s — %s",
+                        len(errors), errors[0][0], errors[0][1])
         os.chdir(self.target_root)
         set_repo_root(self.target_root)
-        log.info("  Проект скопирован. Рабочая директория переключена на %s", self.target_root)
+        log.info("  Рабочая директория переключена на %s", self.target_root)
         return src
 
     def ensure_data_dirs(self) -> Path:
@@ -323,7 +408,41 @@ class RelocationManager:
         log.info("  Каталог тяжёлых данных: %s", data)
         return data
 
-    # ---- WSL-дистрибутив ----------------------------------------------- #
+    # ---- Общий перенос WSL-распределения ------------------------------- #
+    @staticmethod
+    def _wsl_distro_exists(name: str) -> bool:
+        _, out, _ = run_wsl_raw(["--list", "--quiet"])
+        names = [ln.strip().lower() for ln in out.replace("\r", "").split("\n") if ln.strip()]
+        return name.lower() in names
+
+    def _move_distro(self, name: str, dest_dir: Path, tar: Path) -> bool:
+        """
+        Перенести произвольное WSL-распределение в dest_dir на целевом диске
+        (export → unregister → import). Перед unregister делается архив-резерв.
+        """
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        run_wsl_raw(["--shutdown"])
+        rc, out, err = run_wsl_raw(["--export", name, str(tar)], timeout=7200)
+        if rc != 0 or not tar.exists() or tar.stat().st_size < 1024:
+            log.error("  Экспорт '%s' не удался (%s). Перенос отменён, данные целы.",
+                      name, (out + err).strip()[:160])
+            return False
+        log.info("  Экспортирован '%s': %.0f МБ → %s", name, tar.stat().st_size / 1e6, tar)
+        rc, out, err = run_wsl_raw(["--unregister", name], timeout=600)
+        if rc != 0:
+            log.error("  Не удалось снять регистрацию '%s' (%s). Архив-резерв: %s",
+                      name, (out + err).strip()[:160], tar)
+            return False
+        rc, out, err = run_wsl_raw(
+            ["--import", name, str(dest_dir), str(tar), "--version", "2"], timeout=7200)
+        if rc != 0:
+            log.error("  Импорт '%s' на D: не удался (%s). Восстанавливаю из архива…",
+                      name, (out + err).strip()[:160])
+            run_wsl_raw(["--import", name, str(dest_dir), str(tar), "--version", "2"], timeout=7200)
+            return False
+        return True
+
+    # ---- WSL-дистрибутив (Ubuntu) -------------------------------------- #
     def relocate_distro(self, distro: str) -> None:
         if not (self.enabled and self.move_distro and distro):
             return
@@ -331,39 +450,16 @@ class RelocationManager:
         if marker.exists():
             log.info("WSL-дистрибутив уже перенесён ранее — пропускаю.")
             return
-        dest_dir = self.target_root / "wsl" / "distro"
-        tar = self.target_root / "wsl" / f"{distro}.tar"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         log.info("→ Перенос WSL-дистрибутива '%s' на D: (export → unregister → import). "
                  "Это может занять время…", distro)
-
-        run_wsl_raw(["--shutdown"])
-        rc, out, err = run_wsl_raw(["--export", distro, str(tar)], timeout=3600)
-        if rc != 0 or not tar.exists() or tar.stat().st_size < 1024:
-            log.error("  Экспорт не удался (%s). Перенос дистрибутива отменён, дистрибутив цел.",
-                      (out + err).strip()[:200])
+        dest_dir = self.target_root / "wsl" / "distro"
+        tar = self.target_root / "wsl" / f"{distro}.tar"
+        if not self._move_distro(distro, dest_dir, tar):
             return
-        log.info("  Экспортирован архив: %s (%.0f МБ)", tar, tar.stat().st_size / 1e6)
-
-        rc, out, err = run_wsl_raw(["--unregister", distro], timeout=600)
-        if rc != 0:
-            log.error("  Снятие регистрации не удалось (%s). Архив-резерв: %s",
-                      (out + err).strip()[:160], tar)
-            return
-
-        rc, out, err = run_wsl_raw(
-            ["--import", distro, str(dest_dir), str(tar), "--version", "2"], timeout=3600)
-        if rc != 0:
-            log.error("  Импорт на D: не удался (%s). Восстанавливаю из архива в то же место…",
-                      (out + err).strip()[:160])
-            run_wsl_raw(["--import", distro, str(dest_dir), str(tar), "--version", "2"], timeout=3600)
-            return
-
-        rc, out, err = run_wsl_raw(["-d", distro, "--", "echo", "ok"])
+        _, out, _ = run_wsl_raw(["-d", distro, "--", "echo", "ok"])
         if "ok" in out:
             marker.write_text("ok", encoding="utf-8")
-            log.info("  Дистрибутив '%s' перенесён на D: и работает. Архив-резерв: %s",
-                     distro, tar)
+            log.info("  Дистрибутив '%s' перенесён на D: и работает. Архив-резерв: %s", distro, tar)
         else:
             log.warning("  Перенесённый дистрибутив не отвечает. Архив-резерв сохранён: %s", tar)
 
@@ -390,52 +486,101 @@ class RelocationManager:
                 return
         log.warning("  Не найден исполняемый файл Docker Desktop — запустите его вручную.")
 
-    def _wait_docker_ready(self, retries: int = 24) -> bool:
-        for i in range(retries):
+    def _wait_docker_ready(self, retries: int = 30) -> bool:
+        for _ in range(retries):
             res = run(["docker", "version", "--format", "{{.Server.Version}}"], check=False)
             if res.returncode == 0 and (res.stdout or "").strip():
                 return True
             time.sleep(10)
         return False
 
+    def _set_docker_data_folder(self, settings: Path, target: Path) -> bool:
+        """Прописать новое расположение disk image в настройки Docker (с бэкапом)."""
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("  Не удалось прочитать настройки Docker (%s).", exc)
+            return False
+        backup = settings.with_name(settings.name + f".bak.{int(time.time())}")
+        shutil.copy2(settings, backup)
+        log.info("  Бэкап настроек Docker: %s", backup)
+        # Разные версии Docker Desktop используют разный регистр ключа — пишем оба
+        data["dataFolder"] = _docker_path(target)
+        data["DataFolder"] = _docker_path(target)
+        settings.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("  В настройках задан disk image location: %s", target)
+        return True
+
+    def _docker_location_ok(self, settings: Optional[Path], target: Path) -> bool:
+        """Подтвердить, что Docker реально использует целевой диск."""
+        if settings and settings.exists():
+            try:
+                data = json.loads(settings.read_text(encoding="utf-8"))
+                cur = str(data.get("dataFolder") or data.get("DataFolder") or "")
+                if cur and Path(cur).resolve() == target.resolve():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        # Признак фактического переноса: в целевой папке появился *.vhdx
+        try:
+            for sub in ("docker-desktop-data", "docker-desktop", "wsl", "data"):
+                p = target / sub
+                if p.exists() and any(p.rglob("*.vhdx")):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     def relocate_docker(self) -> None:
         if not (self.enabled and self.move_docker):
             return
         target = self.target_root / "docker"
-        settings = self._find_docker_settings()
-        if settings is None:
-            log.warning("Не найден файл настроек Docker Desktop — перенос диска Docker пропущен.")
-            return
-        try:
-            data = json.loads(settings.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось прочитать настройки Docker (%s) — пропускаю.", exc)
-            return
-
-        current = str(data.get("dataFolder") or data.get("DataFolder") or "")
-        if current and Path(current).resolve() == target.resolve():
-            log.info("Диск Docker Desktop уже на D: (%s) — пропускаю.", current)
-            return
-
-        log.info("→ Перенос диска Docker Desktop на %s. Docker будет перезапущен…", target)
         target.mkdir(parents=True, exist_ok=True)
-        backup = settings.with_name(settings.name + f".bak.{int(time.time())}")
-        shutil.copy2(settings, backup)
-        log.info("  Резервная копия настроек Docker: %s", backup)
+        settings = self._find_docker_settings()
 
+        if self._docker_location_ok(settings, target):
+            log.info("Диск Docker Desktop уже на D: — пропускаю.")
+            return
+
+        log.info("→ Перенос Docker Desktop на %s. Docker будет остановлен и перезапущен…", target)
+        if settings is None:
+            log.warning("  Файл настроек Docker Desktop не найден — полагаюсь на перенос "
+                        "распределения данных docker-desktop-data.")
+
+        # 1) Остановить Docker полностью
         self._stop_docker()
-        # Пишем расположение в обоих вариантах регистра — для совместимости версий
-        data["dataFolder"] = _docker_path(target)
-        data["DataFolder"] = _docker_path(target)
-        settings.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        log.info("  Расположение disk image обновлено в %s", settings.name)
 
-        self._start_docker()
-        if self._wait_docker_ready():
-            log.info("  Docker Desktop поднялся. Новые образы и данные пойдут на D:.")
+        # 2) Прописать disk image location в настройках (консолидированная схема Docker)
+        if settings is not None:
+            self._set_docker_data_folder(settings, target)
+
+        # 3) ФАКТИЧЕСКИЙ перенос распределения образов docker-desktop-data
+        #    (классическая схема WSL2-бэкенда). Это гарантированно кладёт VHDX
+        #    с образами на D:.
+        if self._wsl_distro_exists("docker-desktop-data"):
+            log.info("  Обнаружено распределение docker-desktop-data — переношу его на D:…")
+            dest = target / "docker-desktop-data"
+            tar = target / "docker-desktop-data.tar"
+            if self._move_distro("docker-desktop-data", dest, tar):
+                log.info("  ✔ docker-desktop-data (образы/тома) перенесён в %s", dest)
         else:
-            log.warning("  Docker Desktop не ответил вовремя. Проверьте Settings → Resources → "
-                        "Advanced → Disk image location = %s и перезапустите Docker.", target)
+            log.info("  docker-desktop-data не найден (новая консолидированная схема) — "
+                     "перенос обеспечивается настройкой disk image location.")
+
+        # 4) Запуск Docker и проверка
+        self._start_docker()
+        if not self._wait_docker_ready():
+            log.warning("  Docker Desktop не ответил вовремя после переноса.")
+
+        # 5) Верификация результата
+        if self._docker_location_ok(settings, target):
+            log.info("  ✔ ГОТОВО: данные/образы Docker Desktop теперь на D: (%s).", target)
+        else:
+            log.warning("  ✗ Автоматически ПОДТВЕРДИТЬ перенос Docker на D: не удалось "
+                        "(ваша версия Docker Desktop хранит путь под другим ключом). "
+                        "Доделайте в GUI: Docker Desktop → Settings → Resources → Advanced → "
+                        "Disk image location = %s → Apply & Restart. После этого образы будут на D:.",
+                        target)
 
     # ---- Удаление исходной папки --------------------------------------- #
     def cleanup_source(self, old: Optional[Path]) -> None:
@@ -443,8 +588,12 @@ class RelocationManager:
             return
         if old.resolve() == self.target_root.resolve():
             return
+        if self.copy_had_errors:
+            log.warning("Исходная папка %s НЕ удалена: при копировании были ошибки — "
+                        "сохраняю оригинал во избежание потери данных.", old)
+            return
         try:
-            shutil.rmtree(old)
+            _force_rmtree(old)  # корректно удаляет read-only файлы git
             log.info("Исходная папка проекта удалена: %s", old)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось удалить исходную папку %s (%s). Удалите вручную позже.", old, exc)
@@ -880,6 +1029,9 @@ def parse_args() -> argparse.Namespace:
                    help="Не переносить WSL-дистрибутив на целевой диск.")
     p.add_argument("--keep-source", action="store_true",
                    help="Не удалять исходную папку проекта после переноса.")
+    p.add_argument("--overwrite-existing", action="store_true",
+                   help="Перезаписывать файлы, уже существующие на целевом диске "
+                        "(по умолчанию существующее на D: не трогается).")
     p.add_argument("--no-auto-install", action="store_true",
                    help="Не устанавливать дистрибутив WSL автоматически.")
     p.add_argument("--skip-stack", action="store_true",
@@ -905,9 +1057,15 @@ def main() -> int:
             move_docker=not args.no_move_docker,
             move_distro=not args.no_move_distro,
             delete_source=not args.keep_source,
+            overwrite=args.overwrite_existing,
         )
-        old_source = relocator.relocate_project()
-        relocator.ensure_data_dirs()
+        try:
+            old_source = relocator.relocate_project()
+            relocator.ensure_data_dirs()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Перенос файлов проекта прерван ошибкой (%s). "
+                        "Продолжаю работу на текущем расположении.", exc)
+            old_source = None
 
     if not args.skip_checks:
         checker = HostChecker()
@@ -925,8 +1083,14 @@ def main() -> int:
 
     # --- ФАЗА переноса тяжёлых частей на D: (WSL-дистрибутив + диск Docker) ---
     if relocator:
-        relocator.relocate_distro(distro or "")
-        relocator.relocate_docker()
+        try:
+            relocator.relocate_distro(distro or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Перенос WSL-дистрибутива пропущен (%s).", exc)
+        try:
+            relocator.relocate_docker()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Перенос диска Docker Desktop пропущен (%s).", exc)
 
     # --- Динамический профиль через LM Studio ---
     host_facts = {
