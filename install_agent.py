@@ -222,6 +222,34 @@ class HostTools:
         results["_ГОТОВО_ПОЛНОСТЬЮ"] = "ДА" if all_ok else "НЕТ"
         return {"returncode": 0, "output": json.dumps(results, ensure_ascii=False, indent=2)}
 
+    def open_browser(self, url: str = "http://localhost:3000", **_: Any) -> dict[str, Any]:
+        """Открыть URL в браузере по умолчанию (обычно — дашборд)."""
+        if self.dry_run:
+            return {"returncode": 0, "output": f"[dry-run] открыть в браузере: {url}"}
+        try:
+            subprocess.Popen(f'start "" "{url}"', shell=True)
+            return {"returncode": 0, "output": f"Открыт браузер: {url}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"returncode": 1, "output": f"Не открыть браузер: {exc}"}
+
+    def log_dir(self) -> Path:
+        base = self.target_root if (self.target_root.drive
+                                    and os.path.exists(self.target_root.drive + "\\")) else self.repo_dir
+        d = base / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def write_report(self, content: str = "", **_: Any) -> dict[str, Any]:
+        """Записать отчёт о развёртывании в <root>/logs/."""
+        if self.dry_run:
+            return {"returncode": 0, "output": "[dry-run] отчёт не записан"}
+        try:
+            p = self.log_dir() / f"deployment_report_{int(time.time())}.md"
+            p.write_text(content, encoding="utf-8")
+            return {"returncode": 0, "output": str(p)}
+        except Exception as exc:  # noqa: BLE001
+            return {"returncode": 1, "output": f"Не записать отчёт: {exc}"}
+
     def run_bootstrap(self, args: str = "", **_: Any) -> dict[str, Any]:
         """
         Запустить проверенный bootstrap_installer.py (целиком или частями).
@@ -302,6 +330,7 @@ TOOLS_DOC = {
                         "dev-сервер дашборда. args: {command, name?, cwd?}",
     "check_endpoints": "Проверить ВСЕ сервисы целевой архитектуры разом "
                        "(8000-8003 + dashboard 3000 + rpc_bridge 8765). args: {}",
+    "open_browser": "Открыть URL в браузере (обычно дашборд). args: {url}",
     "run_bootstrap": "Запустить проверенный bootstrap_installer.py (детерминированный, "
                      "НЕ загружает вторую модель). args: {args}  (например '--skip-gpu-check' "
                      "или '--skip-stack'). НЕ передавай --use-lmstudio/--model/--lmstudio.",
@@ -467,6 +496,36 @@ class InstallAgent:
             return "ОТКАЗАНО оператором (деструктивная команда не подтверждена)."
         return None
 
+    # -- финализация: отчёт + открыть дашборд ---------------------------- #
+    def _finalize(self, summary: str) -> str:
+        """Снять финальный статус, записать отчёт, открыть дашборд в браузере."""
+        final = self.tools.check_endpoints()
+        report = self._report_md(summary, final.get("output", ""))
+        written = self.tools.write_report(content=report)
+        self.tools.open_browser(url="http://localhost:3000")
+        return written.get("output", "(отчёт не записан)")
+
+    def _report_md(self, summary: str, endpoints_json: str) -> str:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        return (
+            "# JARVIS-OS — отчёт о развёртывании\n\n"
+            f"- Дата: {ts}\n"
+            f"- Хост: {platform.platform()}\n"
+            f"- Модель установки (единственная): {self.lm.model}\n"
+            f"- Корень: {self.tools.target_root}\n\n"
+            "## Итог агента\n"
+            f"{summary or '(без сводки)'}\n\n"
+            "## Состояние сервисов\n"
+            f"```json\n{endpoints_json}\n```\n\n"
+            "## Точки доступа\n"
+            "- Дашборд (Command Center): http://localhost:3000\n"
+            "- Ядро (FastAPI): http://localhost:8000\n"
+            "- vLLM Qwen-Coder: http://localhost:8001/v1\n"
+            "- vLLM UI-TARS: http://localhost:8002/v1\n"
+            "- Аудио (ASR/TTS): http://localhost:8003\n"
+            "- RPC-мост (хост): ws://localhost:8765\n"
+        )
+
     # -- основной цикл ---------------------------------------------------- #
     def run(self, goal: str) -> int:
         sys_prompt = SYSTEM_PROMPT.format(
@@ -487,6 +546,7 @@ class InstallAgent:
             "http_get": self.tools.http_get,
             "start_background": self.tools.start_background,
             "check_endpoints": self.tools.check_endpoints,
+            "open_browser": self.tools.open_browser,
             "run_bootstrap": self.tools.run_bootstrap,
         }
         last_signature = None
@@ -518,7 +578,11 @@ class InstallAgent:
                      _truncate(json.dumps(args, ensure_ascii=False), 300))
 
             if action == "finish":
-                log.info("✔ Агент завершил работу: %s", args.get("summary", ""))
+                summary = str(args.get("summary", ""))
+                log.info("✔ Агент завершил работу: %s", summary)
+                report_path = self._finalize(summary)   # отчёт + открыть дашборд
+                log.info("Отчёт о развёртывании: %s", report_path)
+                log.info("Дашборд открыт в браузере: http://localhost:3000")
                 return 0
 
             if action not in dispatch:

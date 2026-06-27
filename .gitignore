@@ -28,5 +28,7 @@ npm-debug.log*
 
 # Логи и временные файлы
 *.log
+logs/
 runtime/
 sandbox/
+deployment_report_*.md

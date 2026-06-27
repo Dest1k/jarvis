@@ -259,6 +259,11 @@ python install_agent.py --lmstudio http://localhost:1234/v1 --target-root D:\jar
 **Критерий готовности:** `check_endpoints` → `_ГОТОВО_ПОЛНОСТЬЮ=ДА` (все порты
 выше отвечают). Только тогда агент вызывает `finish`.
 
+**Финал.** При завершении агент автоматически: снимает итоговый статус всех
+сервисов, пишет отчёт `D:\jarvis\logs\deployment_report_*.md` (дата, модель,
+состояние сервисов, точки доступа) и **открывает дашборд** `http://localhost:3000`
+в браузере.
+
 **Инструменты агента:** `get_state`, `run_powershell`, `run_cmd`, `run_wsl`,
 `docker`, `read_file`, `write_file`, `http_get`, `start_background` (хостовые
 демоны: RPC-мост, dev-сервер дашборда), `check_endpoints` (проверка всех
