@@ -126,6 +126,29 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = True,
                           encoding="utf-8", errors="replace", timeout=timeout)
 
 
+def run_streamed(cmd: list[str], *, timeout: int = 600,
+                 prefix: str = "    ") -> tuple[int, str]:
+    """
+    Запустить команду, СТРИМЯ её вывод в реальном времени (чтобы долгие
+    операции вроде docker pull не выглядели зависшими). Возвращает (код, текст).
+    """
+    log.debug("Выполняю (поток): %s", " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+    lines: list[str] = []
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(prefix + line)
+            sys.stdout.flush()
+            lines.append(line)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        log.warning("Команда превысила тайм-аут (%d с) и была остановлена.", timeout)
+    return proc.returncode or 0, "".join(lines)
+
+
 def decode_wsl(raw: bytes) -> str:
     """
     Корректно декодировать вывод самого wsl.exe.
@@ -286,11 +309,44 @@ class HostChecker:
 class LMStudioClient:
     """OpenAI-совместимый клиент LM Studio с обходом 400 у gemma/QAT-моделей."""
 
-    # Предпочтительные модели для генерации конфигурации (по убыванию)
+    # Предпочтительные модели для генерации конфигурации (по убыванию).
+    # Gemma — первой, чтобы не заставлять LM Studio переключать уже загруженную
+    # пользователем модель. С json_schema и большим max_tokens reasoning-модель
+    # (gemma-4-*-qat) корректно успевает выдать JSON после рассуждений.
+    # Если gemma недоступна — берём instruct-модели без «думанья».
     PREFERRED = ("gemma-4-31b-it-qat", "gemma-4-26b-a4b-it-qat",
                  "qwen3-coder-30b-a3b-instruct", "devstral-small-2-24b-instruct-2512")
 
-    def __init__(self, base_url: str, model: str = "", timeout: int = 120) -> None:
+    # JSON-схема профиля. ВНИМАНИЕ: LM Studio поддерживает только
+    # response_format.type ∈ {"json_schema","text"} (а НЕ "json_object").
+    PROFILE_SCHEMA: dict[str, Any] = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "deployment_profile",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "wsl_memory_gb": {"type": "integer"},
+                    "wsl_processors": {"type": "integer"},
+                    "wsl_swap_gb": {"type": "integer"},
+                    "qwen_gpu_util": {"type": "number"},
+                    "qwen_max_model_len": {"type": "integer"},
+                    "uitars_gpu_util": {"type": "number"},
+                    "notes": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["wsl_memory_gb", "wsl_processors", "wsl_swap_gb",
+                             "qwen_gpu_util", "qwen_max_model_len",
+                             "uitars_gpu_util", "notes"],
+            },
+        },
+    }
+
+    # Большой лимит токенов: reasoning-модели (gemma-qat) тратят 800+ токенов
+    # только на рассуждения, поэтому даём запас под reasoning + сам JSON.
+    MAX_TOKENS = 4096
+
+    def __init__(self, base_url: str, model: str = "", timeout: int = 180) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -321,11 +377,12 @@ class LMStudioClient:
         non_embed = [i for i in ids if "embed" not in i.lower()]
         return non_embed[0] if non_embed else ids[0]
 
-    def _post(self, model: str, messages: list[dict], json_mode: bool) -> requests.Response:
+    def _post(self, model: str, messages: list[dict],
+              response_format: Optional[dict] = None) -> requests.Response:
         payload: dict[str, Any] = {"model": model, "messages": messages,
-                                   "temperature": 0.2, "max_tokens": 800}
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+                                   "temperature": 0.1, "max_tokens": self.MAX_TOKENS}
+        if response_format is not None:
+            payload["response_format"] = response_format
         return requests.post(f"{self.base_url}/chat/completions", json=payload,
                              timeout=self.timeout)
 
@@ -337,7 +394,8 @@ class LMStudioClient:
         system_prompt = textwrap.dedent("""\
             Ты — инженер по развёртыванию JARVIS-OS на Windows 11 (WSL2 + vLLM +
             Docker) с GPU NVIDIA RTX 5090 (32 ГБ VRAM). По фактам о хосте верни
-            СТРОГО валидный JSON (без markdown и пояснений) с ключами:
+            ТОЛЬКО валидный JSON-объект (без markdown, без пояснений, без
+            пошаговых рассуждений — сразу результат) с ключами:
             wsl_memory_gb (int), wsl_processors (int), wsl_swap_gb (int),
             qwen_gpu_util (float 0..1), qwen_max_model_len (int),
             uitars_gpu_util (float 0..1), notes (массив строк на русском).
@@ -347,48 +405,59 @@ class LMStudioClient:
         user_prompt = "Факты о хосте (JSON):\n" + json.dumps(host_facts, ensure_ascii=False, indent=2)
         sys_msg = {"role": "system", "content": system_prompt}
         usr_msg = {"role": "user", "content": user_prompt}
-        # gemma не всегда поддерживает отдельную роль system → готовим слитный вариант
+        # Слитный вариант на случай моделей без поддержки роли system
         merged_msg = {"role": "user", "content": system_prompt + "\n\n" + user_prompt}
 
-        # Прогрессивные попытки: (сообщения, json_mode)
+        # Прогрессивные попытки. Первая — json_schema (корректный для LM Studio
+        # формат структурированного вывода), она же самая надёжная.
         attempts = [
-            ([sys_msg, usr_msg], True),    # идеальный вариант
-            ([sys_msg, usr_msg], False),   # без response_format (частая причина 400)
-            ([merged_msg], False),         # без роли system (gemma)
+            ("json_schema (строгая схема)", [sys_msg, usr_msg], self.PROFILE_SCHEMA),
+            ("text (без схемы)", [sys_msg, usr_msg], {"type": "text"}),
+            ("без response_format, слитный prompt", [merged_msg], None),
         ]
-        for messages, json_mode in attempts:
+        for label, messages, response_format in attempts:
             try:
-                r = self._post(model, messages, json_mode)
+                r = self._post(model, messages, response_format)
                 if r.status_code in (400, 422):
-                    log.warning("LM Studio %s (json=%s): %s — пробую следующий вариант.",
-                                r.status_code, json_mode, (r.text or "")[:160])
+                    log.warning("LM Studio %s на варианте «%s»: %s — пробую следующий.",
+                                r.status_code, label, (r.text or "")[:160])
                     continue
                 r.raise_for_status()
-                content = r.json()["choices"][0]["message"]["content"]
+                msg = r.json()["choices"][0]["message"]
+                # Reasoning-модели кладут текст в content; если он пуст —
+                # пробуем reasoning_content (модель «думала», но не финализировала).
+                content = (msg.get("content") or "").strip()
+                if not content:
+                    content = (msg.get("reasoning_content") or "").strip()
+                    if content:
+                        log.info("  content пуст — извлекаю JSON из reasoning_content.")
                 data = self._extract_json(content)
                 merged = self._merge_profile(base, data)
-                log.info("LM Studio успешно сгенерировал конфигурацию (модель %s).", model)
+                log.info("LM Studio успешно сгенерировал конфигурацию (вариант «%s»).", label)
                 merged.notes.append(f"Конфигурация получена от модели {model}.")
                 return merged
             except Exception as exc:  # noqa: BLE001
-                log.warning("Вариант запроса не удался (%s) — продолжаю.", exc)
+                log.warning("Вариант «%s» не удался (%s) — продолжаю.", label, exc)
                 continue
 
         log.warning("LM Studio не дал валидного ответа ни в одном варианте. "
-                    "Использую безопасный дефолтный профиль.")
+                    "Использую безопасный дефолтный профиль (он корректен для RTX 5090).")
         base.notes.append("Профиль сгенерирован дефолтом: LM Studio не ответил корректно.")
         return base
 
     @staticmethod
     def _extract_json(content: str) -> dict[str, Any]:
-        content = content.strip()
+        content = (content or "").strip()
+        if not content:
+            raise ValueError("Пустой ответ модели (нет ни content, ни reasoning_content).")
         fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.DOTALL)
         if fence:
             content = fence.group(1)
         else:
-            brace = re.search(r"\{.*\}", content, re.DOTALL)
-            if brace:
-                content = brace.group(0)
+            # Берём ПОСЛЕДНИЙ JSON-объект (у reasoning-моделей финальный ответ — в конце)
+            braces = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL)
+            if braces:
+                content = braces[-1]
         return json.loads(content)
 
     @staticmethod
@@ -422,15 +491,18 @@ def is_docker_desktop() -> bool:
 
 def gpu_test_host() -> bool:
     """Тест проброса GPU через хостовый движок Docker (Docker Desktop)."""
-    log.info("→ Тест GPU в контейнере (хостовый Docker)…")
-    run(["docker", "pull", GPU_TEST_IMAGE], check=False, timeout=600)
-    res = run(["docker", "run", "--rm", "--gpus", "all", GPU_TEST_IMAGE, "nvidia-smi", "-L"],
-              check=False, timeout=240)
-    out = (res.stdout or "") + (res.stderr or "")
-    if res.returncode == 0 and "GPU" in out:
-        log.info("  GPU доступен контейнерам:\n%s", out.strip())
+    log.info("→ Тест GPU в контейнере (хостовый Docker). "
+             "Идёт одноразовая загрузка тестового образа (~150 МБ), подождите…")
+    # docker run сам докачает образ при отсутствии; вывод стримим, чтобы было
+    # видно прогресс загрузки и операция не выглядела зависшей.
+    rc, out = run_streamed(
+        ["docker", "run", "--rm", "--gpus", "all", GPU_TEST_IMAGE, "nvidia-smi", "-L"],
+        timeout=900,
+    )
+    if rc == 0 and "GPU" in out:
+        log.info("  GPU доступен контейнерам.")
         return True
-    log.warning("  GPU пока недоступен контейнерам: %s", out.strip()[:200])
+    log.warning("  GPU пока недоступен контейнерам (код %s): %s", rc, out.strip()[:200])
     return False
 
 
@@ -593,6 +665,8 @@ def parse_args() -> argparse.Namespace:
                    help="Не устанавливать дистрибутив WSL автоматически.")
     p.add_argument("--skip-stack", action="store_true",
                    help="Только подготовка (без подъёма контейнеров).")
+    p.add_argument("--skip-gpu-check", action="store_true",
+                   help="Пропустить тест GPU в контейнере (если он долгий/не нужен).")
     p.add_argument("--skip-checks", action="store_true")
     return p.parse_args()
 
@@ -643,8 +717,10 @@ def main() -> int:
     write_wslconfig(profile)
 
     # --- Готовность GPU (авто-доведение, без аварийного выхода) ---
-    if not args.skip_checks:
+    if not args.skip_checks and not args.skip_gpu_check:
         ensure_gpu_ready(distro)
+    elif args.skip_gpu_check:
+        log.info("Тест GPU пропущен по флагу --skip-gpu-check.")
 
     # --- .env для compose ---
     write_compose_env(profile, args.qwen_model, args.uitars_model)
@@ -669,4 +745,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log.warning("Прервано пользователем (Ctrl+C). Незавершённые шаги можно "
+                    "продолжить повторным запуском — скрипт идемпотентен.")
+        sys.exit(130)
