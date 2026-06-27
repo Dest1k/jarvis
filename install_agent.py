@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+r"""
 install_agent.py — АВТОНОМНЫЙ агент-установщик JARVIS-OS на базе локальной LLM.
 
 Локальная модель (LM Studio, OpenAI-совместимый API) сама ведёт весь процесс
@@ -29,6 +29,8 @@ install_agent.py — АВТОНОМНЫЙ агент-установщик JARVIS
 from __future__ import annotations
 
 import argparse
+import codecs
+import collections
 import json
 import logging
 import os
@@ -148,35 +150,79 @@ class HostTools:
 
     # -- низкоуровневый запуск -------------------------------------------- #
     def _run(self, cmd: list[str] | str, *, shell: bool = False,
-             timeout: int = 1800, cwd: Optional[str] = None) -> dict[str, Any]:
+             timeout: int = 1800, cwd: Optional[str] = None,
+             stream: bool = False) -> dict[str, Any]:
         if self.dry_run:
             return {"returncode": 0, "output": f"[dry-run] не исполнено: {cmd}"}
+        if not stream:
+            try:
+                proc = subprocess.run(cmd, shell=shell, capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd)
+                out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
+                return {"returncode": proc.returncode, "output": _truncate(out)}
+            except subprocess.TimeoutExpired:
+                return {"returncode": 124, "output": f"Тайм-аут ({timeout} с): {cmd}"}
+            except Exception as exc:  # noqa: BLE001
+                return {"returncode": 1, "output": f"Ошибка запуска: {exc}"}
+
+        # ПОТОКОВЫЙ режим: сырое чтение чанками (read1) → прогресс-бары docker/hf
+        # отображаются ЖИВО (с \r), а не «склеиваются» до перевода строки.
+        # Инкрементальный UTF-8 декодер — корректно через границы чанков.
         try:
-            proc = subprocess.run(cmd, shell=shell, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd)
-            out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
-            return {"returncode": proc.returncode, "output": _truncate(out)}
-        except subprocess.TimeoutExpired:
-            return {"returncode": 124, "output": f"Тайм-аут ({timeout} с): {cmd}"}
+            proc = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, cwd=cwd)
         except Exception as exc:  # noqa: BLE001
             return {"returncode": 1, "output": f"Ошибка запуска: {exc}"}
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        tail: collections.deque[str] = collections.deque(maxlen=500)
+        linebuf = ""
+        start = time.time()
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read1(8192)  # доступные байты сразу, без ожидания \n
+            if not chunk:
+                if proc.poll() is not None:
+                    break
+                continue
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            # Хвост для модели: чистые строки (разбиваем по \r и \n)
+            linebuf += text
+            parts = re.split(r"[\r\n]+", linebuf)
+            linebuf = parts.pop()
+            for seg in parts:
+                if seg.strip():
+                    tail.append(seg + "\n")
+            if time.time() - start > timeout:
+                proc.kill()
+                tail.append(f"[тайм-аут {timeout} с — процесс остановлен]\n")
+                break
+        if linebuf.strip():
+            tail.append(linebuf + "\n")
+        proc.wait()
+        return {"returncode": proc.returncode or 0, "output": _truncate("".join(tail))}
 
     # -- инструменты ------------------------------------------------------ #
-    def run_powershell(self, command: str = "", **_: Any) -> dict[str, Any]:
-        return self._run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command])
+    def run_powershell(self, command: str = "", stream: bool = False, **_: Any) -> dict[str, Any]:
+        return self._run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                         stream=stream)
 
-    def run_cmd(self, command: str = "", **_: Any) -> dict[str, Any]:
-        return self._run(command, shell=True)
+    def run_cmd(self, command: str = "", stream: bool = False, **_: Any) -> dict[str, Any]:
+        return self._run(command, shell=True, stream=stream)
 
-    def run_wsl(self, command: str = "", distro: str = "", **_: Any) -> dict[str, Any]:
+    def run_wsl(self, command: str = "", distro: str = "", stream: bool = False,
+                **_: Any) -> dict[str, Any]:
         args = ["wsl"]
         if distro:
             args += ["-d", distro]
         args += ["-u", "root", "--", "bash", "-lc", command]
-        return self._run(args)
+        return self._run(args, stream=stream)
 
-    def docker(self, args: str = "", **_: Any) -> dict[str, Any]:
-        return self._run("docker " + args, shell=True, timeout=3600)
+    def docker(self, args: str = "", stream: bool = False, **_: Any) -> dict[str, Any]:
+        return self._run("docker " + args, shell=True, timeout=3600, stream=stream)
 
     def read_file(self, path: str = "", **_: Any) -> dict[str, Any]:
         try:
@@ -298,8 +344,10 @@ class HostTools:
             if tok.startswith("--model=") or tok.startswith("--lmstudio="):
                 continue
             cleaned.append(tok)
-        cmd = [sys.executable, script] + cleaned
-        return self._run(cmd, timeout=36000)
+        # -u: небуферизованный вывод bootstrap → прогресс виден в реальном времени.
+        # stream=True: эхо живого вывода (скачивание весов ~19 ГБ, docker pull).
+        cmd = [sys.executable, "-u", script] + cleaned
+        return self._run(cmd, timeout=36000, stream=True)
 
     def get_state(self, **_: Any) -> dict[str, Any]:
         """Собрать снимок состояния хоста для принятия решений моделью."""
@@ -614,15 +662,17 @@ class InstallAgent:
             ("Снимок состояния хоста",
              lambda: self.tools.get_state(),
              lambda r: True),
-            ("Развёртывание: перенос на D:, .wslconfig, GPU, веса (докачка), docker-стек",
+            ("Развёртывание: перенос на D:, .wslconfig, GPU, веса (докачка), docker-стек "
+             "[САМЫЙ ДОЛГИЙ ЭТАП: скачивание весов ~19 ГБ и образов — живой вывод ниже]",
              lambda: self.tools.run_bootstrap(args=""),
              lambda r: r.get("returncode") == 0),
             ("Запуск RPC-моста на хосте (8765)",
              lambda: self.tools.start_background(command="python windows_rpc_bridge.py",
                                                  name="jarvis-rpc"),
              lambda r: r.get("returncode") == 0),
-            ("Установка зависимостей дашборда (npm install)",
-             lambda: self.tools.run_cmd(command=f'cd /d "{root}\\dashboard" && npm install'),
+            ("Установка зависимостей дашборда (npm install) [живой вывод ниже]",
+             lambda: self.tools.run_cmd(command=f'cd /d "{root}\\dashboard" && npm install',
+                                        stream=True),
              lambda r: r.get("returncode") == 0),
             ("Запуск дашборда (3000)",
              lambda: self.tools.start_background(command="npm run dev", name="jarvis-dash",

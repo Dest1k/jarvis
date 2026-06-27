@@ -152,24 +152,44 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = True,
 def run_streamed(cmd: list[str], *, timeout: int = 600,
                  prefix: str = "    ") -> tuple[int, str]:
     """
-    Запустить команду, СТРИМЯ её вывод в реальном времени (чтобы долгие
-    операции вроде docker pull не выглядели зависшими). Возвращает (код, текст).
+    Запустить команду, СТРИМЯ её вывод в реальном времени. Сырое чтение чанками
+    (read1) сохраняет прогресс-бары docker pull / huggingface (обновления через
+    \\r), а не «склеивает» их до перевода строки. Возвращает (код, хвост текста).
     """
+    import codecs
     log.debug("Выполняю (поток): %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace", bufsize=1)
-    lines: list[str] = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    tail: list[str] = []
+    linebuf = ""
+    start = time.time()
     assert proc.stdout is not None
-    try:
-        for line in proc.stdout:
-            sys.stdout.write(prefix + line)
-            sys.stdout.flush()
-            lines.append(line)
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        log.warning("Команда превысила тайм-аут (%d с) и была остановлена.", timeout)
-    return proc.returncode or 0, "".join(lines)
+    while True:
+        chunk = proc.stdout.read1(8192)
+        if not chunk:
+            if proc.poll() is not None:
+                break
+            continue
+        text = decoder.decode(chunk)
+        if not text:
+            continue
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        linebuf += text
+        parts = re.split(r"[\r\n]+", linebuf)
+        linebuf = parts.pop()
+        for seg in parts:
+            if seg.strip():
+                tail.append(seg + "\n")
+        if time.time() - start > timeout:
+            proc.kill()
+            log.warning("Команда превысила тайм-аут (%d с) и была остановлена.", timeout)
+            break
+    if linebuf.strip():
+        tail.append(linebuf + "\n")
+    proc.wait()
+    # Возвращаем последние ~600 строк (хвост) — этого достаточно для диагностики
+    return proc.returncode or 0, "".join(tail[-600:])
 
 
 def decode_wsl(raw: bytes) -> str:
