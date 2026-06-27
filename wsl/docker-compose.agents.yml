@@ -1,0 +1,188 @@
+# =============================================================================
+#  docker-compose.agents.yml — контейнеризованный стек JARVIS-OS.
+#
+#  Сервисы:
+#    vllm-qwen-coder : Qwen2.5-Coder-32B-Instruct-AWQ  (диспетчер + кодер)  ~19 ГБ
+#    vllm-ui-tars    : UI-TARS-7B                       (контроллер GUI/ОС)  ~5.5 ГБ
+#    audio-layer     : Faster-Whisper Large-v3 + Kokoro (ASR + TTS)          ~2 ГБ
+#    sandbox         : изолированная среда исполнения кода кодер-агента
+#    backend         : FastAPI-ядро (server.py)
+#
+#  Распределение VRAM на RTX 5090 (32 ГБ) — см. README §3. Резерв хоста ~5.5 ГБ.
+#  Все сервисы делят один GPU (device 0); инстансы vLLM поднимаются
+#  последовательно (depends_on), чтобы корректно резервировать память.
+# =============================================================================
+
+x-gpu-reservation: &gpu-all
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-vllm-base: &vllm-base
+  image: vllm/vllm-openai:latest
+  restart: unless-stopped
+  ipc: host                      # vLLM требует большой /dev/shm
+  volumes:
+    - ${JARVIS_MODELS_DIR:-~/.cache/jarvis/models}:/models
+    - ${JARVIS_HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+  environment:
+    - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - NVIDIA_VISIBLE_DEVICES=0
+  <<: *gpu-all
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Диспетчер + Кодер-агент — Qwen2.5-Coder-32B (Int4 AWQ), ~19 ГБ VRAM
+  # ---------------------------------------------------------------------------
+  vllm-qwen-coder:
+    <<: *vllm-base
+    container_name: jarvis-vllm-qwen
+    command: >
+      --model ${JARVIS_QWEN_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}
+      --served-model-name qwen-coder
+      --quantization awq_marlin
+      --dtype half
+      --max-model-len ${JARVIS_QWEN_MAX_LEN:-32768}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.60}
+      --enable-prefix-caching
+      --max-num-seqs 16
+      --host 0.0.0.0
+      --port 8001
+    ports:
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+
+  # ---------------------------------------------------------------------------
+  # 2. Контроллер ОС/GUI — UI-TARS-7B (Int4), ~5.5 ГБ VRAM
+  #    Поднимается ПОСЛЕ Qwen, чтобы корректно учесть остаток свободной памяти.
+  # ---------------------------------------------------------------------------
+  vllm-ui-tars:
+    <<: *vllm-base
+    container_name: jarvis-vllm-uitars
+    command: >
+      --model ${JARVIS_UITARS_MODEL:-bytedance-research/UI-TARS-7B-DPO}
+      --served-model-name ui-tars
+      --dtype half
+      --max-model-len 8192
+      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.17}
+      --max-num-seqs 4
+      --host 0.0.0.0
+      --port 8002
+    ports:
+      - "127.0.0.1:8002:8002"
+    depends_on:
+      vllm-qwen-coder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+
+  # ---------------------------------------------------------------------------
+  # 3. Аудио-слой — Faster-Whisper Large-v3 (ASR) + Kokoro TTS, ~2 ГБ VRAM
+  # ---------------------------------------------------------------------------
+  audio-layer:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.audio
+    image: jarvis/audio-layer:latest
+    container_name: jarvis-audio
+    restart: unless-stopped
+    <<: *gpu-all
+    environment:
+      - WHISPER_MODEL=large-v3
+      - WHISPER_COMPUTE_TYPE=int8_float16
+      - KOKORO_VOICE=af_sky
+      - NVIDIA_VISIBLE_DEVICES=0
+    volumes:
+      - ${JARVIS_HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8003:8003"
+    depends_on:
+      vllm-ui-tars:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  # ---------------------------------------------------------------------------
+  # 4. Sandbox — изолированная среда исполнения кода кодер-агента.
+  #    Без проброса GPU. Сетевой доступ ограничен. ФС — только рабочий volume.
+  # ---------------------------------------------------------------------------
+  sandbox:
+    image: python:3.11-slim
+    container_name: jarvis-sandbox
+    restart: unless-stopped
+    command: ["sleep", "infinity"]
+    working_dir: /workspace
+    user: "1000:1000"
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 4g
+    pids_limit: 256
+    networks:
+      - sandbox-net
+    volumes:
+      - jarvis-sandbox-data:/workspace
+
+  # ---------------------------------------------------------------------------
+  # 5. Backend — FastAPI-ядро (server.py). Маршрутизация WS и оркестрация.
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: jarvis/backend:latest
+    container_name: jarvis-backend
+    restart: unless-stopped
+    environment:
+      - JARVIS_QWEN_URL=http://vllm-qwen-coder:8001/v1
+      - JARVIS_UITARS_URL=http://vllm-ui-tars:8002/v1
+      - JARVIS_AUDIO_URL=http://audio-layer:8003
+      # RPC-мост слушает на Windows-хосте; из WSL зеркалируется в localhost
+      - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
+      - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # управление sandbox
+      - ${HOME}/.jarvis:/root/.jarvis
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      vllm-qwen-coder:
+        condition: service_started
+      audio-layer:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+networks:
+  sandbox-net:
+    driver: bridge
+    internal: true            # sandbox изолирован от внешней сети
+
+volumes:
+  jarvis-sandbox-data:

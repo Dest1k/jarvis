@@ -1,0 +1,120 @@
+/* globals.css — глобальные стили дашборда JARVIS-OS (тёмная тема Command Center) */
+:root {
+  --bg: #0a0e14;
+  --panel: #111824;
+  --panel-2: #0d131d;
+  --border: #1e2a3a;
+  --accent: #36d1dc;
+  --accent-2: #5b86e5;
+  --text: #e6edf3;
+  --muted: #7d8da3;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  height: 100%;
+}
+
+.app-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  grid-column: 1 / 3;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: linear-gradient(90deg, var(--panel) 0%, var(--panel-2) 100%);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { font-weight: 700; letter-spacing: 2px; color: var(--accent); }
+
+.sidebar {
+  background: var(--panel-2);
+  border-right: 1px solid var(--border);
+  padding: 12px;
+}
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+.nav-item:hover { background: var(--panel); color: var(--text); }
+.nav-item.active {
+  background: linear-gradient(90deg, rgba(54,209,220,0.15), rgba(91,134,229,0.1));
+  color: var(--accent);
+}
+
+.content { padding: 18px; overflow: auto; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.status-dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.status-dot.err { background: var(--err); }
+.status-dot.warn { background: var(--warn); }
+
+.log-stream {
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: #05080d;
+  border-radius: 8px;
+  padding: 12px;
+  height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.log-line.ok { color: var(--ok); }
+.log-line.err { color: var(--err); }
+.log-line.warn { color: var(--warn); }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; height: 70vh; }
+.canvas-stage { background: #000; border-radius: 8px; width: 100%; height: 70vh; }
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.btn.primary { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #04121a; border: none; font-weight: 600; }
+.btn.danger { border-color: var(--err); color: var(--err); }
+
+.hitl-modal {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.6); z-index: 50;
+}
+.hitl-card { background: var(--panel); border: 1px solid var(--err); border-radius: 12px; padding: 24px; max-width: 480px; }
+.vu-meter { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.vu-fill { height: 100%; background: linear-gradient(90deg, var(--ok), var(--warn), var(--err)); transition: width 0.05s; }

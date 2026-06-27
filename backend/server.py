@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+server.py — FastAPI-ядро (core controller) системы JARVIS-OS.
+
+Работает внутри WSL2/Docker. Отвечает за высокопроизводительную маршрутизацию
+WebSocket-потоков между браузерным дашбордом, vLLM-инстансами, аудио-слоем,
+виртуальным десктопом и RPC-мостом хоста.
+
+WebSocket-маршруты:
+    /ws/deploy      — стрим логов развёртывания и состояний установки.
+    /ws/chat        — текстовые токены агентов (диспетчер/кодер) в реальном времени.
+    /ws/audio       — двунаправленный аудио-канал: входящие байты (VAD→ASR),
+                      исходящие TTS-чанки (low-latency).
+    /ws/desktop     — кадры виртуального десктопа (framebuffer UI-TARS) → Canvas.
+    /ws/hitl        — мост HITL-уведомлений и решений оператора ↔ RPC-bridge.
+
+REST:
+    GET /health     — проверка готовности.
+    GET /status     — сводный статус подсистем.
+    POST /task      — постановка задачи в LangGraph-оркестратор.
+
+Запуск:
+    uvicorn server:app --host 0.0.0.0 --port 8000
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Optional
+
+import httpx
+import websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+
+# --------------------------------------------------------------------------- #
+# Журналирование
+# --------------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | CORE | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("jarvis.core")
+
+
+# --------------------------------------------------------------------------- #
+# Конфигурация подключений (адреса сервисов внутри docker-сети)
+# --------------------------------------------------------------------------- #
+QWEN_URL = os.environ.get("JARVIS_QWEN_URL", "http://vllm-qwen-coder:8001/v1")
+UITARS_URL = os.environ.get("JARVIS_UITARS_URL", "http://vllm-ui-tars:8002/v1")
+AUDIO_URL = os.environ.get("JARVIS_AUDIO_URL", "http://audio-layer:8003")
+RPC_BRIDGE_URL = os.environ.get("JARVIS_RPC_BRIDGE_URL", "ws://host.docker.internal:8765")
+DESKTOP_VNC_HOST = os.environ.get("JARVIS_VNC_HOST", "127.0.0.1")
+DESKTOP_VNC_PORT = int(os.environ.get("JARVIS_VNC_PORT", "5901"))
+
+# Токен RPC-моста монтируется из ~/.jarvis/bridge.token
+RPC_TOKEN_PATH = "/root/.jarvis/bridge.token"
+
+
+# --------------------------------------------------------------------------- #
+# Менеджер WebSocket-соединений с поддержкой широковещания по каналам
+# --------------------------------------------------------------------------- #
+class ConnectionManager:
+    """Управление активными соединениями по логическим каналам."""
+
+    def __init__(self) -> None:
+        self._channels: dict[str, set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, channel: str, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self._channels.setdefault(channel, set()).add(ws)
+        log.info("WS подключён к каналу '%s' (всего: %d)", channel,
+                 len(self._channels.get(channel, ())))
+
+    async def disconnect(self, channel: str, ws: WebSocket) -> None:
+        async with self._lock:
+            self._channels.get(channel, set()).discard(ws)
+
+    async def broadcast(self, channel: str, message: dict[str, Any]) -> None:
+        """Разослать JSON всем подписчикам канала."""
+        data = json.dumps(message, ensure_ascii=False)
+        dead = []
+        for ws in list(self._channels.get(channel, ())):
+            try:
+                await ws.send_text(data)
+            except Exception:  # noqa: BLE001
+                dead.append(ws)
+        for ws in dead:
+            await self.disconnect(channel, ws)
+
+    async def broadcast_bytes(self, channel: str, payload: bytes) -> None:
+        """Разослать бинарные данные (аудио/кадры) подписчикам канала."""
+        dead = []
+        for ws in list(self._channels.get(channel, ())):
+            try:
+                await ws.send_bytes(payload)
+            except Exception:  # noqa: BLE001
+                dead.append(ws)
+        for ws in dead:
+            await self.disconnect(channel, ws)
+
+
+manager = ConnectionManager()
+
+
+# --------------------------------------------------------------------------- #
+# Клиент RPC-моста хоста (исходящее WS-подключение из WSL → Windows)
+# --------------------------------------------------------------------------- #
+class HostBridgeClient:
+    """Поддерживает постоянное защищённое соединение с windows_rpc_bridge.py."""
+
+    def __init__(self) -> None:
+        self._ws: Optional[Any] = None
+        self._pending: dict[str, asyncio.Future] = {}
+        self._connected = asyncio.Event()
+        self._token = self._read_token()
+
+    @staticmethod
+    def _read_token() -> str:
+        try:
+            with open(RPC_TOKEN_PATH, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            log.warning("Токен RPC-моста не найден (%s). RPC будет недоступен до его появления.",
+                        RPC_TOKEN_PATH)
+            return ""
+
+    async def run_forever(self) -> None:
+        """Цикл переподключения к RPC-мосту."""
+        backoff = 2
+        while True:
+            try:
+                self._token = self._token or self._read_token()
+                async with websockets.connect(RPC_BRIDGE_URL, max_size=16 * 1024 * 1024) as ws:
+                    await ws.send(json.dumps({"type": "auth", "token": self._token,
+                                              "role": "orchestrator"}))
+                    auth = json.loads(await ws.recv())
+                    if not auth.get("ok"):
+                        log.error("RPC-мост отклонил авторизацию: %s", auth.get("error"))
+                        await asyncio.sleep(10)
+                        continue
+                    self._ws = ws
+                    self._connected.set()
+                    log.info("Установлено соединение с RPC-мостом хоста.")
+                    backoff = 2
+                    async for raw in ws:
+                        await self._on_message(raw)
+            except Exception as exc:  # noqa: BLE001
+                self._connected.clear()
+                self._ws = None
+                log.warning("RPC-мост недоступен (%s). Переподключение через %d с.", exc, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+
+    async def _on_message(self, raw: str) -> None:
+        msg = json.loads(raw)
+        mtype = msg.get("type")
+        if mtype == "rpc_result":
+            fut = self._pending.pop(msg.get("id", ""), None)
+            if fut and not fut.done():
+                fut.set_result(msg)
+        elif mtype == "hitl_request":
+            # Транслируем запрос подтверждения в дашборд
+            await manager.broadcast("hitl", msg)
+
+    async def call(self, action: str, payload: dict[str, Any],
+                   timeout: int = 200) -> dict[str, Any]:
+        """Выполнить RPC-вызов на хосте и дождаться результата."""
+        if not self._connected.is_set() or self._ws is None:
+            return {"ok": False, "error": "RPC-мост хоста не подключён."}
+        req_id = f"rpc-{time.time_ns()}"
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = fut
+        await self._ws.send(json.dumps(
+            {"type": "rpc", "id": req_id, "action": action, "payload": payload},
+            ensure_ascii=False,
+        ))
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"ok": False, "error": "Таймаут ожидания ответа RPC-моста."}
+
+    async def forward_decision(self, approval_id: str, approved: bool) -> None:
+        """Передать решение оператора обратно в RPC-мост."""
+        if self._ws is not None:
+            await self._ws.send(json.dumps({
+                "type": "hitl_decision",
+                "approval_id": approval_id,
+                "approved": approved,
+                "operator": "dashboard",
+            }))
+
+
+bridge = HostBridgeClient()
+
+
+# --------------------------------------------------------------------------- #
+# Жизненный цикл приложения
+# --------------------------------------------------------------------------- #
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    log.info("Старт ядра JARVIS-OS. Подключаюсь к подсистемам…")
+    bridge_task = asyncio.create_task(bridge.run_forever())
+    yield
+    bridge_task.cancel()
+    log.info("Остановка ядра JARVIS-OS.")
+
+
+app = FastAPI(title="JARVIS-OS Core Controller", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --------------------------------------------------------------------------- #
+# REST-эндпоинты
+# --------------------------------------------------------------------------- #
+@app.get("/health")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok", "ts": time.time()})
+
+
+@app.get("/status")
+async def status() -> JSONResponse:
+    """Сводный статус подсистем (опрос /health у зависимостей)."""
+    async def probe(url: str) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=3) as cli:
+                r = await cli.get(url)
+                return r.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    qwen_ok, uitars_ok, audio_ok = await asyncio.gather(
+        probe(QWEN_URL.replace("/v1", "/health")),
+        probe(UITARS_URL.replace("/v1", "/health")),
+        probe(f"{AUDIO_URL}/health"),
+    )
+    return JSONResponse({
+        "core": True,
+        "qwen_coder": qwen_ok,
+        "ui_tars": uitars_ok,
+        "audio": audio_ok,
+        "rpc_bridge": bridge._connected.is_set(),
+    })
+
+
+@app.post("/task")
+async def submit_task(payload: dict[str, Any]) -> JSONResponse:
+    """
+    Поставить задачу в LangGraph-оркестратор.
+    Прогресс и токены транслируются в каналы /ws/chat и /ws/deploy.
+    """
+    from orchestrator.graph import run_task  # ленивый импорт графа
+
+    task_text = payload.get("task", "").strip()
+    if not task_text:
+        return JSONResponse({"ok": False, "error": "Пустая задача."}, status_code=400)
+
+    async def _runner() -> None:
+        async for event in run_task(task_text, bridge=bridge):
+            await manager.broadcast(event.get("channel", "chat"), event)
+
+    asyncio.create_task(_runner())
+    return JSONResponse({"ok": True, "accepted": task_text})
+
+
+# --------------------------------------------------------------------------- #
+# WS: логи развёртывания
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/deploy")
+async def ws_deploy(ws: WebSocket) -> None:
+    await manager.connect("deploy", ws)
+    try:
+        await ws.send_text(json.dumps({"type": "hello", "channel": "deploy"}))
+        while True:
+            # Дашборд может присылать команды управления развёртыванием
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            if msg.get("type") == "tail_logs":
+                asyncio.create_task(_stream_container_logs(msg.get("service", "vllm-qwen-coder")))
+    except WebSocketDisconnect:
+        await manager.disconnect("deploy", ws)
+
+
+async def _stream_container_logs(service: str) -> None:
+    """Стримить логи docker-контейнера в канал deploy."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "logs", "-f", "--tail", "100", service,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    try:
+        async for line in proc.stdout:
+            await manager.broadcast("deploy", {
+                "type": "log", "service": service,
+                "line": line.decode("utf-8", "replace").rstrip(),
+            })
+    finally:
+        proc.terminate()
+
+
+# --------------------------------------------------------------------------- #
+# WS: текстовые токены агентов
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/chat")
+async def ws_chat(ws: WebSocket) -> None:
+    await manager.connect("chat", ws)
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            if msg.get("type") == "user_message":
+                # Стримим ответ диспетчера/кодера токен за токеном
+                asyncio.create_task(_stream_agent_reply(msg.get("text", "")))
+    except WebSocketDisconnect:
+        await manager.disconnect("chat", ws)
+
+
+async def _stream_agent_reply(user_text: str) -> None:
+    """Запрос к vLLM (Qwen-Coder) с потоковой выдачей токенов в канал chat."""
+    body = {
+        "model": "qwen-coder",
+        "messages": [
+            {"role": "system", "content": "Ты — диспетчер JARVIS-OS. Отвечай по-русски."},
+            {"role": "user", "content": user_text},
+        ],
+        "stream": True,
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=None) as cli:
+            async with cli.stream("POST", f"{QWEN_URL}/chat/completions", json=body) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        delta = chunk["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            await manager.broadcast("chat", {"type": "token", "content": delta})
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+        await manager.broadcast("chat", {"type": "done"})
+    except Exception as exc:  # noqa: BLE001
+        await manager.broadcast("chat", {"type": "error", "error": str(exc)})
+
+
+# --------------------------------------------------------------------------- #
+# WS: аудио-канал (входящие байты → VAD/ASR, исходящие TTS-чанки)
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/audio")
+async def ws_audio(ws: WebSocket) -> None:
+    """
+    Двунаправленный аудио-канал.
+    Входящие бинарные сообщения — PCM-чанки микрофона (передаются в аудио-слой
+    с VAD и ASR). Исходящие — JSON-транскрипты и бинарные TTS-чанки.
+    """
+    await manager.connect("audio", ws)
+    audio_session = AudioSession(ws)
+    try:
+        await audio_session.open()
+        while True:
+            message = await ws.receive()
+            if message.get("bytes") is not None:
+                await audio_session.feed_audio(message["bytes"])
+            elif message.get("text") is not None:
+                ctrl = json.loads(message["text"])
+                if ctrl.get("type") == "speak":
+                    await audio_session.synthesize(ctrl.get("text", ""))
+                elif ctrl.get("type") == "end_utterance":
+                    await audio_session.flush()
+    except WebSocketDisconnect:
+        await manager.disconnect("audio", ws)
+        await audio_session.close()
+
+
+class AudioSession:
+    """Сессия моста между браузерным WS и аудио-слоем (ASR/TTS) по WebSocket."""
+
+    def __init__(self, client_ws: WebSocket) -> None:
+        self.client = client_ws
+        self._asr_ws: Optional[Any] = None
+
+    async def open(self) -> None:
+        """Открыть соединение к аудио-слою для потокового ASR с VAD."""
+        try:
+            self._asr_ws = await websockets.connect(
+                f"{AUDIO_URL.replace('http', 'ws')}/ws/asr",
+                max_size=8 * 1024 * 1024,
+            )
+            asyncio.create_task(self._pump_transcripts())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось открыть ASR-канал: %s", exc)
+
+    async def feed_audio(self, chunk: bytes) -> None:
+        """Передать PCM-чанк в аудио-слой (там работает VAD)."""
+        if self._asr_ws is not None:
+            await self._asr_ws.send(chunk)
+
+    async def _pump_transcripts(self) -> None:
+        """Получать частичные/финальные транскрипты и слать их клиенту."""
+        if self._asr_ws is None:
+            return
+        try:
+            async for raw in self._asr_ws:
+                await self.client.send_text(raw if isinstance(raw, str)
+                                            else raw.decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def synthesize(self, text: str) -> None:
+        """
+        Синтез речи Kokoro TTS с НИЗКОЙ ЗАДЕРЖКОЙ: чанки аудио стримятся клиенту
+        по мере генерации, не дожидаясь полного предложения.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=None) as cli:
+                async with cli.stream("POST", f"{AUDIO_URL}/tts/stream",
+                                      json={"text": text}) as resp:
+                    await self.client.send_text(json.dumps({"type": "tts_start"}))
+                    async for chunk in resp.aiter_bytes(chunk_size=4096):
+                        if chunk:
+                            await self.client.send_bytes(chunk)
+                    await self.client.send_text(json.dumps({"type": "tts_end"}))
+        except Exception as exc:  # noqa: BLE001
+            await self.client.send_text(json.dumps({"type": "error", "error": str(exc)}))
+
+    async def flush(self) -> None:
+        if self._asr_ws is not None:
+            await self._asr_ws.send(json.dumps({"type": "flush"}))
+
+    async def close(self) -> None:
+        if self._asr_ws is not None:
+            await self._asr_ws.close()
+
+
+# --------------------------------------------------------------------------- #
+# WS: кадры виртуального десктопа (framebuffer UI-TARS → Canvas)
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/desktop")
+async def ws_desktop(ws: WebSocket) -> None:
+    """
+    Стрим кадров изолированного виртуального десктопа (Xvfb), где UI-TARS
+    двигает курсор, печатает и навигирует приложения. Кадры захватываются
+    из Xvfb и передаются как JPEG/PNG-байты для отрисовки на Canvas.
+    """
+    await manager.connect("desktop", ws)
+    streamer = DesktopStreamer()
+    try:
+        await streamer.start(ws)
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            if msg.get("type") == "set_fps":
+                streamer.fps = max(1, min(30, int(msg.get("fps", 10))))
+            elif msg.get("type") == "input":
+                # Проброс ввода оператора в виртуальный десктоп (xdotool)
+                await streamer.forward_input(msg)
+    except WebSocketDisconnect:
+        await manager.disconnect("desktop", ws)
+        await streamer.stop()
+
+
+class DesktopStreamer:
+    """Захват кадров Xvfb-десктопа и стрим их в WS-канал."""
+
+    def __init__(self) -> None:
+        self.fps = 10
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+
+    async def start(self, ws: WebSocket) -> None:
+        self._running = True
+        self._task = asyncio.create_task(self._capture_loop(ws))
+
+    async def _capture_loop(self, ws: WebSocket) -> None:
+        """
+        Захват кадров через ffmpeg из X11-дисплея (:99 — виртуальный Xvfb).
+        Каждый кадр кодируется в JPEG и отправляется как бинарный фрейм.
+        """
+        display = os.environ.get("JARVIS_XDISPLAY", ":99")
+        while self._running:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-loglevel", "error",
+                    "-f", "x11grab", "-video_size", "1280x720",
+                    "-framerate", str(self.fps), "-i", display,
+                    "-vframes", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                )
+                frame, _ = await proc.communicate()
+                if frame:
+                    await ws.send_bytes(frame)
+                await asyncio.sleep(1.0 / max(1, self.fps))
+            except Exception as exc:  # noqa: BLE001
+                await ws.send_text(json.dumps({"type": "error", "error": str(exc)}))
+                await asyncio.sleep(1.0)
+
+    async def forward_input(self, msg: dict[str, Any]) -> None:
+        """Проброс мыши/клавиатуры оператора в виртуальный десктоп через xdotool."""
+        display = os.environ.get("JARVIS_XDISPLAY", ":99")
+        kind = msg.get("input_kind")
+        env = {**os.environ, "DISPLAY": display}
+        if kind == "move":
+            args = ["xdotool", "mousemove", str(msg["x"]), str(msg["y"])]
+        elif kind == "click":
+            args = ["xdotool", "click", str(msg.get("button", 1))]
+        elif kind == "type":
+            args = ["xdotool", "type", "--", str(msg.get("text", ""))]
+        elif kind == "key":
+            args = ["xdotool", "key", "--", str(msg.get("key", ""))]
+        else:
+            return
+        proc = await asyncio.create_subprocess_exec(
+            *args, env=env,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+
+
+# --------------------------------------------------------------------------- #
+# WS: мост HITL (уведомления и решения оператора)
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/hitl")
+async def ws_hitl(ws: WebSocket) -> None:
+    """Канал HITL: получает hitl_request от RPC-моста, шлёт решения оператора."""
+    await manager.connect("hitl", ws)
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            if msg.get("type") == "hitl_decision":
+                await bridge.forward_decision(
+                    msg.get("approval_id", ""), bool(msg.get("approved"))
+                )
+    except WebSocketDisconnect:
+        await manager.disconnect("hitl", ws)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, log_level="info")

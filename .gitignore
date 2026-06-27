@@ -1,0 +1,32 @@
+# Артефакты окружения JARVIS-OS
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Секреты и рантайм
+.jarvis/
+*.token
+bridge.token
+deployment_profile.json
+.wslconfig.bak.*
+.env
+.env.local
+
+# Кэш моделей
+models/
+*.safetensors
+*.gguf
+
+# Next.js / Node
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/next-env.d.ts
+npm-debug.log*
+
+# Логи и временные файлы
+*.log
+runtime/
+sandbox/
