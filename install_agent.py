@@ -179,6 +179,49 @@ class HostTools:
         except Exception as exc:  # noqa: BLE001
             return {"returncode": 1, "output": f"Запрос не удался: {exc}"}
 
+    def start_background(self, command: str = "", name: str = "jarvis",
+                         cwd: str = "", **_: Any) -> dict[str, Any]:
+        """
+        Запустить ФОНОВЫЙ долгоживущий процесс (демон), который продолжит работать
+        после завершения агента: RPC-мост на хосте, dev-сервер дашборда и т.п.
+        Открывается в отдельном окне консоли (переживает завершение агента).
+        """
+        if self.dry_run:
+            return {"returncode": 0, "output": f"[dry-run] фон: {command} (cwd={cwd or self.repo_dir})"}
+        workdir = cwd or str(self.repo_dir)
+        try:
+            subprocess.Popen(f'start "{name}" cmd /k {command}', shell=True, cwd=workdir)
+            return {"returncode": 0, "output": f"Фоновый процесс запущен (cwd={workdir}): {command}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"returncode": 1, "output": f"Не запустить фоновый процесс: {exc}"}
+
+    def check_endpoints(self, **_: Any) -> dict[str, Any]:
+        """Проверить ВСЕ сервисы целевой архитектуры (критерий готовности)."""
+        import socket
+        results: dict[str, str] = {}
+        http_eps = {
+            "backend(8000)": "http://127.0.0.1:8000/health",
+            "vllm_qwen(8001)": "http://127.0.0.1:8001/health",
+            "vllm_uitars(8002)": "http://127.0.0.1:8002/health",
+            "audio(8003)": "http://127.0.0.1:8003/health",
+            "dashboard(3000)": "http://127.0.0.1:3000",
+        }
+        for name, url in http_eps.items():
+            try:
+                r = requests.get(url, timeout=4)
+                results[name] = f"OK {r.status_code}"
+            except Exception as exc:  # noqa: BLE001
+                results[name] = f"НЕТ ({exc.__class__.__name__})"
+        try:
+            s = socket.create_connection(("127.0.0.1", 8765), timeout=4)
+            s.close()
+            results["rpc_bridge(8765)"] = "OK (порт слушает)"
+        except Exception:  # noqa: BLE001
+            results["rpc_bridge(8765)"] = "НЕТ (8765 не слушает)"
+        all_ok = all(v.startswith("OK") for v in results.values())
+        results["_ГОТОВО_ПОЛНОСТЬЮ"] = "ДА" if all_ok else "НЕТ"
+        return {"returncode": 0, "output": json.dumps(results, ensure_ascii=False, indent=2)}
+
     def run_bootstrap(self, args: str = "", **_: Any) -> dict[str, Any]:
         """
         Запустить проверенный bootstrap_installer.py (целиком или частями).
@@ -255,10 +298,15 @@ TOOLS_DOC = {
     "read_file": "Прочитать файл. args: {path}",
     "write_file": "Записать файл. args: {path, content}",
     "http_get": "HTTP GET (проверка эндпоинтов/health). args: {url}",
+    "start_background": "Запустить ФОНОВЫЙ демон (переживает агента): RPC-мост, "
+                        "dev-сервер дашборда. args: {command, name?, cwd?}",
+    "check_endpoints": "Проверить ВСЕ сервисы целевой архитектуры разом "
+                       "(8000-8003 + dashboard 3000 + rpc_bridge 8765). args: {}",
     "run_bootstrap": "Запустить проверенный bootstrap_installer.py (детерминированный, "
                      "НЕ загружает вторую модель). args: {args}  (например '--skip-gpu-check' "
                      "или '--skip-stack'). НЕ передавай --use-lmstudio/--model/--lmstudio.",
-    "finish": "Завершить работу. args: {summary}",
+    "finish": "Завершить работу (ТОЛЬКО когда check_endpoints даёт _ГОТОВО_ПОЛНОСТЬЮ=ДА). "
+              "args: {summary}",
 }
 
 
@@ -341,6 +389,21 @@ SYSTEM_PROMPT = """\
 OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен получать флаги
 --use-lmstudio / --model / --lmstudio (он и так детерминированный).
 
+ЦЕЛЕВАЯ АРХИТЕКТУРА (что должно работать В ИТОГЕ):
+  На хосте Windows:
+    - windows_rpc_bridge.py — демон, порт 8765 (мост управления хостом + HITL-гейт)
+    - dashboard (Next.js 15) — порт 3000 (Command Center: деплой/десктоп/код/аудио)
+  В Docker Desktop (WSL2):
+    - backend (FastAPI ядро + LangGraph) — порт 8000
+    - vLLM Qwen2.5-Coder-32B (Int4 AWQ) — порт 8001 (диспетчер + кодер, ~19 ГБ VRAM)
+    - vLLM UI-TARS-7B (Int4) — порт 8002 (контроллер ОС/GUI, ~5.5 ГБ VRAM)
+    - audio: Faster-Whisper Large-v3 + Kokoro TTS — порт 8003 (~2 ГБ VRAM)
+    - sandbox — изолированное исполнение кода кодер-агента
+  Весь «тяжеляк» (веса ~25 ГБ, образы Docker, образ WSL) — на диске {target_drive}.
+
+КРИТЕРИЙ ГОТОВНОСТИ: check_endpoints возвращает _ГОТОВО_ПОЛНОСТЬЮ=ДА
+(все 8000-8003 + dashboard 3000 + rpc_bridge 8765). Только тогда — finish.
+
 ТЫ РАБОТАЕШЬ ЦИКЛАМИ. На каждом шаге верни СТРОГО ОДИН JSON-объект (без markdown,
 без лишнего текста, без пошаговых рассуждений — сразу JSON):
   {{"thought": "кратко зачем", "action": "<имя>", "args": {{...}}}}
@@ -348,17 +411,22 @@ OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен п
 Доступные инструменты (action и args):
 {tools}
 
+ПЛАН (ориентир, действуй идемпотентно — сделанное не повторяй):
+1. get_state — понять текущее состояние.
+2. run_bootstrap — перенос на D:, .wslconfig, GPU, предзагрузка весов (докачка),
+   подъём docker-стека (backend + vLLM x2 + audio + sandbox). Это основной рычаг.
+3. Запустить RPC-мост: start_background command="python windows_rpc_bridge.py".
+4. Дашборд: run_cmd "cd /d {target_root}\\dashboard && npm install" (если нет node —
+   поставь через winget/choco), затем start_background command="npm run dev"
+   cwd="{target_root}\\dashboard".
+5. check_endpoints — дождаться _ГОТОВО_ПОЛНОСТЬЮ=ДА (сервисы прогреваются;
+   при НЕТ — подожди/диагностируй логами docker compose и повтори проверку).
+6. finish с итогом.
+
 ПРИНЦИПЫ:
-- Сначала вызови get_state, чтобы понять текущее состояние.
-- По возможности делегируй сложную оркестрацию проверенному скрипту через
-  run_bootstrap (он умеет: перенос на D:, .wslconfig, GPU, предзагрузку весов с
-  докачкой, подъём стека, идемпотентность). Используй его флаги при необходимости.
-- Действуй идемпотентно: если шаг уже сделан — не повторяй.
-- При ошибке — диагностируй (читай вывод, логи docker compose) и исправляй сам.
-- Проверяй результат через http_get на /health эндпоинтах.
-- НЕ выполняй необратимых разрушительных команд (формат диска и т.п.) — они
-  заблокированы и вернут ошибку.
-- Когда все сервисы отвечают на /health — вызови finish с кратким итогом.
+- При ошибке — диагностируй (читай вывод, docker compose logs <svc>) и исправляй сам.
+- НЕ выполняй необратимых разрушительных команд (формат диска и т.п.) — заблокированы.
+- finish ТОЛЬКО при _ГОТОВО_ПОЛНОСТЬЮ=ДА.
 
 Отвечай ТОЛЬКО JSON-объектом действия.
 """
@@ -417,6 +485,8 @@ class InstallAgent:
             "read_file": self.tools.read_file,
             "write_file": self.tools.write_file,
             "http_get": self.tools.http_get,
+            "start_background": self.tools.start_background,
+            "check_endpoints": self.tools.check_endpoints,
             "run_bootstrap": self.tools.run_bootstrap,
         }
         last_signature = None
@@ -538,9 +608,11 @@ def main() -> int:
     agent = InstallAgent(lm, tools, max_steps=args.max_steps,
                          require_approval=args.require_approval)
 
-    goal = (f"Разверни JARVIS-OS полностью и автономно на диске {target_root}. "
-            f"Начни с get_state. Используй run_bootstrap для проверенной оркестрации. "
-            f"Добейся, чтобы /health отвечали на портах 8000/8001/8002/8003. "
+    goal = (f"Разверни JARVIS-OS ПОЛНОСТЬЮ и автономно на диске {target_root}. "
+            f"Начни с get_state. Используй run_bootstrap для docker-стека, затем "
+            f"подними RPC-мост (8765) и дашборд (3000) через start_background. "
+            f"Цель достигнута, когда check_endpoints даёт _ГОТОВО_ПОЛНОСТЬЮ=ДА "
+            f"(backend 8000, vLLM 8001/8002, audio 8003, dashboard 3000, rpc_bridge 8765). "
             f"Весь тяжеляк — на {target_root.drive or 'D:'}. {args.goal}").strip()
 
     try:

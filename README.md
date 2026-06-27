@@ -242,11 +242,28 @@ python install_agent.py --lmstudio http://localhost:1234/v1 --target-root D:\jar
 
 Как работает: цикл ReAct поверх модели. На каждом шаге модель возвращает
 `{"thought","action","args"}`, агент исполняет инструмент и возвращает результат —
-до тех пор, пока `/health` не ответят на портах 8000–8003.
+пока не развёрнута **вся** целевая архитектура.
+
+Агент доводит систему до конца — не только docker-стек, но и хостовые сервисы:
+
+| Слой | Сервис | Порт |
+|------|--------|------|
+| Docker | backend (FastAPI + LangGraph) | 8000 |
+| Docker | vLLM Qwen2.5-Coder-32B (диспетчер+кодер) | 8001 |
+| Docker | vLLM UI-TARS-7B (контроллер ОС/GUI) | 8002 |
+| Docker | audio (Faster-Whisper + Kokoro) | 8003 |
+| Docker | sandbox (изолированное исполнение кода) | — |
+| Хост | windows_rpc_bridge.py (мост + HITL) | 8765 |
+| Хост | dashboard (Next.js 15 Command Center) | 3000 |
+
+**Критерий готовности:** `check_endpoints` → `_ГОТОВО_ПОЛНОСТЬЮ=ДА` (все порты
+выше отвечают). Только тогда агент вызывает `finish`.
 
 **Инструменты агента:** `get_state`, `run_powershell`, `run_cmd`, `run_wsl`,
-`docker`, `read_file`, `write_file`, `http_get`, `run_bootstrap` (делегирование
-проверенному `bootstrap_installer.py`), `finish`.
+`docker`, `read_file`, `write_file`, `http_get`, `start_background` (хостовые
+демоны: RPC-мост, dev-сервер дашборда), `check_endpoints` (проверка всех
+сервисов), `run_bootstrap` (делегирование проверенному `bootstrap_installer.py`),
+`finish`.
 
 **Безопасность (защита от галлюцинаций модели):**
 - **Катастрофические** команды (формат/очистка диска, `diskpart`, `rm -rf` корня,
