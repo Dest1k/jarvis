@@ -144,6 +144,37 @@ cd dashboard && npm install && npm run dev   # http://localhost:3000
 Полезные флаги: `--model <id>` (модель LM Studio), `--distro <name>` (дистрибутив),
 `--skip-stack` (только подготовка), `--qwen-model` / `--uitars-model` (веса агентов).
 
+### 5.1 Перенос на диск D: (`D:\jarvis`)
+
+На старте (ФАЗА 0) bootstrap переносит проект и весь «тяжеляк» на целевой диск,
+после чего всё работает уже оттуда:
+
+| Что переносится | Куда | Как |
+|-----------------|------|-----|
+| Файлы проекта | `D:\jarvis` | копирование + переключение рабочей директории |
+| Веса моделей / кэш HF / sandbox (~25+ ГБ) | `D:\jarvis\data\{models,hf,sandbox}` | bind-mount в compose (`JARVIS_DATA_DIR`) |
+| WSL-дистрибутив (образ ВМ) | `D:\jarvis\wsl\distro` | `wsl --export → --unregister → --import` (с архивом-резервом) |
+| Диск Docker Desktop (образы) | `D:\jarvis\docker` | смена «Disk image location» + перезапуск Docker |
+| Исходная папка на C: | удаляется | после успешного переноса |
+
+```powershell
+# Перенос включён по умолчанию (целевой путь D:\jarvis)
+python bootstrap_installer.py --lmstudio http://localhost:1234/v1
+
+# Тонкая настройка переноса:
+#   --target-root E:\jarvis   другой диск/путь
+#   --no-relocate             не переносить (работать на месте)
+#   --no-move-docker          не трогать диск Docker Desktop
+#   --no-move-distro          не переносить WSL-дистрибутив
+#   --keep-source             оставить копию проекта на C:
+```
+
+> ⚠️ Перенос диска Docker Desktop и WSL-дистрибутива — Windows-специфичные,
+> версионно-зависимые операции. Bootstrap делает их защищённо (бэкап настроек
+> Docker, экспорт дистрибутива перед `--unregister`, пропуск без аварии при
+> ошибке), но первый запуск стоит наблюдать. Перенос идемпотентен: повторный
+> запуск из `D:\jarvis` фазу переноса пропускает.
+
 ---
 
 ## 6. Безопасность

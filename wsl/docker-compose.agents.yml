@@ -26,11 +26,11 @@ x-vllm-base: &vllm-base
   image: vllm/vllm-openai:latest
   restart: unless-stopped
   ipc: host                      # vLLM требует большой /dev/shm
-  # Именованные тома (Docker-managed) — кросс-платформенно, без зависимости
-  # от путей хоста Windows. Кэши моделей переживают пересоздание контейнеров.
+  # Тяжёлые данные (веса моделей, кэш HF) хранятся на целевом диске через
+  # bind-mount: JARVIS_DATA_DIR задаётся bootstrap'ом в wsl/.env (напр. D:/jarvis/data).
   volumes:
-    - jarvis-models:/models
-    - jarvis-hf:/root/.cache/huggingface
+    - ${JARVIS_DATA_DIR:-../data}/models:/models
+    - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -109,7 +109,7 @@ services:
       - KOKORO_VOICE=af_sky
       - NVIDIA_VISIBLE_DEVICES=0
     volumes:
-      - jarvis-hf:/root/.cache/huggingface
+      - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
     depends_on:
@@ -143,7 +143,7 @@ services:
     networks:
       - sandbox-net
     volumes:
-      - jarvis-sandbox-data:/workspace
+      - ${JARVIS_DATA_DIR:-../data}/sandbox:/workspace
 
   # ---------------------------------------------------------------------------
   # 5. Backend — FastAPI-ядро (server.py). Маршрутизация WS и оркестрация.
@@ -188,7 +188,5 @@ networks:
     driver: bridge
     internal: true            # sandbox изолирован от внешней сети
 
-volumes:
-  jarvis-models:              # кэш весов vLLM-моделей
-  jarvis-hf:                  # кэш HuggingFace (Whisper/Kokoro/токенайзеры)
-  jarvis-sandbox-data:        # рабочая ФС изолированного sandbox
+# Тяжёлые данные хранятся bind-mount'ом на целевом диске (JARVIS_DATA_DIR),
+# а не в Docker-managed томах — чтобы веса моделей (~25+ ГБ) лежали на D:.

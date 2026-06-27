@@ -247,6 +247,210 @@ class WslManager:
 
 
 # --------------------------------------------------------------------------- #
+# Перенос проекта и тяжёлых данных на целевой диск (D:\jarvis)
+# --------------------------------------------------------------------------- #
+def set_repo_root(root: Path) -> None:
+    """Переключить корень проекта (после переноса на другой диск)."""
+    global REPO_DIR, COMPOSE_FILE, COMPOSE_ENV
+    REPO_DIR = root
+    COMPOSE_FILE = root / "wsl" / "docker-compose.agents.yml"
+    COMPOSE_ENV = root / "wsl" / ".env"
+
+
+def _docker_path(p: Path) -> str:
+    """Путь в формате, понятном Docker Desktop (прямые слэши)."""
+    return str(p).replace("\\", "/")
+
+
+class RelocationManager:
+    """
+    Полный перенос на целевой диск (по умолчанию D:\\jarvis):
+      • файлы проекта (репозиторий);
+      • тяжёлые данные (модели/кэши) — через bind-mount в <root>\\data;
+      • WSL-дистрибутив — export → unregister → import в <root>\\wsl;
+      • диск Docker Desktop — смена расположения disk image на <root>\\docker.
+
+    Все опасные шаги защищены: бэкап настроек, экспорт перед unregister,
+    пропуск без аварийного выхода при любой ошибке.
+    """
+
+    DOCKER_EXE_CANDIDATES = (
+        r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        r"C:\Program Files\Docker\Docker\frontend\Docker Desktop.exe",
+    )
+    DOCKER_PROCESSES = ("Docker Desktop.exe", "com.docker.backend.exe",
+                        "com.docker.service")
+
+    def __init__(self, target_root: Path, *, move_docker: bool,
+                 move_distro: bool, delete_source: bool) -> None:
+        self.target_root = target_root
+        self.move_docker = move_docker
+        self.move_distro = move_distro
+        self.delete_source = delete_source
+        # Перенос имеет смысл только на Windows и при наличии целевого диска
+        self.enabled = (platform.system() == "Windows"
+                        and os.path.exists((target_root.drive or "C:") + "\\"))
+        if not self.enabled:
+            log.warning("Перенос на %s пропущен: не Windows или диск %s недоступен.",
+                        target_root, target_root.drive)
+
+    # ---- Файлы проекта -------------------------------------------------- #
+    def relocate_project(self) -> Optional[Path]:
+        """Скопировать проект в target_root и переключить рабочую директорию."""
+        if not self.enabled:
+            return None
+        src = REPO_DIR
+        if src.resolve() == self.target_root.resolve():
+            log.info("Проект уже находится в %s — перенос файлов не требуется.", self.target_root)
+            return None
+        log.info("→ Перенос файлов проекта: %s → %s", src, self.target_root)
+        self.target_root.mkdir(parents=True, exist_ok=True)
+        ignore = shutil.ignore_patterns("node_modules", ".next", "out",
+                                        "__pycache__", "data", "*.tar")
+        shutil.copytree(src, self.target_root, dirs_exist_ok=True, ignore=ignore)
+        os.chdir(self.target_root)
+        set_repo_root(self.target_root)
+        log.info("  Проект скопирован. Рабочая директория переключена на %s", self.target_root)
+        return src
+
+    def ensure_data_dirs(self) -> Path:
+        """Создать каталоги тяжёлых данных на целевом диске."""
+        data = self.target_root / "data"
+        if not self.enabled:
+            return data
+        for sub in ("models", "hf", "sandbox"):
+            (data / sub).mkdir(parents=True, exist_ok=True)
+        log.info("  Каталог тяжёлых данных: %s", data)
+        return data
+
+    # ---- WSL-дистрибутив ----------------------------------------------- #
+    def relocate_distro(self, distro: str) -> None:
+        if not (self.enabled and self.move_distro and distro):
+            return
+        marker = self.target_root / "wsl" / ".relocated"
+        if marker.exists():
+            log.info("WSL-дистрибутив уже перенесён ранее — пропускаю.")
+            return
+        dest_dir = self.target_root / "wsl" / "distro"
+        tar = self.target_root / "wsl" / f"{distro}.tar"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        log.info("→ Перенос WSL-дистрибутива '%s' на D: (export → unregister → import). "
+                 "Это может занять время…", distro)
+
+        run_wsl_raw(["--shutdown"])
+        rc, out, err = run_wsl_raw(["--export", distro, str(tar)], timeout=3600)
+        if rc != 0 or not tar.exists() or tar.stat().st_size < 1024:
+            log.error("  Экспорт не удался (%s). Перенос дистрибутива отменён, дистрибутив цел.",
+                      (out + err).strip()[:200])
+            return
+        log.info("  Экспортирован архив: %s (%.0f МБ)", tar, tar.stat().st_size / 1e6)
+
+        rc, out, err = run_wsl_raw(["--unregister", distro], timeout=600)
+        if rc != 0:
+            log.error("  Снятие регистрации не удалось (%s). Архив-резерв: %s",
+                      (out + err).strip()[:160], tar)
+            return
+
+        rc, out, err = run_wsl_raw(
+            ["--import", distro, str(dest_dir), str(tar), "--version", "2"], timeout=3600)
+        if rc != 0:
+            log.error("  Импорт на D: не удался (%s). Восстанавливаю из архива в то же место…",
+                      (out + err).strip()[:160])
+            run_wsl_raw(["--import", distro, str(dest_dir), str(tar), "--version", "2"], timeout=3600)
+            return
+
+        rc, out, err = run_wsl_raw(["-d", distro, "--", "echo", "ok"])
+        if "ok" in out:
+            marker.write_text("ok", encoding="utf-8")
+            log.info("  Дистрибутив '%s' перенесён на D: и работает. Архив-резерв: %s",
+                     distro, tar)
+        else:
+            log.warning("  Перенесённый дистрибутив не отвечает. Архив-резерв сохранён: %s", tar)
+
+    # ---- Диск Docker Desktop ------------------------------------------- #
+    def _find_docker_settings(self) -> Optional[Path]:
+        appdata = os.environ.get("APPDATA", "")
+        for name in ("settings-store.json", "settings.json"):
+            p = Path(appdata) / "Docker" / name
+            if p.exists():
+                return p
+        return None
+
+    def _stop_docker(self) -> None:
+        for proc in self.DOCKER_PROCESSES:
+            run(["taskkill", "/IM", proc, "/F"], check=False)
+        run_wsl_raw(["--shutdown"])
+        time.sleep(5)
+
+    def _start_docker(self) -> None:
+        for exe in self.DOCKER_EXE_CANDIDATES:
+            if os.path.exists(exe):
+                subprocess.Popen([exe])
+                log.info("  Запущен Docker Desktop: %s", exe)
+                return
+        log.warning("  Не найден исполняемый файл Docker Desktop — запустите его вручную.")
+
+    def _wait_docker_ready(self, retries: int = 24) -> bool:
+        for i in range(retries):
+            res = run(["docker", "version", "--format", "{{.Server.Version}}"], check=False)
+            if res.returncode == 0 and (res.stdout or "").strip():
+                return True
+            time.sleep(10)
+        return False
+
+    def relocate_docker(self) -> None:
+        if not (self.enabled and self.move_docker):
+            return
+        target = self.target_root / "docker"
+        settings = self._find_docker_settings()
+        if settings is None:
+            log.warning("Не найден файл настроек Docker Desktop — перенос диска Docker пропущен.")
+            return
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось прочитать настройки Docker (%s) — пропускаю.", exc)
+            return
+
+        current = str(data.get("dataFolder") or data.get("DataFolder") or "")
+        if current and Path(current).resolve() == target.resolve():
+            log.info("Диск Docker Desktop уже на D: (%s) — пропускаю.", current)
+            return
+
+        log.info("→ Перенос диска Docker Desktop на %s. Docker будет перезапущен…", target)
+        target.mkdir(parents=True, exist_ok=True)
+        backup = settings.with_name(settings.name + f".bak.{int(time.time())}")
+        shutil.copy2(settings, backup)
+        log.info("  Резервная копия настроек Docker: %s", backup)
+
+        self._stop_docker()
+        # Пишем расположение в обоих вариантах регистра — для совместимости версий
+        data["dataFolder"] = _docker_path(target)
+        data["DataFolder"] = _docker_path(target)
+        settings.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("  Расположение disk image обновлено в %s", settings.name)
+
+        self._start_docker()
+        if self._wait_docker_ready():
+            log.info("  Docker Desktop поднялся. Новые образы и данные пойдут на D:.")
+        else:
+            log.warning("  Docker Desktop не ответил вовремя. Проверьте Settings → Resources → "
+                        "Advanced → Disk image location = %s и перезапустите Docker.", target)
+
+    # ---- Удаление исходной папки --------------------------------------- #
+    def cleanup_source(self, old: Optional[Path]) -> None:
+        if not (self.enabled and self.delete_source and old):
+            return
+        if old.resolve() == self.target_root.resolve():
+            return
+        try:
+            shutil.rmtree(old)
+            log.info("Исходная папка проекта удалена: %s", old)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось удалить исходную папку %s (%s). Удалите вручную позже.", old, exc)
+
+
+# --------------------------------------------------------------------------- #
 # Проверки хоста
 # --------------------------------------------------------------------------- #
 class HostChecker:
@@ -579,11 +783,14 @@ def write_wslconfig(profile: DeploymentProfile) -> Path:
 # --------------------------------------------------------------------------- #
 # Генерация .env и подъём стека через хостовый Docker Desktop
 # --------------------------------------------------------------------------- #
-def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model: str) -> Path:
+def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model: str,
+                      data_dir: Path) -> Path:
     """Сформировать wsl/.env для интерполяции docker compose."""
     JARVIS_HOME.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     # Docker Desktop принимает Windows-путь с прямыми слэшами
     home_host = str(JARVIS_HOME).replace("\\", "/")
+    data_host = _docker_path(data_dir)
     env = textwrap.dedent(f"""\
         # Сгенерировано bootstrap_installer.py — переменные для docker compose
         JARVIS_QWEN_MODEL={qwen_model}
@@ -592,13 +799,15 @@ def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model:
         JARVIS_QWEN_MAX_LEN={profile.qwen_max_model_len}
         JARVIS_UITARS_GPU_UTIL={profile.uitars_gpu_util}
         JARVIS_HOME_HOST={home_host}
+        # Тяжёлые данные (веса моделей, кэш HF, sandbox) живут на целевом диске:
+        JARVIS_DATA_DIR={data_host}
         HF_TOKEN={os.environ.get('HF_TOKEN', '')}
         WHISPER_MODEL=large-v3
         WHISPER_COMPUTE_TYPE=int8_float16
         KOKORO_VOICE=af_sky
     """)
     COMPOSE_ENV.write_text(env, encoding="utf-8")
-    log.info("  Записан %s", COMPOSE_ENV)
+    log.info("  Записан %s (данные → %s)", COMPOSE_ENV, data_host)
     return COMPOSE_ENV
 
 
@@ -661,6 +870,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wsl-cpus", type=int, default=20)
     p.add_argument("--qwen-model", default="Qwen/Qwen2.5-Coder-32B-Instruct-AWQ")
     p.add_argument("--uitars-model", default="bytedance-research/UI-TARS-7B-DPO")
+    p.add_argument("--target-root", default=r"D:\jarvis",
+                   help="Корневой путь переноса проекта и тяжёлых данных.")
+    p.add_argument("--no-relocate", action="store_true",
+                   help="Не переносить проект/данные на целевой диск.")
+    p.add_argument("--no-move-docker", action="store_true",
+                   help="Не переносить расположение диска Docker Desktop.")
+    p.add_argument("--no-move-distro", action="store_true",
+                   help="Не переносить WSL-дистрибутив на целевой диск.")
+    p.add_argument("--keep-source", action="store_true",
+                   help="Не удалять исходную папку проекта после переноса.")
     p.add_argument("--no-auto-install", action="store_true",
                    help="Не устанавливать дистрибутив WSL автоматически.")
     p.add_argument("--skip-stack", action="store_true",
@@ -677,6 +896,19 @@ def main() -> int:
     log.info("JARVIS-OS · bootstrap_installer · полностью автоматическое развёртывание")
     log.info("=" * 70)
 
+    # --- ФАЗА 0: перенос файлов проекта на целевой диск (D:\jarvis) ---
+    relocator: Optional[RelocationManager] = None
+    old_source: Optional[Path] = None
+    if not args.no_relocate:
+        relocator = RelocationManager(
+            Path(args.target_root),
+            move_docker=not args.no_move_docker,
+            move_distro=not args.no_move_distro,
+            delete_source=not args.keep_source,
+        )
+        old_source = relocator.relocate_project()
+        relocator.ensure_data_dirs()
+
     if not args.skip_checks:
         checker = HostChecker()
         if not checker.run_all():
@@ -690,6 +922,11 @@ def main() -> int:
     else:
         log.warning("Дистрибутив WSL недоступен. Продолжаю в режиме хостового Docker "
                     "(стек поднимется через Docker Desktop без зависимости от дистрибутива).")
+
+    # --- ФАЗА переноса тяжёлых частей на D: (WSL-дистрибутив + диск Docker) ---
+    if relocator:
+        relocator.relocate_distro(distro or "")
+        relocator.relocate_docker()
 
     # --- Динамический профиль через LM Studio ---
     host_facts = {
@@ -722,22 +959,35 @@ def main() -> int:
     elif args.skip_gpu_check:
         log.info("Тест GPU пропущен по флагу --skip-gpu-check.")
 
-    # --- .env для compose ---
-    write_compose_env(profile, args.qwen_model, args.uitars_model)
+    # --- .env для compose (тяжёлые данные → целевой диск) ---
+    data_dir = (relocator.target_root / "data") if (relocator and relocator.enabled) \
+        else (REPO_DIR / "data")
+    write_compose_env(profile, args.qwen_model, args.uitars_model, data_dir)
 
     if args.skip_stack:
         log.info("Флаг --skip-stack: подготовка завершена, стек не поднимаю.")
+        if relocator:
+            relocator.cleanup_source(old_source)
         return 0
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()
 
+    # --- Удаление исходной папки на C: (полный перенос) ---
+    if relocator:
+        relocator.cleanup_source(old_source)
+
     log.info("=" * 70)
     log.info("Развёртывание завершено.")
+    log.info("  Корень проекта:  %s", REPO_DIR)
+    log.info("  Тяжёлые данные:  %s", data_dir)
     log.info("  Ядро (FastAPI):  http://localhost:8000")
     log.info("  Qwen-Coder vLLM: http://localhost:8001/v1")
     log.info("  UI-TARS vLLM:    http://localhost:8002/v1")
     log.info("  Аудио ASR/TTS:   http://localhost:8003")
+    if relocator and relocator.enabled:
+        log.info("ВПРЕДЬ запускайте всё из %s (например: cd /d %s)",
+                 REPO_DIR, REPO_DIR)
     log.info("Запустите RPC-мост на хосте: python windows_rpc_bridge.py")
     log.info("Запустите дашборд:           cd dashboard && npm install && npm run dev")
     log.info("=" * 70)
