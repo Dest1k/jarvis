@@ -109,6 +109,7 @@ services:
       # База — образ vLLM (torch/CUDA уже внутри → не качаем повторно)
       args:
         JARVIS_VLLM_IMAGE: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
+        PIP_INDEX_URL: ${JARVIS_PIP_INDEX_URL:-https://pypi.org/simple}
     image: jarvis/audio-layer:latest
     container_name: jarvis-audio
     restart: unless-stopped
@@ -165,6 +166,8 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${JARVIS_PIP_INDEX_URL:-https://pypi.org/simple}
     image: jarvis/backend:latest
     container_name: jarvis-backend
     restart: unless-stopped

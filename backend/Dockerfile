@@ -11,6 +11,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Устойчивость pip к нестабильной сети + возможность указать ЗЕРКАЛО PyPI
+# (если прямой доступ к pypi.org рвётся по SSL). Зеркало задаётся build-arg
+# PIP_INDEX_URL (в compose — из JARVIS_PIP_INDEX_URL).
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_RETRIES=4 \
+    PIP_TIMEOUT=60 \
+    PIP_PREFER_BINARY=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 COPY requirements.txt ./
 # BuildKit-кеш pip → зависимости не качаются заново при пересборках.
 RUN --mount=type=cache,target=/root/.cache/pip \

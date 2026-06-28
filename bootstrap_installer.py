@@ -1062,6 +1062,9 @@ def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model:
         WHISPER_MODEL=large-v3
         WHISPER_COMPUTE_TYPE=int8_float16
         KOKORO_VOICE=af_sky
+        # Зеркало PyPI для сборки образов (если прямой pypi.org рвётся по SSL).
+        # Замените на рабочее зеркало, напр. https://mirror.example/simple
+        JARVIS_PIP_INDEX_URL={os.environ.get('JARVIS_PIP_INDEX_URL', 'https://pypi.org/simple')}
     """)
     COMPOSE_ENV.write_text(env, encoding="utf-8")
     log.info("  Записан %s (данные → %s)", COMPOSE_ENV, data_host)
@@ -1187,8 +1190,13 @@ def bring_up_stack() -> None:
     os.environ.setdefault("COMPOSE_DOCKER_CLI_BUILD", "1")
     log.info("→ Загрузка образов (docker compose pull) с ретраями…")
     _compose_with_retries(["pull", "--ignore-pull-failures"])
-    log.info("→ Сборка образов (docker compose build) с ретраями…")
-    _compose_with_retries(["build"])
+    # Сборку ретраим МАЛО (2): если падает не из-за сети, а из-за PyPI/SSL —
+    # повторы только жгут время (каждая упавшая ~минуты). Зеркало PyPI задаётся
+    # через JARVIS_PIP_INDEX_URL (см. wsl/.env).
+    log.info("→ Сборка образов (docker compose build)…")
+    if _compose_with_retries(["build"], retries=2) != 0:
+        log.warning("Сборка образов завершилась с ошибкой. Частая причина — недоступность "
+                    "PyPI (SSL). Укажите рабочее зеркало в wsl/.env: JARVIS_PIP_INDEX_URL=…")
     log.info("→ Запуск стека (docker compose up -d)…")
     _compose_with_retries(["up", "-d", "--remove-orphans"])
 

@@ -15,6 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Устойчивость pip + зеркало PyPI (см. backend/Dockerfile).
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_RETRIES=4 \
+    PIP_TIMEOUT=60 \
+    PIP_PREFER_BINARY=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 # BuildKit-кеш pip: скачанные wheel'ы переживают пересборки → не качаются заново.
 COPY requirements.audio.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
