@@ -97,6 +97,10 @@ services:
     # Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует этот сервис).
     # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
     # Это VL-модель — vLLM сам определит архитектуру Qwen2VLForConditionalGeneration.
+    # --limit-mm-per-prompt НЕ задаём: в vLLM 0.23 он требует JSON-значение
+    # (json.loads), а в строке compose оно ломается при разбиении аргументов.
+    # Дефолт (1 изображение на запрос) и так соответствует работе UI-TARS
+    # (один скриншот на шаг).
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
@@ -105,7 +109,6 @@ services:
       --max-model-len 8192
       --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.20}
       --max-num-seqs 4
-      --limit-mm-per-prompt image=4
       --host 0.0.0.0
       --port 8002
     ports:
