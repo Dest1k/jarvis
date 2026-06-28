@@ -8,12 +8,14 @@ import DeploymentView from "@/components/DeploymentView";
 import DesktopViewer from "@/components/DesktopViewer";
 import CodeStudio from "@/components/CodeStudio";
 import AudioStream from "@/components/AudioStream";
+import ControlPanel from "@/components/ControlPanel";
 import HitlGate from "@/components/HitlGate";
 import StatusBar from "@/components/StatusBar";
 
-type View = "deploy" | "desktop" | "code" | "audio";
+type View = "control" | "deploy" | "desktop" | "code" | "audio";
 
 const NAV: { id: View; label: string }[] = [
+  { id: "control", label: "🛠️ Пульт управления" },
   { id: "deploy", label: "🚀 Развёртывание" },
   { id: "desktop", label: "🖥️ Виртуальный десктоп" },
   { id: "code", label: "🧩 Code Studio" },
@@ -21,7 +23,7 @@ const NAV: { id: View; label: string }[] = [
 ];
 
 export default function Page() {
-  const [view, setView] = useState<View>("deploy");
+  const [view, setView] = useState<View>("control");
 
   return (
     <div className="app-grid">
@@ -46,6 +48,7 @@ export default function Page() {
       </nav>
 
       <main className="content">
+        {view === "control" && <ControlPanel />}
         {view === "deploy" && <DeploymentView />}
         {view === "desktop" && <DesktopViewer />}
         {view === "code" && <CodeStudio />}

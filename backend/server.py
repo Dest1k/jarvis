@@ -284,6 +284,150 @@ async def submit_task(payload: dict[str, Any]) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
+# ПУЛЬТ УПРАВЛЕНИЯ (Control Center): сервисы, GPU, модели, LM Studio, конфиг.
+# Команды исполняются на ХОСТЕ через защищённый RPC-мост (bridge.exec).
+# Рабочий каталог моста = корень проекта, поэтому пути относительные.
+# --------------------------------------------------------------------------- #
+CONTAINERS = {
+    "qwen": "jarvis-vllm-qwen", "uitars": "jarvis-vllm-uitars",
+    "audio": "jarvis-audio", "backend": "jarvis-backend", "sandbox": "jarvis-sandbox",
+}
+COMPOSE = "wsl/docker-compose.agents.yml"
+ENV_FILE = "wsl/.env"
+LMSTUDIO_HOST = os.environ.get("JARVIS_LMSTUDIO_HOST", "http://host.docker.internal:1234")
+
+
+async def _host_exec(command: str) -> dict[str, Any]:
+    """Выполнить команду на хосте через RPC-мост; вернуть {ok, code, out}."""
+    res = await bridge.call("exec", {"command": command})
+    r = (res or {}).get("result", {})
+    return {"ok": res.get("ok", False), "code": r.get("returncode"),
+            "out": (r.get("stdout") or "") + (r.get("stderr") or "")}
+
+
+@app.get("/api/control/overview")
+async def control_overview() -> JSONResponse:
+    """Сводка для пульта: сервисы, GPU/VRAM, локальные модели, LM Studio, конфиг."""
+    services = await _host_exec(
+        'docker ps -a --filter "name=jarvis-" --format "{{.Names}}|{{.State}}|{{.Status}}"')
+    gpu = await _host_exec(
+        "nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu "
+        "--format=csv,noheader,nounits")
+    models = await _host_exec("cmd /c dir /b data\\models")
+    cfg = await bridge.call("read_file", {"path": ENV_FILE})
+    cfg_text = (cfg.get("result", {}) or {}).get("stdout", "")
+    # LM Studio — список доступных моделей (напрямую с хоста)
+    lms_models: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=4) as cli:
+            r = await cli.get(f"{LMSTUDIO_HOST}/v1/models")
+            lms_models = [m["id"] for m in r.json().get("data", [])]
+    except Exception:  # noqa: BLE001
+        pass
+    return JSONResponse({
+        "services": services["out"],
+        "gpu": gpu["out"].strip(),
+        "models": [m for m in models["out"].splitlines() if m.strip()],
+        "lmstudio_models": lms_models,
+        "config": cfg_text,
+        "bridge_connected": bridge._connected.is_set(),
+    })
+
+
+@app.post("/api/control/service")
+async def control_service(payload: dict[str, Any]) -> JSONResponse:
+    """Управление сервисом: start | stop | restart | recreate."""
+    svc = payload.get("service", "")
+    action = payload.get("action", "")
+    if svc not in CONTAINERS:
+        return JSONResponse({"ok": False, "error": "Неизвестный сервис."}, status_code=400)
+    name = CONTAINERS[svc]
+    if action in ("start", "stop", "restart"):
+        res = await _host_exec(f"docker {action} {name}")
+    elif action == "recreate":
+        res = await _host_exec(
+            f'docker compose -f {COMPOSE} --env-file {ENV_FILE} up -d --force-recreate '
+            f'--no-deps {svc_to_compose(svc)}')
+    else:
+        return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+    return JSONResponse(res)
+
+
+def svc_to_compose(svc: str) -> str:
+    return {"qwen": "vllm-qwen-coder", "uitars": "vllm-ui-tars", "audio": "audio-layer",
+            "backend": "backend", "sandbox": "sandbox"}.get(svc, svc)
+
+
+@app.get("/api/control/logs/{svc}")
+async def control_logs(svc: str, tail: int = 200) -> JSONResponse:
+    if svc not in CONTAINERS:
+        return JSONResponse({"ok": False, "error": "Неизвестный сервис."}, status_code=400)
+    res = await _host_exec(f"docker logs --tail {int(tail)} {CONTAINERS[svc]}")
+    return JSONResponse(res)
+
+
+@app.post("/api/control/config")
+async def control_config(payload: dict[str, Any]) -> JSONResponse:
+    """Сохранить wsl/.env (редактор конфигурации в дашборде)."""
+    content = payload.get("content", "")
+    res = await bridge.call("write_file", {"path": ENV_FILE, "content": content})
+    return JSONResponse({"ok": res.get("ok", False), "result": res.get("result")})
+
+
+@app.post("/api/control/model")
+async def control_model(payload: dict[str, Any]) -> JSONResponse:
+    """
+    Управление моделями: download (скачать репозиторий в data/models/<name>) или
+    set (назначить сервису локальную модель и пересоздать контейнер).
+    """
+    action = payload.get("action", "")
+    if action == "download":
+        repo = payload.get("repo", "").strip()
+        name = payload.get("name", "").strip() or repo.split("/")[-1]
+        if not repo:
+            return JSONResponse({"ok": False, "error": "Не указан repo."}, status_code=400)
+        # Фоновая загрузка на хосте (не блокируем мост); прогресс — в окне процесса
+        res = await _host_exec(
+            f'start "hf-download" python hf_downloader.py {repo} --dest data\\models\\{name}')
+        return JSONResponse({"ok": res["ok"], "started": True, "out": res["out"]})
+    if action == "set":
+        svc = payload.get("service", "")
+        path = payload.get("model_path", "").strip()  # напр. /models/qwen-coder-14b
+        env_key = {"qwen": "JARVIS_QWEN_MODEL_PATH",
+                   "uitars": "JARVIS_UITARS_MODEL_PATH"}.get(svc)
+        if not env_key or not path:
+            return JSONResponse({"ok": False, "error": "Нужны service и model_path."},
+                                status_code=400)
+        # Обновляем .env и пересоздаём сервис
+        cfg = await bridge.call("read_file", {"path": ENV_FILE})
+        text = (cfg.get("result", {}) or {}).get("stdout", "")
+        lines = [l for l in text.splitlines() if not l.startswith(env_key + "=")]
+        lines.append(f"{env_key}={path}")
+        await bridge.call("write_file", {"path": ENV_FILE, "content": "\n".join(lines) + "\n"})
+        res = await _host_exec(
+            f'docker compose -f {COMPOSE} --env-file {ENV_FILE} up -d --force-recreate '
+            f'--no-deps {svc_to_compose(svc)}')
+        return JSONResponse(res)
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
+@app.post("/api/control/lmstudio")
+async def control_lmstudio(payload: dict[str, Any]) -> JSONResponse:
+    """Управление LM Studio: load <model> | unload (через CLI lms на хосте)."""
+    action = payload.get("action", "")
+    if action == "unload":
+        res = await _host_exec("lms unload --all")
+    elif action == "load":
+        model = payload.get("model", "").strip()
+        if not model:
+            return JSONResponse({"ok": False, "error": "Не указана модель."}, status_code=400)
+        res = await _host_exec(f"lms load {model} --yes")
+    else:
+        return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+    return JSONResponse(res)
+
+
+# --------------------------------------------------------------------------- #
 # WS: логи развёртывания
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws/deploy")

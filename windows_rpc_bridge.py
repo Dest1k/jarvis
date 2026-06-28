@@ -244,6 +244,34 @@ class HostExecutor:
         log.info("Выполняю команду хоста: %s", command)
         return await self._run(command, shell=True)
 
+    async def read_file(self, path: str) -> dict[str, Any]:
+        """Прочитать файл на хосте (для редактора конфигурации в дашборде)."""
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            try:
+                return {"returncode": 0,
+                        "stdout": Path(path).read_text(encoding="utf-8", errors="replace")}
+            except Exception as exc:  # noqa: BLE001
+                return {"returncode": 1, "stderr": str(exc)}
+
+        return await loop.run_in_executor(None, _b)
+
+    async def write_file(self, path: str, content: str) -> dict[str, Any]:
+        """Записать файл на хосте (сохранение конфигурации из дашборда)."""
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            try:
+                p = Path(path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content, encoding="utf-8")
+                return {"returncode": 0, "stdout": f"Записано {len(content)} символов в {path}"}
+            except Exception as exc:  # noqa: BLE001
+                return {"returncode": 1, "stderr": str(exc)}
+
+        return await loop.run_in_executor(None, _b)
+
     async def powershell(self, command: str) -> dict[str, Any]:
         """Выполнить PowerShell-команду."""
         log.info("PowerShell: %s", command)
@@ -373,6 +401,8 @@ class RpcRouter:
             "screenshot": lambda p: self.host.screenshot(p.get("path")),
             "kill_process": lambda p: self.host.kill_process(p["name"]),
             "system_power": lambda p: self.host.system_power(p["mode"]),
+            "read_file": lambda p: self.host.read_file(p["path"]),
+            "write_file": lambda p: self.host.write_file(p["path"], p.get("content", "")),
             "git_push": lambda p: self.git.commit_and_push(
                 p["repo"], p.get("message", "JARVIS: авто-обновление"), p.get("branch")
             ),
@@ -541,6 +571,9 @@ def main() -> int:
         log.error("Из соображений безопасности RPC-мост слушает только localhost. "
                   "Запрошенный host=%s отклонён.", args.host)
         return 2
+    # Рабочий каталог — корень проекта: относительные пути из дашборда
+    # (wsl/.env, data/models, hf_downloader.py, compose) резолвятся корректно.
+    os.chdir(Path(__file__).resolve().parent)
     token = ensure_token()
     server = RpcBridgeServer(token=token, host=args.host, port=args.port)
     try:

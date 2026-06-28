@@ -95,7 +95,8 @@ Audio (CTranslate2/torch, не vLLM):  ~2.0 ГБ  →  занято 26.6 ГБ,  
 
 | Файл | Назначение |
 |------|-----------|
-| `bootstrap_installer.py` | Нативный Windows-bootstrap: проверки, опрос LM Studio, `.wslconfig`, запуск бэкенда |
+| `jarvis.py` / `jarvis.bat` | **Единая точка запуска**: install / up / stop / status одной командой |
+| `bootstrap_installer.py` | Нативный Windows-bootstrap: проверки, `.wslconfig`, перенос на D:, подъём стека |
 | `install_agent.py` | **Автономный агент-установщик** на локальной LLM: сам ведёт развёртывание |
 | `hf_downloader.py` | Надёжный загрузчик моделей с HuggingFace (resume, sha256, скорость/ETA) |
 | `hf_token.txt` | Ваш токен HF (создаётся из `.example`, в `.gitignore`) |
@@ -113,17 +114,27 @@ Audio (CTranslate2/torch, не vLLM):  ~2.0 ГБ  →  занято 26.6 ГБ,  
 
 ## 5. Порядок запуска (полностью автоматический)
 
+### ЕДИНАЯ точка запуска (рекомендуется)
+
+Всё поднимается из ОДНОГО места — `jarvis.bat` (двойной клик) или `jarvis.py`:
+
 ```powershell
-# 1. На ХОСТЕ Windows (PowerShell, нативный Python 3.11+)
-pip install requests
-python bootstrap_installer.py --lmstudio http://localhost:1234/v1 --wsl-ram 96 --wsl-cpus 20
+python jarvis.py install   # первый раз: полная установка (агент на LLM)
+python jarvis.py           # запустить ВСЁ: RPC-мост + стек + дашборд + браузер
+python jarvis.py stop      # остановить
+python jarvis.py status    # статус
+```
 
-# 2. Демон RPC-моста (отдельное окно, на хосте)
-pip install websockets
-python windows_rpc_bridge.py --port 8765
+`jarvis.bat` без аргументов поднимает RPC-мост, контейнерный стек и дашборд и
+открывает **Пульт управления** на http://localhost:3000.
 
-# 3. Дашборд
-cd dashboard && npm install && npm run dev   # http://localhost:3000
+### Вручную по шагам (если нужно)
+
+```powershell
+pip install requests websockets
+python install_agent.py --lmstudio http://localhost:1234/v1   # или bootstrap_installer.py
+python windows_rpc_bridge.py --port 8765                       # отдельное окно
+cd dashboard && npm install && npm run dev                     # http://localhost:3000
 ```
 
 > **ЕДИНАЯ МОДЕЛЬ.** Весь путь установки использует ОДНУ локальную модель.
@@ -320,6 +331,17 @@ python install_agent.py --lmstudio http://localhost:1234/v1 --target-root D:\jar
 > Агент опирается на `run_bootstrap`, поэтому получает «бесплатно» всю
 > проверенную логику: перенос на D:, префлайт Docker, возобновляемую загрузку
 > весов, идемпотентность.
+
+## 5.3 Пульт управления (вкладка «Пульт» в дашборде)
+
+Полное управление системой из браузера (через backend → защищённый RPC-мост):
+
+- **Сервисы** — статус, старт/стоп/рестарт каждого контейнера, просмотр логов.
+- **GPU / VRAM** — занятость памяти и загрузка в реальном времени (`nvidia-smi`).
+- **Модели** — список локальных моделей (`data/models`), **замена модели сервису**
+  (выбрать и пересоздать контейнер), **докачка** нового репозитория с HF.
+- **LM Studio** — список доступных LLM, **загрузка/выгрузка** (замена «мозга»).
+- **Конфигурация** — редактор `wsl/.env` прямо в дашборде с сохранением.
 
 ## 6. Безопасность
 
