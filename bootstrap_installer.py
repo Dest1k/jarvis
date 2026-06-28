@@ -1197,28 +1197,56 @@ def bring_up_stack() -> None:
     if _compose_with_retries(["build"], retries=2) != 0:
         log.warning("Сборка образов завершилась с ошибкой. Частая причина — недоступность "
                     "PyPI (SSL). Укажите рабочее зеркало в wsl/.env: JARVIS_PIP_INDEX_URL=…")
-    log.info("→ Запуск стека (docker compose up -d)…")
-    _compose_with_retries(["up", "-d", "--remove-orphans"])
+    # ПОЭТАПНЫЙ запуск с ВИДИМЫМ ожиданием. Иначе `docker compose up -d` молча
+    # висит на depends_on (ждёт healthcheck qwen, пока грузится 19 ГБ модели),
+    # а при «unhealthy» — каскадно валит зависимые. --no-deps: запускаем по
+    # одному, порядок (qwen→ui-tars) сохраняем сами.
+    log.info("→ Поэтапный запуск стека (с видимым ожиданием готовности)…")
+    _compose_with_retries(["up", "-d", "--remove-orphans", "--no-deps", "sandbox"], retries=2)
 
-    log.info("→ Ожидание готовности сервисов…")
-    for name, url in HEALTH_ENDPOINTS.items():
-        ready = False
-        # vLLM-инстансы прогреваются дольше всего
-        retries = 90 if name.startswith("vllm") else 30
-        for i in range(retries):
-            try:
-                if requests.get(url, timeout=3).status_code == 200:
-                    log.info("  %s — готов (попытка %d).", name, i + 1)
-                    ready = True
-                    break
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(10)
-        if not ready:
-            log.warning("  %s не ответил вовремя. Логи: docker compose logs %s", name, name)
+    stages = [
+        ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # модель ~19 ГБ
+        ("vllm-ui-tars",    HEALTH_ENDPOINTS["vllm-ui-tars"],    90),
+        ("audio-layer",     HEALTH_ENDPOINTS["audio-layer"],     60),
+        ("backend",         HEALTH_ENDPOINTS["backend"],         45),
+    ]
+    for name, url, retries in stages:
+        log.info("→ Запуск %s…", name)
+        _compose_with_retries(["up", "-d", "--no-deps", name], retries=2)
+        if not _wait_health(name, url, retries):
+            log.warning("  ✗ %s не вышел в готовность. Причина — в логах ниже.", name)
+            _dump_logs(name)
 
     log.info("→ Текущий статус контейнеров:")
     compose("ps")
+
+
+def _wait_health(name: str, url: str, retries: int, interval: int = 10,
+                 soft_dump_at: int = 9) -> bool:
+    """Ждать готовности сервиса с ВИДИМЫМ прогрессом; рано показать логи при затыке."""
+    dumped = False
+    for i in range(1, retries + 1):
+        try:
+            if requests.get(url, timeout=3).status_code == 200:
+                log.info("  ✔ %s готов (проверка %d).", name, i)
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if i == soft_dump_at and not dumped:
+            log.info("  %s пока не отвечает — промежуточные логи (для ранней диагностики):", name)
+            _dump_logs(name, tail=30)
+            dumped = True
+        elif i % 6 == 0:
+            log.info("  %s ещё грузится… (проверка %d/%d)", name, i, retries)
+        time.sleep(interval)
+    return False
+
+
+def _dump_logs(service: str, tail: int = 60) -> None:
+    """Показать последние логи контейнера (для диагностики сбоя)."""
+    log.info("─── последние %d строк логов %s ───", tail, service)
+    compose("logs", "--tail", str(tail), service, stream=True)
+    log.info("─── конец логов %s ───", service)
 
 
 # --------------------------------------------------------------------------- #

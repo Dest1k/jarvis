@@ -63,12 +63,14 @@ services:
       --port 8001
     ports:
       - "127.0.0.1:8001:8001"
+    # healthcheck через python3 (curl в образе vLLM может отсутствовать → ложный
+    # «unhealthy»). start_period большой: загрузка 19 ГБ модели в VRAM долгая.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 20s
       timeout: 5s
-      retries: 30
-      start_period: 300s
+      retries: 40
+      start_period: 600s
 
   # ---------------------------------------------------------------------------
   # 2. Контроллер ОС/GUI — UI-TARS-7B (Int4), ~5.5 ГБ VRAM
@@ -89,15 +91,18 @@ services:
       --port 8002
     ports:
       - "127.0.0.1:8002:8002"
+    # Порядок (qwen → ui-tars) обеспечивается поэтапным запуском в bootstrap,
+    # поэтому здесь service_started (а не service_healthy) — чтобы plain
+    # `docker compose up` не блокировался немо на healthcheck.
     depends_on:
       vllm-qwen-coder:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
       interval: 20s
       timeout: 5s
-      retries: 30
-      start_period: 180s
+      retries: 40
+      start_period: 300s
 
   # ---------------------------------------------------------------------------
   # 3. Аудио-слой — Faster-Whisper Large-v3 (ASR) + Kokoro TTS, ~2 ГБ VRAM
