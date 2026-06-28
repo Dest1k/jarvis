@@ -398,6 +398,47 @@ class HostExecutor:
         """Прочитать текущий текст из буфера обмена Windows."""
         return await self.powershell("Get-Clipboard -Raw", hidden=True)
 
+    async def list_dir(self, path: str, max_entries: int = 300,
+                       max_depth: int = 3) -> dict[str, Any]:
+        """Перечислить файлы в каталоге на хосте (рекурсивно, с ограничениями)."""
+        real = self._expand_path(path)
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            base = Path(real)
+            if not base.exists():
+                return {"returncode": 1, "stderr": f"Путь не найден: {real}"}
+            if base.is_file():
+                return {"returncode": 0,
+                        "stdout": f"{real} — файл ({base.stat().st_size} байт)"}
+            lines: list[str] = []
+            count = 0
+            for root, dirs, files in os.walk(real):
+                rel = os.path.relpath(root, real)
+                depth = 0 if rel == "." else rel.count(os.sep) + 1
+                if depth > max_depth:
+                    dirs[:] = []
+                    continue
+                dirs.sort()
+                for f in sorted(files):
+                    fp = os.path.join(root, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                    except OSError:
+                        sz = 0
+                    name = f if rel == "." else os.path.join(rel, f)
+                    lines.append(f"{name} ({sz} б)")
+                    count += 1
+                    if count >= max_entries:
+                        break
+                if count >= max_entries:
+                    lines.append("…(список усечён)")
+                    break
+            return {"returncode": 0,
+                    "stdout": f"Содержимое {real} ({count} файлов):\n" + "\n".join(lines)}
+
+        return await loop.run_in_executor(None, _b)
+
     async def open_app(self, command: str) -> dict[str, Any]:
         """Запустить приложение/исполняемый файл на хосте."""
         log.info("Запуск приложения: %s", command)
@@ -601,6 +642,7 @@ class RpcRouter:
             "paste_text": lambda p: self.host.paste_text(p.get("text", "")),
             "send_keys": lambda p: self.host.send_keys(p.get("keys", "")),
             "get_clipboard": lambda p: self.host.get_clipboard(),
+            "list_dir": lambda p: self.host.list_dir(p["path"]),
             "kill_process": lambda p: self.host.kill_process(p["name"]),
             "system_power": lambda p: self.host.system_power(p["mode"]),
             "read_file": lambda p: self.host.read_file(p["path"]),

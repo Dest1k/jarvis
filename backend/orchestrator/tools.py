@@ -756,6 +756,39 @@ async def tool_system_info(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     return {"ok": bool(info), "content": _truncate(body or "Нет данных о системе.")}
 
 
+# --- 15. Открыть веб-страницу/поиск в браузере хоста ----------------------- #
+async def tool_open_url(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Открыть URL (или поисковый запрос) в браузере по умолчанию на ПК."""
+    if ctx.bridge is None:
+        return {"ok": False, "content": "RPC-мост недоступен."}
+    url = str(args.get("url", "")).strip()
+    query = str(args.get("query", "")).strip()
+    if not url and query:
+        url = "https://www.google.com/search?q=" + quote(query)
+    if not url:
+        return {"ok": False, "content": "Нужен 'url' или 'query'."}
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    res = await ctx.bridge.call("open_app", {"command": url})
+    if res.get("ok"):
+        return {"ok": True, "content": f"Открыл в браузере: {url}"}
+    return {"ok": False, "content": f"Не удалось открыть {url}: {res.get('error', '')}"}
+
+
+# --- 16. Листинг каталога на хосте ----------------------------------------- #
+async def tool_list_dir(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Перечислить файлы в папке на ПК (для анализа проектов/каталогов)."""
+    if ctx.bridge is None:
+        return {"ok": False, "content": "RPC-мост недоступен."}
+    path = str(args.get("path", "")).strip()
+    if not path:
+        return {"ok": False, "content": "Не задан 'path'."}
+    res = await ctx.bridge.call("list_dir", {"path": path})
+    result = res.get("result", {}) or {}
+    out = (result.get("stdout") or result.get("stderr") or "").strip()
+    return {"ok": res.get("ok", False), "content": _truncate(out or "(пусто)")}
+
+
 # =========================================================================== #
 # Реестр
 # =========================================================================== #
@@ -890,6 +923,22 @@ class ToolRegistry:
             "Сводка о ХОСТ-машине: ОС, CPU, RAM, GPU (VRAM и загрузка).",
             {},
             tool_system_info,
+        ))
+        self.add(Tool(
+            "open_url",
+            "Открыть веб-страницу или поиск в браузере на ПК. Используй это для "
+            "«открой вкладку/сайт/страницу с X». Если знаешь адрес — передай url; "
+            "иначе передай query и откроется поиск.",
+            {"url": "адрес страницы (если известен)",
+             "query": "поисковый запрос (если адрес неизвестен)"},
+            tool_open_url,
+        ))
+        self.add(Tool(
+            "list_dir",
+            "Перечислить файлы в папке на ПК (для анализа проекта/каталога). "
+            "Затем читай нужные файлы через windows.read_file.",
+            {"path": "путь к папке (поддержка %USERPROFILE%, ~)"},
+            tool_list_dir,
         ))
 
     def add(self, tool: Tool) -> None:
