@@ -512,6 +512,8 @@ async def _stream_container_logs(svc: str, container: str) -> None:
 # параллельные сообщения не путали оперативный контекст и не плодили нагрузку
 # на vLLM (защита от затыков и роста KV-кэша).
 _chat_locks: dict[str, asyncio.Lock] = {}
+# Текущая выполняемая задача агента по сессии — для аварийной остановки.
+_agent_tasks: dict[str, asyncio.Task] = {}
 
 
 def _chat_lock(session: str) -> asyncio.Lock:
@@ -530,11 +532,18 @@ async def ws_chat(ws: WebSocket) -> None:
             msg = json.loads(raw)
             mtype = msg.get("type")
             if mtype == "user_message":
-                asyncio.create_task(_run_agent_turn(
-                    msg.get("text", ""),
-                    msg.get("id", ""),
-                    msg.get("session", "default"),
-                ))
+                session = msg.get("session", "default")
+                _agent_tasks[session] = asyncio.create_task(_run_agent_turn(
+                    msg.get("text", ""), msg.get("id", ""), session))
+            elif mtype == "cancel":
+                # Аварийная остановка текущей задачи агента.
+                session = msg.get("session", "default")
+                t = _agent_tasks.get(session)
+                if t and not t.done():
+                    t.cancel()
+                await manager.broadcast("chat", {
+                    "id": msg.get("id", ""), "type": "cancelled",
+                    "text": "Задача остановлена пользователем."})
             elif mtype == "reset_context":
                 from orchestrator import agent
                 agent.reset_context(msg.get("session", "default"),
@@ -555,13 +564,21 @@ async def _run_agent_turn(user_text: str, msg_id: str, session: str) -> None:
     """Прогнать ход агента и транслировать поток событий в канал chat."""
     from orchestrator.agent import run_chat  # ленивый импорт (синглтоны агента)
 
-    async with _chat_lock(session):
-        try:
-            async for ev in run_chat(session, user_text, bridge=bridge):
-                await manager.broadcast("chat", {"id": msg_id, **ev})
-        except Exception as exc:  # noqa: BLE001
-            await manager.broadcast("chat", {"id": msg_id, "type": "error",
-                                             "error": str(exc)})
+    try:
+        async with _chat_lock(session):
+            try:
+                async for ev in run_chat(session, user_text, bridge=bridge):
+                    await manager.broadcast("chat", {"id": msg_id, **ev})
+            except asyncio.CancelledError:
+                # Остановка пользователем: уведомление шлёт обработчик cancel,
+                # здесь просто корректно сворачиваемся (lock освобождается).
+                raise
+            except Exception as exc:  # noqa: BLE001
+                await manager.broadcast("chat", {"id": msg_id, "type": "error",
+                                                 "error": str(exc)})
+    finally:
+        if _agent_tasks.get(session) is asyncio.current_task():
+            _agent_tasks.pop(session, None)
 
 
 # --------------------------------------------------------------------------- #

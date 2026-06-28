@@ -279,29 +279,39 @@ class HostExecutor:
         log.info("Выполняю команду хоста: %s", command)
         return await self._run(command, shell=True)
 
+    @staticmethod
+    def _expand_path(path: str) -> str:
+        """Развернуть %ENV% и ~ в пути (агент часто шлёт %USERPROFILE%\\...)."""
+        return os.path.expanduser(os.path.expandvars(path))
+
     async def read_file(self, path: str) -> dict[str, Any]:
-        """Прочитать файл на хосте (для редактора конфигурации в дашборде)."""
+        """Прочитать файл на хосте (конфиг в дашборде / агент)."""
         loop = asyncio.get_running_loop()
+        real = self._expand_path(path)
 
         def _b() -> dict[str, Any]:
             try:
                 return {"returncode": 0,
-                        "stdout": Path(path).read_text(encoding="utf-8", errors="replace")}
+                        "stdout": Path(real).read_text(encoding="utf-8", errors="replace")}
             except Exception as exc:  # noqa: BLE001
                 return {"returncode": 1, "stderr": str(exc)}
 
         return await loop.run_in_executor(None, _b)
 
     async def write_file(self, path: str, content: str) -> dict[str, Any]:
-        """Записать файл на хосте (сохранение конфигурации из дашборда)."""
+        """Записать файл на хосте (конфиг из дашборда / создание файлов агентом)."""
         loop = asyncio.get_running_loop()
+        real = self._expand_path(path)
 
         def _b() -> dict[str, Any]:
             try:
-                p = Path(path)
+                p = Path(real)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
-                return {"returncode": 0, "stdout": f"Записано {len(content)} символов в {path}"}
+                # Возвращаем АБСОЛЮТНЫЙ путь — агент использует его, чтобы открыть
+                # файл в нужной программе (напр. code "<path>").
+                return {"returncode": 0,
+                        "stdout": f"Записано {len(content)} символов в {p.resolve()}"}
             except Exception as exc:  # noqa: BLE001
                 return {"returncode": 1, "stderr": str(exc)}
 

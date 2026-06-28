@@ -56,11 +56,13 @@ export default function ChatView() {
   const [level, setLevel] = useState(0);
   const [memOpen, setMemOpen] = useState(false);
   const [mem, setMem] = useState<MemoryOverview | null>(null);
+  const [working, setWorking] = useState(false);
 
   const chatRef = useRef<JarvisSocket | null>(null);
   const audioRef = useRef<JarvisSocket | null>(null);
   const speakRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const workingIdRef = useRef<string>("");
 
   // mic
   const micCtxRef = useRef<AudioContext | null>(null);
@@ -120,9 +122,18 @@ export default function ChatView() {
           case "assistant_done":
             if (id) upsertAssistant(id, (m) => { m.streaming = false; m.text = String(msg.content ?? m.text); });
             if (speakRef.current && msg.content) audioRef.current?.sendJson({ type: "speak", text: String(msg.content) });
+            if (id === workingIdRef.current) setWorking(false);
             break;
           case "error":
             if (id) upsertAssistant(id, (m) => { m.streaming = false; m.error = true; m.text += `\n⚠ ${String(msg.error ?? "")}`; });
+            if (id === workingIdRef.current) setWorking(false);
+            break;
+          case "cancelled":
+            if (id) upsertAssistant(id, (m) => {
+              m.streaming = false;
+              m.text += (m.text ? "\n" : "") + "⏹ Остановлено пользователем.";
+            });
+            setWorking(false);
             break;
           case "memory":
             // системное уведомление о памяти — лёгкий тост в ленте
@@ -158,11 +169,18 @@ export default function ChatView() {
   // --- отправка сообщения ---
   const send = () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || working) return;
     const id = uid();
+    workingIdRef.current = id;
+    setWorking(true);
     setMessages((p) => [...p, { id, role: "user", text, steps: [] }]);
     chatRef.current?.sendJson({ type: "user_message", text, id });
     setInput("");
+  };
+
+  const cancel = () => {
+    chatRef.current?.sendJson({ type: "cancel", id: workingIdRef.current });
+    setWorking(false);
   };
 
   // --- микрофон → PCM16 → /ws/audio ---
@@ -294,7 +312,13 @@ export default function ChatView() {
             if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
           }}
         />
-        <button className="btn primary send" onClick={send}>➤</button>
+        {working ? (
+          <button className="btn danger send" onClick={cancel} title="Аварийно остановить задачу">
+            ⏹
+          </button>
+        ) : (
+          <button className="btn primary send" onClick={send}>➤</button>
+        )}
       </div>
 
       {memOpen && (

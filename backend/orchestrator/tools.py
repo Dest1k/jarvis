@@ -151,6 +151,7 @@ async def _sandbox_cleanup(workdir: str) -> None:
 _WINDOWS_ACTIONS = {
     "exec", "powershell", "open_app", "screenshot",
     "media_hook", "kill_process", "system_power",
+    "write_file", "read_file", "type_text", "key_press",
 }
 
 
@@ -175,6 +176,19 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
         payload["name"] = args.get("name", "")
     elif action == "system_power":
         payload["mode"] = args.get("mode", "")
+    elif action == "write_file":
+        payload["path"] = args.get("path", "")
+        payload["content"] = args.get("content", "")
+        if not payload["path"]:
+            return {"ok": False, "content": "Не задан 'path' для write_file."}
+    elif action == "read_file":
+        payload["path"] = args.get("path", "")
+        if not payload["path"]:
+            return {"ok": False, "content": "Не задан 'path' для read_file."}
+    elif action == "type_text":
+        payload["text"] = args.get("text", "")
+    elif action == "key_press":
+        payload["keys"] = args.get("keys", "")
 
     res = await ctx.bridge.call(action, payload)
     if not res.get("ok"):
@@ -476,11 +490,17 @@ class ToolRegistry:
         ))
         self.add(Tool(
             "windows",
-            "Выполнить действие на ХОСТ-машине Windows через защищённый мост: "
-            "запуск приложений, команды cmd/PowerShell, скриншот, медиа-клавиши, "
-            "управление процессами/питанием. Деструктивное проходит подтверждение.",
-            {"action": "exec|powershell|open_app|screenshot|media_hook|kill_process|system_power",
-             "command": "для exec/powershell/open_app",
+            "Действия на ХОСТ-машине Windows через защищённый мост: запуск программ, "
+            "команды cmd/PowerShell, создание/чтение файлов, печать в активное окно, "
+            "скриншот, медиа-клавиши, процессы/питание. Деструктивное — с подтверждением. "
+            "Чтобы 'написать код в редакторе' — сначала write_file, затем open_app файла.",
+            {"action": "open_app|write_file|read_file|exec|powershell|type_text|key_press|"
+                       "screenshot|media_hook|kill_process|system_power",
+             "command": "для open_app (имя программы/файл/URL) и exec/powershell",
+             "path": "для write_file/read_file (поддержка %USERPROFILE%, ~)",
+             "content": "содержимое для write_file",
+             "text": "текст для печати в активное окно (type_text)",
+             "keys": "клавиши для key_press (напр. 'enter','ctrl+s')",
              "key": "для media_hook (play_pause|next|prev|vol_up|vol_down|mute)",
              "name": "имя процесса для kill_process",
              "mode": "для system_power (lock|shutdown|reboot|cancel)"},

@@ -74,7 +74,21 @@ def _planner_system() -> str:
         "• ВАЖНО: если инструмент уже вернул успех (например, приложение/URL "
         "открыты, код выполнен, данные получены) — задача по этому шагу СДЕЛАНА. "
         "НЕ вызывай его снова, сразу action=answer.\n"
-        "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer."
+        "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer.\n\n"
+        "WINDOWS-РЕЦЕПТЫ (для совместимости с программами на ПК):\n"
+        "• Открыть программу/файл/URL: windows.open_app, command — имя или путь, напр. "
+        "\"code\", \"notepad\", \"calc\", \"explorer\", \"chrome\", \"msedge\", "
+        "\"https://...\".\n"
+        "• «НАПИСАТЬ код/текст в редакторе» делай НАДЁЖНО через файл, а не печать по "
+        "клавишам: 1) windows.write_file (path, content) — создаёт файл на хосте "
+        "(поддержка %USERPROFILE%, ~); 2) windows.open_app, command='code \"<путь>\"' — "
+        "открывает файл уже с нужным содержимым в редакторе. Пример для «открой VS Code "
+        "и напиши hello world на C++»: write_file path='%USERPROFILE%/Desktop/hello.cpp' "
+        "с кодом C++, затем open_app command='code \"%USERPROFILE%/Desktop/hello.cpp\"'.\n"
+        "• Запустить/проверить код по-настоящему — run_code (компиляция в sandbox).\n"
+        "• Печать в уже открытое окно — windows.type_text (text) и windows.key_press "
+        "(keys); требует pyautogui на хосте, для кода предпочитай write_file+open_app.\n"
+        "• Системные команды — windows.exec или windows.powershell."
     )
 
 
