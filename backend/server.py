@@ -541,6 +541,10 @@ async def ws_chat(ws: WebSocket) -> None:
                 t = _agent_tasks.get(session)
                 if t and not t.done():
                     t.cancel()
+                # Закрываем «висящую» реплику, чтобы следующий запрос не утянул
+                # прерванную задачу из контекста.
+                from orchestrator import agent
+                agent.mark_interrupted(session)
                 await manager.broadcast("chat", {
                     "id": msg.get("id", ""), "type": "cancelled",
                     "text": "Задача остановлена пользователем."})

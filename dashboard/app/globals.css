@@ -207,9 +207,25 @@ input:focus, textarea:focus { border-color: var(--accent); }
   flex: 1; resize: none; max-height: 140px; min-height: 24px;
   line-height: 1.4; padding: 9px 12px;
 }
-.btn.mic { font-size: 18px; padding: 8px 12px; border-radius: 10px; }
+.btn.mic { font-size: 18px; padding: 8px 12px; border-radius: 10px; transition: all 0.15s; }
+.btn.mic.recording {
+  background: var(--err); border-color: var(--err); color: #fff;
+  animation: recpulse 1.2s ease-in-out infinite;
+}
+@keyframes recpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.6); }
+  50% { box-shadow: 0 0 0 9px rgba(248, 81, 73, 0); }
+}
+.rec-indicator {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--err); font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.rec-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--err); animation: blink 1s step-start infinite;
+}
 .btn.send { font-size: 16px; padding: 9px 15px; border-radius: 10px; }
-.mic-vu { width: 60px; align-self: center; }
+.mic-vu { width: 56px; align-self: center; }
 
 /* Панель памяти */
 .mem-card { max-width: 620px; width: 620px; border-color: var(--border); }

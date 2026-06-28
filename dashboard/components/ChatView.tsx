@@ -294,14 +294,17 @@ export default function ChatView() {
 
       <div className="chat-input panel">
         <button
-          className={`btn mic ${listening ? "danger" : ""}`}
+          className={`btn mic ${listening ? "recording" : ""}`}
           onClick={() => (listening ? stopMic() : startMic())}
-          title="Голосовой ввод"
+          title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод"}
         >
-          {listening ? "⏺" : "🎤"}
+          {listening ? "⏹" : "🎤"}
         </button>
         {listening && (
-          <div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div>
+          <div className="rec-indicator">
+            <span className="rec-dot" /> Слушаю… говорите
+            <div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div>
+          </div>
         )}
         <textarea
           value={input}

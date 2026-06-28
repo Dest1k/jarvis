@@ -74,20 +74,26 @@ def _planner_system() -> str:
         "• ВАЖНО: если инструмент уже вернул успех (например, приложение/URL "
         "открыты, код выполнен, данные получены) — задача по этому шагу СДЕЛАНА. "
         "НЕ вызывай его снова, сразу action=answer.\n"
-        "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer.\n\n"
-        "WINDOWS-РЕЦЕПТЫ (для совместимости с программами на ПК):\n"
-        "• Открыть программу/файл/URL: windows.open_app, command — имя или путь, напр. "
-        "\"code\", \"notepad\", \"calc\", \"explorer\", \"chrome\", \"msedge\", "
-        "\"https://...\".\n"
-        "• «НАПИСАТЬ код/текст в редакторе» делай НАДЁЖНО через файл, а не печать по "
-        "клавишам: 1) windows.write_file (path, content) — создаёт файл на хосте "
-        "(поддержка %USERPROFILE%, ~); 2) windows.open_app, command='code \"<путь>\"' — "
-        "открывает файл уже с нужным содержимым в редакторе. Пример для «открой VS Code "
-        "и напиши hello world на C++»: write_file path='%USERPROFILE%/Desktop/hello.cpp' "
-        "с кодом C++, затем open_app command='code \"%USERPROFILE%/Desktop/hello.cpp\"'.\n"
-        "• Запустить/проверить код по-настоящему — run_code (компиляция в sandbox).\n"
-        "• Печать в уже открытое окно — windows.type_text (text) и windows.key_press "
-        "(keys); требует pyautogui на хосте, для кода предпочитай write_file+open_app.\n"
+        "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer.\n"
+        "• Выполняй именно ПОСЛЕДНИЙ запрос пользователя. Если в истории есть "
+        "прерванная/незавершённая задача — НЕ возобновляй её без явной просьбы.\n"
+        "• Доводи задачу до КОНЦА: «открой X и сделай Y» — это не только открыть, "
+        "но и выполнить Y. Не останавливайся на open_app.\n\n"
+        "WINDOWS-РЕЦЕПТЫ (взаимодействуй с программами ПОЛНОЦЕННО):\n"
+        "• Открыть программу/файл/URL: windows.open_app, command — имя/путь/URL "
+        "(\"notepad\", \"code\", \"calc\", \"explorer\", \"chrome\", \"https://...\").\n"
+        "• «НАПИСАТЬ текст/код в программе» (Блокнот, Word, VS Code, поле ввода) — "
+        "ГЛАВНЫЙ способ, работает везде и с любыми символами: 1) windows.open_app "
+        "(если ещё не открыта), напр. command=\"notepad\"; 2) windows.paste_text "
+        "(text=...) — вставляет текст в активное окно через буфер обмена (Ctrl+V). "
+        "Пример «открой блокнот и напиши hello world на C»: open_app command=\"notepad\", "
+        "затем paste_text text='#include <stdio.h>\\nint main(){printf(\"Hello, World!\");return 0;}'.\n"
+        "• Альтернатива для редакторов кода — открыть готовый файл: windows.write_file "
+        "(path, content), затем windows.open_app command='code \"<путь>\"' (или "
+        "'notepad \"<путь>\"').\n"
+        "• Управляющие клавиши в активном окне: windows.send_keys (keys), напр. "
+        "'^s' сохранить, '{ENTER}', '^a' выделить всё.\n"
+        "• Скомпилировать/запустить код по-настоящему — run_code (в sandbox).\n"
         "• Системные команды — windows.exec или windows.powershell."
     )
 
@@ -282,6 +288,21 @@ def memory_overview(session_id: str = "default") -> dict[str, Any]:
 
 def reset_context(session_id: str = "default", keep_summary: bool = False) -> None:
     _conversations.reset(session_id, keep_summary=keep_summary)
+
+
+def mark_interrupted(session_id: str = "default") -> None:
+    """
+    Закрыть «висящую» реплику после аварийной остановки.
+
+    При отмене хода последнее сообщение пользователя остаётся без ответа
+    ассистента — и следующий ход модель может ошибочно «продолжить» прерванную
+    задачу вместо нового запроса. Добавляем явную пометку-ответ, чтобы пара
+    реплик закрылась и контекст не путал модель.
+    """
+    conv = _conversations.get(session_id)
+    if conv.messages and conv.messages[-1]["role"] == "user":
+        _conversations.add(session_id, "assistant",
+                           "(Задача прервана пользователем. Жду новый запрос.)")
 
 
 async def flush_context(session_id: str = "default") -> bool:

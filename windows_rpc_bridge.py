@@ -257,14 +257,23 @@ class HostExecutor:
 
     @staticmethod
     async def _run(cmd: list[str] | str, shell: bool = False,
-                   timeout: int = 120) -> dict[str, Any]:
-        """Асинхронно выполнить процесс и вернуть структурированный результат."""
+                   timeout: int = 120, hidden: bool = False) -> dict[str, Any]:
+        """
+        Асинхронно выполнить процесс и вернуть структурированный результат.
+
+        hidden=True (только Windows) запускает процесс БЕЗ окна — критично для
+        UI-автоматики (SendKeys/Ctrl+V), чтобы окно консоли PowerShell не
+        перехватывало фокус у целевого приложения (иначе вставка уходит «в никуда»).
+        """
         loop = asyncio.get_running_loop()
 
         def _blocking() -> dict[str, Any]:
+            kwargs: dict[str, Any] = {}
+            if hidden and sys.platform == "win32":
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.run(
                 cmd, shell=shell, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout,
+                encoding="utf-8", errors="replace", timeout=timeout, **kwargs,
             )
             return {
                 "returncode": proc.returncode,
@@ -317,12 +326,77 @@ class HostExecutor:
 
         return await loop.run_in_executor(None, _b)
 
-    async def powershell(self, command: str) -> dict[str, Any]:
-        """Выполнить PowerShell-команду."""
-        log.info("PowerShell: %s", command)
+    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+        """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики)."""
+        log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
         return await self._run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            hidden=hidden,
         )
+
+    async def _write_temp(self, text: str) -> Path:
+        """Записать текст во временный UTF-8 файл (для буфера обмена)."""
+        tmp = JARVIS_HOME / "runtime" / f"clip_{int(time.time() * 1000)}.txt"
+        loop = asyncio.get_running_loop()
+
+        def _w() -> None:
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(text, encoding="utf-8")
+
+        await loop.run_in_executor(None, _w)
+        return tmp
+
+    async def set_clipboard(self, text: str) -> dict[str, Any]:
+        """Положить произвольный (юникод) текст в буфер обмена Windows."""
+        tmp = await self._write_temp(text)
+        ps = (
+            f"$t=Get-Content -Raw -Encoding UTF8 -LiteralPath '{tmp}'; "
+            "if($null -eq $t){$t=''}; Set-Clipboard -Value $t"
+        )
+        res = await self.powershell(ps, hidden=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return res
+
+    async def paste_text(self, text: str) -> dict[str, Any]:
+        """
+        Вставить текст в АКТИВНОЕ окно через буфер обмена + Ctrl+V.
+
+        Это САМЫЙ надёжный способ ввести текст в любую программу (Блокнот, Word,
+        VS Code, поле ввода): корректно с юникодом и спецсимволами, не зависит от
+        раскладки клавиатуры. Окно PowerShell скрыто (hidden), чтобы не перехватить
+        фокус у целевого приложения.
+        """
+        tmp = await self._write_temp(text)
+        ps = (
+            f"$t=Get-Content -Raw -Encoding UTF8 -LiteralPath '{tmp}'; "
+            "if($null -eq $t){$t=''}; Set-Clipboard -Value $t; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "Start-Sleep -Milliseconds 350; "
+            "[System.Windows.Forms.SendKeys]::SendWait('^v')"
+        )
+        res = await self.powershell(ps, hidden=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return res
+
+    async def send_keys(self, keys: str) -> dict[str, Any]:
+        """
+        Отправить управляющие клавиши в активное окно (синтаксис .NET SendKeys):
+        '^s' = Ctrl+S, '{ENTER}', '^a' = Ctrl+A, '%{F4}' = Alt+F4 и т.п.
+        """
+        safe = str(keys).replace("'", "''")
+        ps = ("Add-Type -AssemblyName System.Windows.Forms; "
+              f"[System.Windows.Forms.SendKeys]::SendWait('{safe}')")
+        return await self.powershell(ps, hidden=True)
+
+    async def get_clipboard(self) -> dict[str, Any]:
+        """Прочитать текущий текст из буфера обмена Windows."""
+        return await self.powershell("Get-Clipboard -Raw", hidden=True)
 
     async def open_app(self, command: str) -> dict[str, Any]:
         """Запустить приложение/исполняемый файл на хосте."""
@@ -523,6 +597,10 @@ class RpcRouter:
             "type_text": lambda p: self.host.type_text(p.get("text", "")),
             "key_press": lambda p: self.host.key_press(p.get("keys", "")),
             "scroll": lambda p: self.host.scroll(p.get("amount", -3)),
+            "set_clipboard": lambda p: self.host.set_clipboard(p.get("text", "")),
+            "paste_text": lambda p: self.host.paste_text(p.get("text", "")),
+            "send_keys": lambda p: self.host.send_keys(p.get("keys", "")),
+            "get_clipboard": lambda p: self.host.get_clipboard(),
             "kill_process": lambda p: self.host.kill_process(p["name"]),
             "system_power": lambda p: self.host.system_power(p["mode"]),
             "read_file": lambda p: self.host.read_file(p["path"]),
