@@ -120,50 +120,29 @@ async def tool_run_code(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
         f"echo {stdin_b64} | base64 -d > .stdin; "
         f"timeout {timeout} bash -lc '{spec['run']}' < .stdin; "
     )
-    proc: Optional[asyncio.subprocess.Process] = None
+    from . import dockerapi
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", SANDBOX_CONTAINER, "bash", "-lc", inner,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout + 30)
-    except asyncio.TimeoutError:
-        # Убиваем зависший процесс, чтобы не плодить осиротевшие docker exec.
-        if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-        return {"ok": False, "content": f"Исполнение превысило лимит {timeout}s."}
-    except FileNotFoundError:
-        return {"ok": False, "content": "docker недоступен в backend-контейнере."}
+        rc, output = await dockerapi.exec_run(
+            SANDBOX_CONTAINER, ["bash", "-lc", inner], timeout=timeout)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "content": f"Ошибка запуска sandbox: {exc}"}
+        return {"ok": False,
+                "content": f"Не удалось выполнить код в sandbox (Docker API): {exc}"}
 
     # уборка рабочего каталога (не критично при ошибке)
     asyncio.create_task(_sandbox_cleanup(workdir))
 
-    rc = proc.returncode
-    stdout = out.decode("utf-8", "replace")
-    stderr = err.decode("utf-8", "replace")
     body = f"[код возврата: {rc}]\n"
-    if stdout:
-        body += f"[stdout]\n{stdout}\n"
-    if stderr:
-        body += f"[stderr]\n{stderr}\n"
+    if output:
+        body += output if output.endswith("\n") else output + "\n"
     return {"ok": rc == 0, "content": _truncate(body),
-            "data": {"returncode": rc, "stdout": stdout, "stderr": stderr,
+            "data": {"returncode": rc, "output": output,
                      "language": language, "code": code}}
 
 
 async def _sandbox_cleanup(workdir: str) -> None:
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", SANDBOX_CONTAINER, "rm", "-rf", workdir,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
+        from . import dockerapi
+        await dockerapi.exec_run(SANDBOX_CONTAINER, ["rm", "-rf", workdir], timeout=15)
     except Exception:  # noqa: BLE001
         pass
 
@@ -204,8 +183,20 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
             return {"ok": False, "content": f"Операция остановлена HITL-гейтом: {err}"}
         return {"ok": False, "content": f"Хост вернул ошибку: {err}"}
     result = res.get("result", {}) or {}
-    out = (result.get("stdout") or "") + (result.get("stderr") or "")
-    return {"ok": True, "content": _truncate(out.strip() or "(пустой вывод, успех)")}
+    out = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
+    if out:
+        return {"ok": True, "content": _truncate(out)}
+    # Пустой вывод при успехе — норма для open_app и команд без stdout. Делаем
+    # ответ ОДНОЗНАЧНЫМ «выполнено», иначе модель не понимает, что цель достигнута,
+    # и повторяет тот же вызов снова и снова.
+    done = {
+        "open_app": "Приложение/ссылка успешно запущены на хосте.",
+        "exec": "Команда выполнена успешно (вывод пуст).",
+        "powershell": "PowerShell-команда выполнена успешно (вывод пуст).",
+        "media_hook": "Медиа-команда отправлена.",
+        "screenshot": "Скриншот сделан.",
+    }.get(action, f"Действие '{action}' выполнено успешно.")
+    return {"ok": True, "content": done}
 
 
 # --- 3. Визуальное управление GUI через UI-TARS --------------------------- #

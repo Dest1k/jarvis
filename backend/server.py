@@ -487,29 +487,20 @@ def _ensure_log_follower(svc: str) -> None:
 
 
 async def _stream_container_logs(svc: str, container: str) -> None:
-    """Стримить логи docker-контейнера в канал deploy (тег = ключ сервиса)."""
+    """
+    Стримить логи контейнера в канал deploy (тег = ключ сервиса) через Docker
+    Engine API по unix-сокету — без зависимости от бинаря `docker` в контейнере.
+    """
+    from orchestrator import dockerapi
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "logs", "-f", "--tail", "120", container,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
+        async for line in dockerapi.stream_logs(container, tail=120):
+            await manager.broadcast("deploy", {
+                "type": "log", "service": svc, "line": line,
+            })
     except Exception as exc:  # noqa: BLE001
         await manager.broadcast("deploy", {"type": "log", "service": svc,
                                            "line": f"[не удалось открыть логи: {exc}]"})
-        _log_followers.pop(svc, None)
-        return
-    assert proc.stdout is not None
-    try:
-        async for line in proc.stdout:
-            await manager.broadcast("deploy", {
-                "type": "log", "service": svc,
-                "line": line.decode("utf-8", "replace").rstrip(),
-            })
     finally:
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
         _log_followers.pop(svc, None)
 
 

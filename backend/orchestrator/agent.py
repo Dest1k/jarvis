@@ -71,6 +71,9 @@ def _planner_system() -> str:
         "• Для кода ВСЕГДА используй run_code (покажи реальный вывод).\n"
         "• Для действий на ПК (открыть приложение, команда, громкость) — windows.\n"
         "• Не повторяй один и тот же вызов с теми же аргументами.\n"
+        "• ВАЖНО: если инструмент уже вернул успех (например, приложение/URL "
+        "открыты, код выполнен, данные получены) — задача по этому шагу СДЕЛАНА. "
+        "НЕ вызывай его снова, сразу action=answer.\n"
         "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer."
     )
 
@@ -167,6 +170,7 @@ async def run_chat(session_id: str, user_text: str,
     _conversations.add(session_id, "user", user_text)
     ctx = ToolContext(bridge=bridge, longterm=_longterm, session_id=session_id)
     scratch: list[dict[str, Any]] = []
+    seen_calls: set[str] = set()   # защита от зацикливания на одинаковых вызовах
 
     # --- ФАЗА 1: планирование с инструментами ---
     try:
@@ -189,6 +193,20 @@ async def run_chat(session_id: str, user_text: str,
             args = plan.get("action_input") or plan.get("input") or {}
             if not isinstance(args, dict):
                 args = {"value": args}
+
+            # СТРАХОВКА от зацикливания: если этот же инструмент с теми же
+            # аргументами уже вызывался — не повторяем (модель «залипла»),
+            # сразу переходим к ответу. Именно это ловит кейс «открывает
+            # приложение снова и снова до лимита шагов».
+            # Исключение — gui: он итеративный (каждый вызов = одно действие по
+            # свежему скриншоту), поэтому одинаковая цель допустима; его ограничивает
+            # лимит шагов MAX_STEPS и собственный статус done/fail.
+            call_key = action + "::" + json.dumps(args, ensure_ascii=False, sort_keys=True)
+            if action != "gui" and call_key in seen_calls:
+                yield {"type": "thought",
+                       "text": "Этот шаг уже выполнен ранее — перехожу к ответу."}
+                break
+            seen_calls.add(call_key)
 
             yield {"type": "tool_call", "tool": action, "args": args}
             result = await _registry.run(action, args, ctx)
