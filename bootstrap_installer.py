@@ -1181,6 +1181,10 @@ def _compose_with_retries(action: list[str], retries: int = 4) -> int:
 
 def bring_up_stack() -> None:
     """Автоматически поднять весь контейнерный стек через Docker Desktop."""
+    # BuildKit обязателен для кеш-маунтов pip (--mount=type=cache) в Dockerfile'ах,
+    # благодаря которым torch/зависимости не качаются заново при пересборках.
+    os.environ.setdefault("DOCKER_BUILDKIT", "1")
+    os.environ.setdefault("COMPOSE_DOCKER_CLI_BUILD", "1")
     log.info("→ Загрузка образов (docker compose pull) с ретраями…")
     _compose_with_retries(["pull", "--ignore-pull-failures"])
     log.info("→ Сборка образов (docker compose build) с ретраями…")

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile — backend-ядро JARVIS-OS (FastAPI server.py + LangGraph-оркестратор)
 FROM python:3.11-slim
 
@@ -11,7 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# BuildKit-кеш pip → зависимости не качаются заново при пересборках.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY server.py ./
 COPY orchestrator ./orchestrator

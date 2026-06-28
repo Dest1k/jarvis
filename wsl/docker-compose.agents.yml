@@ -106,6 +106,9 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile.audio
+      # База — образ vLLM (torch/CUDA уже внутри → не качаем повторно)
+      args:
+        JARVIS_VLLM_IMAGE: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
     image: jarvis/audio-layer:latest
     container_name: jarvis-audio
     restart: unless-stopped
