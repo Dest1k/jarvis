@@ -32,13 +32,15 @@ x-vllm-base: &vllm-base
   # на D: (диск Docker перенесён на D:\jarvis\docker). Кэш HF остаётся bind'ом.
   volumes:
     - jarvis-models:/models
-    - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
+    - jarvis-hf:/root/.cache/huggingface
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
     - NVIDIA_VISIBLE_DEVICES=0
-    # hf_transfer НЕ умеет докачку: выключаем, чтобы при обрыве загрузка весов
-    # ВОЗОБНОВЛЯЛАСЬ, а не качалась заново. Кеш персистентен (bind-mount на D:).
+    # Модель — локальная (/models/...). OFFLINE: transformers НЕ должен дёргать
+    # HuggingFace Hub и трактовать локальный путь как repo-id (это и роняло vLLM).
+    - HF_HUB_OFFLINE=1
+    - TRANSFORMERS_OFFLINE=1
     - HF_HUB_ENABLE_HF_TRANSFER=0
     - HF_HUB_DOWNLOAD_TIMEOUT=120
   <<: *gpu-all
@@ -94,7 +96,7 @@ services:
       --dtype half
       --enforce-eager
       --max-model-len 8192
-      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.50}
+      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.52}
       --max-num-seqs 4
       --host 0.0.0.0
       --port 8002
@@ -137,7 +139,7 @@ services:
       - HF_HUB_ENABLE_HF_TRANSFER=0
       - HF_HUB_DOWNLOAD_TIMEOUT=120
     volumes:
-      - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
+      - jarvis-hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
     depends_on:
@@ -219,10 +221,12 @@ networks:
     internal: true            # sandbox изолирован от внешней сети
 
 volumes:
-  # EXT4-том для весов vLLM (быстрый mmap, без 9P). Имя фиксировано (без префикса
-  # проекта), чтобы bootstrap мог наполнить его тем же именем. Физически — на
-  # диске Docker (перенесён на D:\jarvis\docker).
-  jarvis-models:
+  # EXT4-тома (быстрый mmap, без 9P). Имена фиксированы (без префикса проекта),
+  # чтобы bootstrap мог наполнять их теми же именами. Физически — на диске
+  # Docker (перенесён на D:\jarvis\docker).
+  jarvis-models:        # веса vLLM (наполняет bootstrap из data/models)
     name: jarvis-models
+  jarvis-hf:            # кэш HF для аудио (Whisper/Kokoro качаются в рантайме)
+    name: jarvis-hf
 
-# Кэш HF и sandbox остаются bind-mount'ом на D: (JARVIS_DATA_DIR) — им 9P не мешает.
+# sandbox остаётся bind-mount'ом на D: (JARVIS_DATA_DIR) — ему 9P не мешает.

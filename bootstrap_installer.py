@@ -126,7 +126,7 @@ class DeploymentProfile:
     # Доли — от ПОЛНОЙ памяти (32 ГБ), инстансы стартуют последовательно.
     qwen_gpu_util: float = 0.33     # ~10.6 ГБ: веса 9 + KV ~1.6
     qwen_max_model_len: int = 16384
-    uitars_gpu_util: float = 0.50   # ~16 ГБ: веса 15 + KV ~1
+    uitars_gpu_util: float = 0.52   # ~16.6 ГБ: веса 15 + KV ~1.6
     uitars_enabled: bool = True
 
     notes: list[str] = field(default_factory=list)
@@ -1195,19 +1195,31 @@ def _compose_with_retries(action: list[str], retries: int = 4) -> int:
 MODELS_VOLUME = "jarvis-models"
 
 
-def sync_models_to_volume(data_dir: Path) -> None:
+def sync_models_to_volume(data_dir: Path, names: list[str]) -> None:
     """
-    Скопировать веса из host-папки (data/models, 9P bind) в EXT4 Docker-том
-    jarvis-models. vLLM грузит safetensors через mmap, а mmap по 9P крашит
-    загрузку — поэтому модели должны лежать на настоящей ФС (ext4-том).
-    Копирование делает обычный cp (последовательное чтение по 9P работает).
-    Идемпотентно (cp -u): повторный запуск копирует только новое.
+    Скопировать ТОЛЬКО нужные модели из host-папки (data/models, 9P bind) в
+    EXT4 Docker-том jarvis-models. vLLM грузит safetensors через mmap, а mmap по
+    9P крашит загрузку — поэтому модели должны лежать на настоящей ФС.
+    cp читает последовательно (по 9P это работает, в отличие от mmap).
+    Идемпотентно (cp -u). После копирования ПРОВЕРЯЕТ наличие config.json.
     """
+    names = [n for n in names if n]
+    if not names:
+        return
     src = _docker_path(data_dir / "models")
-    log.info("→ Синхронизация весов в ext4-том '%s' (устраняет крах vLLM на 9P). "
-             "Первый раз может занять несколько минут…", MODELS_VOLUME)
-    inner = ('set -e; for d in /src/*/; do n=$(basename "$d"); '
-             'echo "  копирую $n…"; cp -ru "$d" /dest/; done; echo SYNC_DONE')
+    name_list = " ".join(names)  # имена безопасны (буквы/цифры/дефис)
+    log.info("→ Синхронизация весов (%s) в ext4-том '%s' — устраняет крах vLLM на 9P. "
+             "Первый раз может занять несколько минут…", ", ".join(names), MODELS_VOLUME)
+    inner = (
+        f'set -e; for n in {name_list}; do '
+        'if [ -d "/src/$n" ]; then echo "  копирую $n…"; cp -ru "/src/$n" /dest/; '
+        'else echo "  ✗ нет /src/$n на хосте"; fi; done; '
+        'echo "--- проверка ---"; ok=1; '
+        f'for n in {name_list}; do '
+        'if [ -f "/dest/$n/config.json" ]; then echo "  ✓ $n (config.json есть)"; '
+        'else echo "  ✗ $n (НЕТ config.json!)"; ok=0; fi; done; '
+        '[ "$ok" = 1 ] && echo SYNC_DONE || echo SYNC_INCOMPLETE'
+    )
     rc, out = run_streamed([
         "docker", "run", "--rm",
         "-v", f"{MODELS_VOLUME}:/dest",
@@ -1215,10 +1227,10 @@ def sync_models_to_volume(data_dir: Path) -> None:
         "alpine", "sh", "-c", inner,
     ], timeout=7200)
     if rc == 0 and "SYNC_DONE" in out:
-        log.info("  ✔ Веса в ext4-томе — vLLM будет грузить их быстро и без 9P.")
+        log.info("  ✔ Веса в ext4-томе (config.json на месте) — vLLM грузит без 9P.")
     else:
-        log.warning("  ⚠ Синхронизация весов в том завершилась с кодом %s. "
-                    "vLLM может упасть при загрузке с 9P.", rc)
+        log.warning("  ⚠ Синхронизация весов неполная (код %s). vLLM может не найти "
+                    "модель. Проверьте data/models/<модель>/config.json.", rc)
 
 
 def unload_lmstudio_models(base_url: str) -> None:
@@ -1514,7 +1526,10 @@ def main() -> int:
                         verify=args.verify_models)
 
     # --- Синхронизация весов в ext4-том (иначе vLLM крашится на mmap по 9P) ---
-    sync_models_to_volume(data_dir)
+    sync_names = [MODEL_LOCAL_DIRS["qwen"]]
+    if profile.uitars_enabled:
+        sync_names.append(MODEL_LOCAL_DIRS["uitars"])
+    sync_models_to_volume(data_dir, sync_names)
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()

@@ -103,6 +103,32 @@ def cmd_dashboard() -> int:
     return 0
 
 
+def _data_dir_from_env() -> str:
+    """Прочитать JARVIS_DATA_DIR из wsl/.env (для синхронизации весов в том)."""
+    try:
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            if line.startswith("JARVIS_DATA_DIR="):
+                return line.split("=", 1)[1].strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def sync_models() -> None:
+    """Скопировать веса из host-папки (9P) в ext4-том jarvis-models (как в bootstrap)."""
+    data = _data_dir_from_env()
+    if not data:
+        return
+    src = f"{data}/models"
+    info("Синхронизация весов в ext4-том (нужно для стабильной загрузки vLLM)…")
+    # Те же каталоги, что в bootstrap (MODEL_LOCAL_DIRS): qwen-coder-14b, ui-tars.
+    inner = ('for n in qwen-coder-14b ui-tars; do '
+             'if [ -d "/src/$n" ]; then echo "  $n"; cp -ru "/src/$n" /dest/; fi; done; '
+             'echo SYNC_DONE')
+    subprocess.run(["docker", "run", "--rm", "-v", "jarvis-models:/dest",
+                    "-v", f"{src}:/src:ro", "alpine", "sh", "-c", inner])
+
+
 def cmd_up() -> int:
     if not ENV_FILE.exists():
         info("Не найден wsl/.env — похоже, система ещё не установлена.")
@@ -112,6 +138,8 @@ def cmd_up() -> int:
     os.environ.setdefault("DOCKER_BUILDKIT", "1")
 
     cmd_bridge()
+
+    sync_models()  # веса должны быть в ext4-томе, иначе vLLM упадёт на 9P
 
     info("Поднимаю контейнерный стек (docker compose up -d)…")
     run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE),
