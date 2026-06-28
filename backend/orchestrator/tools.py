@@ -411,40 +411,94 @@ def _parse_ddg(html: str) -> list[dict[str, str]]:
     return out
 
 
-# --- 6. Погода (wttr.in, без ключей) --------------------------------------- #
+# --- 6. Погода (wttr.in + фолбэк open-meteo, без ключей) ------------------- #
 async def tool_weather(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Прогноз погоды через wttr.in (без ключей). Покрывает «погода на завтра»."""
+    """
+    Текущая погода и прогноз на ближайшие дни. Два независимых источника без
+    ключей: сначала wttr.in, при сбое — open-meteo (через геокодинг). Так
+    инструмент не «отваливается» из-за недоступности одного сервиса.
+    """
     location = str(args.get("location", "")).strip()
+    body = await _weather_wttr(location)
+    if not body:
+        body = await _weather_openmeteo(location)
+    if not body:
+        return {"ok": False,
+                "content": "Не удалось получить погоду ни из одного источника "
+                           "(wttr.in и open-meteo недоступны)."}
+    return {"ok": True, "content": _truncate(body)}
+
+
+async def _weather_wttr(location: str) -> Optional[str]:
     loc_path = location.replace(" ", "+") if location else ""
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True,
+        async with httpx.AsyncClient(timeout=18, follow_redirects=True,
                                      headers={"User-Agent": "curl/8"}) as cli:
             r = await cli.get(f"https://wttr.in/{loc_path}?format=j1&lang=ru")
             r.raise_for_status()
             data = r.json()
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "content": f"Не удалось получить погоду: {exc}"}
-
-    try:
         area = data.get("nearest_area", [{}])[0]
-        city = (area.get("areaName", [{}])[0].get("value")
-                or location or "запрошенная локация")
+        city = (area.get("areaName", [{}])[0].get("value") or location or "локация")
         cur = data.get("current_condition", [{}])[0]
         now = (f"Сейчас в {city}: {cur.get('temp_C')}°C "
-               f"(ощущается {cur.get('FeelsLikeC')}°C), "
-               f"{_ru_desc(cur)}, ветер {cur.get('windspeedKmph')} км/ч, "
-               f"влажность {cur.get('humidity')}%.")
-        days = data.get("weather", [])
-        forecast_lines = []
-        for d in days[:3]:
-            date = d.get("date")
-            mn, mx = d.get("mintempC"), d.get("maxtempC")
-            midday = d.get("hourly", [{}])[len(d.get("hourly", [])) // 2] if d.get("hourly") else {}
-            forecast_lines.append(f"{date}: от {mn}°C до {mx}°C, {_ru_desc(midday)}.")
-        body = now + "\nПрогноз:\n" + "\n".join(forecast_lines)
+               f"(ощущается {cur.get('FeelsLikeC')}°C), {_ru_desc(cur)}, "
+               f"ветер {cur.get('windspeedKmph')} км/ч, влажность {cur.get('humidity')}%.")
+        lines = []
+        for d in data.get("weather", [])[:3]:
+            hourly = d.get("hourly", [])
+            midday = hourly[len(hourly) // 2] if hourly else {}
+            lines.append(f"{d.get('date')}: от {d.get('mintempC')}°C до "
+                         f"{d.get('maxtempC')}°C, {_ru_desc(midday)}.")
+        return now + "\nПрогноз:\n" + "\n".join(lines)
     except Exception:  # noqa: BLE001
-        body = json.dumps(data, ensure_ascii=False)[:1500]
-    return {"ok": True, "content": _truncate(body)}
+        return None
+
+
+# Коды погоды WMO (open-meteo) → русское описание.
+_WMO_RU = {
+    0: "ясно", 1: "преимущественно ясно", 2: "переменная облачность", 3: "пасмурно",
+    45: "туман", 48: "изморозь", 51: "слабая морось", 53: "морось", 55: "сильная морось",
+    61: "слабый дождь", 63: "дождь", 65: "сильный дождь", 66: "ледяной дождь",
+    67: "сильный ледяной дождь", 71: "слабый снег", 73: "снег", 75: "сильный снег",
+    77: "снежная крупа", 80: "слабый ливень", 81: "ливень", 82: "сильный ливень",
+    85: "снегопад", 86: "сильный снегопад", 95: "гроза", 96: "гроза с градом",
+    99: "сильная гроза с градом",
+}
+
+
+async def _weather_openmeteo(location: str) -> Optional[str]:
+    if not location:
+        return None  # без города open-meteo не определит точку (нет геолокации по IP)
+    try:
+        async with httpx.AsyncClient(timeout=18, follow_redirects=True) as cli:
+            g = await cli.get("https://geocoding-api.open-meteo.com/v1/search",
+                              params={"name": location, "count": 1, "language": "ru"})
+            results = (g.json() or {}).get("results") or []
+            if not results:
+                return None
+            geo = results[0]
+            lat, lon, name = geo["latitude"], geo["longitude"], geo.get("name", location)
+            f = await cli.get("https://api.open-meteo.com/v1/forecast", params={
+                "latitude": lat, "longitude": lon, "current_weather": True,
+                "daily": "temperature_2m_max,temperature_2m_min,weathercode",
+                "timezone": "auto", "forecast_days": 3})
+            d = f.json()
+        cur = d.get("current_weather", {})
+        lines = [f"Сейчас в {name}: {cur.get('temperature')}°C, "
+                 f"{_WMO_RU.get(cur.get('weathercode'), '')}, "
+                 f"ветер {cur.get('windspeed')} км/ч."]
+        daily = d.get("daily", {})
+        dates = daily.get("time", [])
+        tmax = daily.get("temperature_2m_max", [])
+        tmin = daily.get("temperature_2m_min", [])
+        codes = daily.get("weathercode", [])
+        lines.append("Прогноз:")
+        for i, dt in enumerate(dates[:3]):
+            lines.append(f"{dt}: от {tmin[i]}°C до {tmax[i]}°C, "
+                         f"{_WMO_RU.get(codes[i], '')}.")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _ru_desc(cond: dict[str, Any]) -> str:
