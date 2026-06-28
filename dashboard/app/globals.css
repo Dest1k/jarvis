@@ -216,16 +216,30 @@ input:focus, textarea:focus { border-color: var(--accent); }
   0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.6); }
   50% { box-shadow: 0 0 0 9px rgba(248, 81, 73, 0); }
 }
-.rec-indicator {
-  display: flex; align-items: center; gap: 8px;
-  color: var(--err); font-size: 13px; font-weight: 600; white-space: nowrap;
+/* Состояние записи: вся строка ввода становится явно «красной/живой» */
+.chat-input.recording {
+  border-color: var(--err);
+  box-shadow: 0 0 0 1px var(--err), 0 0 18px rgba(248, 81, 73, 0.25);
+  background: linear-gradient(0deg, rgba(248, 81, 73, 0.06), rgba(248, 81, 73, 0.06)), var(--panel);
 }
+.rec-banner {
+  flex: 1; display: flex; align-items: center; gap: 10px;
+  color: var(--err); font-size: 14px; font-weight: 600;
+  padding: 8px 4px;
+}
+.rec-text { flex: 1; }
 .rec-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--err); animation: blink 1s step-start infinite;
+  width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--err); box-shadow: 0 0 8px var(--err);
+  animation: blink 1s step-start infinite;
+}
+.mic-error {
+  color: var(--err); font-size: 12.5px; padding: 6px 10px; margin-bottom: 2px;
+  background: rgba(248, 81, 73, 0.08); border: 1px solid var(--err); border-radius: 8px;
 }
 .btn.send { font-size: 16px; padding: 9px 15px; border-radius: 10px; }
-.mic-vu { width: 56px; align-self: center; }
+.btn.send:disabled { opacity: 0.4; cursor: not-allowed; }
+.mic-vu { width: 80px; align-self: center; }
 
 /* Панель памяти */
 .mem-card { max-width: 620px; width: 620px; border-color: var(--border); }

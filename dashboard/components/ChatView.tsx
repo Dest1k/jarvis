@@ -57,6 +57,7 @@ export default function ChatView() {
   const [memOpen, setMemOpen] = useState(false);
   const [mem, setMem] = useState<MemoryOverview | null>(null);
   const [working, setWorking] = useState(false);
+  const [micError, setMicError] = useState("");
 
   const chatRef = useRef<JarvisSocket | null>(null);
   const audioRef = useRef<JarvisSocket | null>(null);
@@ -185,6 +186,11 @@ export default function ChatView() {
 
   // --- микрофон → PCM16 → /ws/audio ---
   const startMic = async () => {
+    setMicError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicError("Браузер не даёт доступ к микрофону (нужен https или localhost).");
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
@@ -206,6 +212,10 @@ export default function ChatView() {
       setListening(true);
     } catch {
       setListening(false);
+      setMicError(
+        "Не удалось включить микрофон. Разрешите доступ к микрофону в браузере " +
+        "(значок 🎤/замок в адресной строке).",
+      );
     }
   };
 
@@ -292,35 +302,40 @@ export default function ChatView() {
         <div ref={bottomRef} />
       </div>
 
-      <div className="chat-input panel">
+      {micError && <div className="mic-error">⚠ {micError}</div>}
+      <div className={`chat-input panel ${listening ? "recording" : ""}`}>
         <button
           className={`btn mic ${listening ? "recording" : ""}`}
           onClick={() => (listening ? stopMic() : startMic())}
-          title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод"}
+          title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод: нажмите и говорите"}
         >
           {listening ? "⏹" : "🎤"}
         </button>
-        {listening && (
-          <div className="rec-indicator">
-            <span className="rec-dot" /> Слушаю… говорите
+        {listening ? (
+          <div className="rec-banner">
+            <span className="rec-dot" />
+            <span className="rec-text">Идёт запись — говорите… Нажмите ⏹, чтобы остановить.</span>
             <div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div>
           </div>
+        ) : (
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Сообщение JARVIS…  (или 🎤 для голоса)"
+            rows={1}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+            }}
+          />
         )}
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Сообщение JARVIS…"
-          rows={1}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-          }}
-        />
         {working ? (
           <button className="btn danger send" onClick={cancel} title="Аварийно остановить задачу">
             ⏹
           </button>
         ) : (
-          <button className="btn primary send" onClick={send}>➤</button>
+          <button className="btn primary send" onClick={send} disabled={listening} title="Отправить">
+            ➤
+          </button>
         )}
       </div>
 
