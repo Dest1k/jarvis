@@ -135,7 +135,7 @@ python jarvis.py status    # статус
 pip install requests websockets
 python install_agent.py --lmstudio http://localhost:1234/v1   # или bootstrap_installer.py
 python windows_rpc_bridge.py --port 8765                       # отдельное окно
-cd dashboard && npm install && npm run dev                     # http://localhost:3000
+cd dashboard && npm install --legacy-peer-deps && npm run dev  # http://localhost:3000
 ```
 
 > **ЕДИНАЯ МОДЕЛЬ.** Весь путь установки использует ОДНУ локальную модель.

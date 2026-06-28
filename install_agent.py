@@ -526,9 +526,9 @@ OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен п
 2. run_bootstrap — перенос на D:, .wslconfig, GPU, предзагрузка весов (докачка),
    подъём docker-стека (backend + vLLM x2 + audio + sandbox). Это основной рычаг.
 3. Запустить RPC-мост: start_background command="python windows_rpc_bridge.py".
-4. Дашборд: run_cmd "cd /d {target_root}\\dashboard && npm install" (если нет node —
-   поставь через winget/choco), затем start_background command="npm run dev"
-   cwd="{target_root}\\dashboard".
+4. Дашборд: run_cmd "cd /d {target_root}\\dashboard && npm install --legacy-peer-deps"
+   (если нет node — поставь через winget/choco), затем start_background
+   command="npm run dev" cwd="{target_root}\\dashboard".
 5. check_endpoints — дождаться _ГОТОВО_ПОЛНОСТЬЮ=ДА (сервисы прогреваются;
    при НЕТ — подожди/диагностируй логами docker compose и повтори проверку).
 6. finish с итогом.
@@ -678,7 +678,7 @@ class InstallAgent:
                                                  name="jarvis-rpc"),
              lambda r: r.get("returncode") == 0),
             ("Установка зависимостей дашборда (npm install) [живой вывод ниже]",
-             lambda: self.tools.run_cmd(command=f'cd /d "{root}\\dashboard" && npm install',
+             lambda: self.tools.run_cmd(command=f'cd /d "{root}\\dashboard" && npm install --legacy-peer-deps',
                                         stream=True),
              lambda r: r.get("returncode") == 0),
             ("Запуск дашборда (3000)",

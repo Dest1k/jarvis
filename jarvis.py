@@ -97,7 +97,9 @@ def cmd_dashboard() -> int:
             info("npm не найден — установите Node.js LTS (winget install OpenJS.NodeJS.LTS).")
             return 1
         info("Устанавливаю зависимости дашборда (npm install, один раз)…")
-        run("npm install", cwd=DASHBOARD)
+        # --legacy-peer-deps: страховка от конфликтов peer-зависимостей
+        # (напр. пакеты, ещё не объявившие поддержку React 19 в peerDependencies).
+        run("npm install --legacy-peer-deps", cwd=DASHBOARD)
     info("Запускаю дашборд (окно 'JARVIS Dashboard')…")
     start_window("JARVIS Dashboard", "npm run dev", DASHBOARD)
     return 0
