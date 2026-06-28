@@ -288,8 +288,8 @@ class HostTools:
         except Exception:  # noqa: BLE001
             results["rpc_bridge(8765)"] = "НЕТ (8765 не слушает)"
         all_ok = all(v.startswith("OK") for v in results.values())
-        # UI-TARS (8002) — ОПЦИОНАЛЬНЫЙ (не помещается рядом с Qwen-32B), не влияет
-        # на критерий готовности; просто показываем статус.
+        # UI-TARS-2B (8002) — поднимается рядом с Qwen-14B с большим запасом VRAM,
+        # но для критерия готовности считаем опциональным; просто показываем статус.
         try:
             requests.get("http://127.0.0.1:8002/health", timeout=3)
             results["vllm_uitars(8002,опц.)"] = "OK"
@@ -505,11 +505,11 @@ OOM на 32 ГБ GPU). В частности, run_bootstrap НЕ должен п
     - dashboard (Next.js 15) — порт 3000 (Command Center: деплой/десктоп/код/аудио)
   В Docker Desktop (WSL2):
     - backend (FastAPI ядро + LangGraph) — порт 8000
-    - vLLM Qwen2.5-Coder-32B (Int4 AWQ) — порт 8001 (диспетчер + кодер, ~19 ГБ VRAM)
-    - vLLM UI-TARS-7B (Int4) — порт 8002 (контроллер ОС/GUI, ~5.5 ГБ VRAM)
+    - vLLM Qwen2.5-Coder-14B (Int4 AWQ) — порт 8001 (диспетчер + кодер, ~14.4 ГБ VRAM)
+    - vLLM UI-TARS-2B (FP16) — порт 8002 (контроллер ОС/GUI, ~6.4 ГБ VRAM)
     - audio: Faster-Whisper Large-v3 + Kokoro TTS — порт 8003 (~2 ГБ VRAM)
     - sandbox — изолированное исполнение кода кодер-агента
-  Весь «тяжеляк» (веса ~25 ГБ, образы Docker, образ WSL) — на диске {target_drive}.
+  Весь «тяжеляк» (веса ~14 ГБ, образы Docker, образ WSL) — на диске {target_drive}.
 
 КРИТЕРИЙ ГОТОВНОСТИ: check_endpoints возвращает _ГОТОВО_ПОЛНОСТЬЮ=ДА
 (все 8000-8003 + dashboard 3000 + rpc_bridge 8765). Только тогда — finish.

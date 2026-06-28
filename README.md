@@ -43,8 +43,8 @@
 │  orchestrator (LangGraph) →  диспетчер задач, граф состояний агентов              │
 │                                                                                   │
 │  ┌───────────────────────── Docker / NVIDIA Container Toolkit ─────────────────┐ │
-│  │  vLLM #1  Qwen2.5-Coder-32B-Instruct-AWQ   (диспетчер + кодер)   ~19.0 ГБ    │ │
-│  │  vLLM #2  UI-TARS-7B-Int4                   (контроллер GUI/ОС)  ~5.5 ГБ     │ │
+│  │  vLLM #1  Qwen2.5-Coder-14B-Instruct-AWQ   (диспетчер + кодер)   ~14.4 ГБ    │ │
+│  │  vLLM #2  UI-TARS-2B-SFT                    (контроллер GUI/ОС)  ~6.4 ГБ     │ │
 │  │  audio    Faster-Whisper Large-v3 + Kokoro  (ASR + TTS)          ~2.0 ГБ     │ │
 │  │  sandbox  изолированная среда исполнения кода кодер-агента                   │ │
 │  └─────────────────────────────────────────────────────────────────────────────┘ │
@@ -61,33 +61,34 @@
 
 ---
 
-## 3. Матрица распределения VRAM (RTX 5090 — 32 ГБ)
+## 3. Матрица распределения VRAM (RTX 5090 — 32 GiB)
 
-Стратегия: жёстко зарезервировать **~5.5 ГБ** под хост Windows, виртуальный фреймбуфер (Xvfb)
-и динамический пул KV-кэша. Под vLLM/инференс остаётся **26.5 ГБ**.
+Точный расчёт — в [`docs/vram_matrix.md`](docs/vram_matrix.md). Веса и overhead Qwen
+взяты из реального лога vLLM, KV-кэш — по формуле из config.json моделей.
 
-| # | Сервис | Модель | Квантизация | VRAM | `--gpu-memory-utilization` | Примечание |
-|---|--------|--------|-------------|------|----------------------------|-----------|
-| 1 | Dispatcher / Coder | Qwen2.5-Coder-32B-Instruct | Int4 AWQ | **~19.0 ГБ** | `0.60` | `--max-model-len 32768` |
-| 2 | OS / GUI Controller | UI-TARS-7B | Int4 | **~5.5 ГБ** | `0.17` | парсинг состояний экрана |
+| # | Сервис | Модель | Квант. | VRAM | `--gpu-memory-utilization` | Примечание |
+|---|--------|--------|--------|------|----------------------------|-----------|
+| 1 | Dispatcher / Coder | Qwen2.5-Coder-14B-Instruct | Int4 AWQ | **~14.4 ГБ** | `0.45` | `--max-model-len 16384` |
+| 2 | OS / GUI Controller | UI-TARS-2B-SFT | FP16 | **~6.4 ГБ** | `0.20` | VL-модель, парсинг экрана |
 | 3 | Audio / Voice | Faster-Whisper Large-v3 + Kokoro TTS | FP16/Int8 | **~2.0 ГБ** | — (не vLLM) | реальное время |
-| — | **Резерв хоста** | Windows + Xvfb + KV-pool | — | **~5.5 ГБ** | — | hardcoded headroom |
-| | **ИТОГО** | | | **32.0 ГБ** | | |
+| — | **Резерв** | рабочий стол Windows + драйвер | — | **~9.2 ГБ** | — | свободный headroom |
+| | **ИТОГО занято** | | | **~22.8 ГБ** | | из 32.0 |
 
 ### Почему именно такие `--gpu-memory-utilization`
 
 `gpu_memory_utilization` в vLLM — это доля **полной** памяти устройства, которую процессу
-разрешено занять (веса + активации + KV-кэш). При совместном размещении нескольких инстансов
-на одном GPU доли **суммируются** и не должны перекрываться, а инстансы поднимаются
-**последовательно** (каждый следующий видит меньше свободной памяти):
+разрешено занять (веса + overhead + KV-кэш). При совместном размещении нескольких инстансов
+доли **суммируются**, а инстансы поднимаются **последовательно** (каждый держит свою долю):
 
 ```
-Инстанс 1 (Qwen):    0.60 × 32 ГБ = 19.2 ГБ   →  занято 19.2 ГБ,  свободно 12.8 ГБ
-Инстанс 2 (UI-TARS): 0.17 × 32 ГБ =  5.4 ГБ   →  занято 24.6 ГБ,  свободно  7.4 ГБ
-Audio (CTranslate2/torch, не vLLM):  ~2.0 ГБ  →  занято 26.6 ГБ,  свободно  5.4 ГБ  ← резерв
+Инстанс 1 (Qwen):    0.45 × 32 = 14.40 ГБ   →  занято 14.40,  свободно 17.60
+Инстанс 2 (UI-TARS): 0.20 × 32 =  6.40 ГБ   →  занято 20.80,  свободно 11.20
+Audio (CTranslate2/torch, не vLLM):  ~2.0 ГБ  →  занято 22.80,  свободно  9.20  ← резерв
 ```
 
-Итоговый headroom ≈ **5.4 ГБ** соответствует требованию ~5.5 ГБ.
+KV-кэш Qwen для 16384 токенов = ровно **3.00 GiB** (192 KiB/токен · 16384); при util 0.45
+доступно **4.59 GiB** → запас 1.6 GiB. Прежний профиль util 0.33 давал лишь 0.75 GiB KV —
+именно поэтому Qwen падал с `ValueError: ... KV cache` (см. лог). Headroom ≈ **9.2 ГБ**.
 
 ---
 
@@ -183,7 +184,7 @@ cd dashboard && npm install && npm run dev                     # http://localhos
 
 ```powershell
 # Можно вызвать и вручную:
-python hf_downloader.py Qwen/Qwen2.5-Coder-32B-Instruct-AWQ --dest D:\jarvis\data\models\qwen-coder
+python hf_downloader.py Qwen/Qwen2.5-Coder-14B-Instruct-AWQ --dest D:\jarvis\data\models\qwen-coder-14b
 ```
 - докачка по HTTP **Range** (продолжает с места обрыва, `.part`-файлы);
 - проверка целостности **`sha256`** для LFS-файлов (HF отдаёт хеши); при
@@ -195,7 +196,7 @@ python hf_downloader.py Qwen/Qwen2.5-Coder-32B-Instruct-AWQ --dest D:\jarvis\dat
 `hf_token.txt.example`, в `.gitignore`). Он используется для gated-моделей и
 повышенных лимитов; подхватывается автоматически (или из `HF_TOKEN`).
 
-> Веса кладутся на D: в `D:\jarvis\data\models\{qwen-coder,ui-tars}`, и vLLM
+> Веса кладутся на D: в `D:\jarvis\data\models\{qwen-coder-14b,ui-tars}`, и vLLM
 > грузит их **локально** (`/models/...`) — контейнер ничего не качает на старте.
 
 ### 5.1 Перенос на диск D: (`D:\jarvis`)
@@ -279,8 +280,8 @@ python install_agent.py --lmstudio http://localhost:1234/v1 --target-root D:\jar
 | Слой | Сервис | Порт |
 |------|--------|------|
 | Docker | backend (FastAPI + LangGraph) | 8000 |
-| Docker | vLLM Qwen2.5-Coder-32B (диспетчер+кодер) | 8001 |
-| Docker | vLLM UI-TARS-7B (контроллер ОС/GUI) | 8002 |
+| Docker | vLLM Qwen2.5-Coder-14B (диспетчер+кодер) | 8001 |
+| Docker | vLLM UI-TARS-2B (контроллер ОС/GUI) | 8002 |
 | Docker | audio (Faster-Whisper + Kokoro) | 8003 |
 | Docker | sandbox (изолированное исполнение кода) | — |
 | Хост | windows_rpc_bridge.py (мост + HITL) | 8765 |

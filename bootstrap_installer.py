@@ -121,12 +121,22 @@ class DeploymentProfile:
     gpu_total_vram_gb: float = 32.0
     gpu_host_reserve_gb: float = 3.0
 
-    # Профиль «Qwen-14B + UI-TARS»: оба агента влезают в 32 ГБ при выгруженной
-    # gemma. Qwen2.5-Coder-14B-AWQ ~9 ГБ + UI-TARS-7B FP16 ~15 ГБ + аудио ~2 ГБ.
-    # Доли — от ПОЛНОЙ памяти (32 ГБ), инстансы стартуют последовательно.
-    qwen_gpu_util: float = 0.33     # ~10.6 ГБ: веса 9 + KV ~1.6
-    qwen_max_model_len: int = 16384
-    uitars_gpu_util: float = 0.52   # ~16.6 ГБ: веса 15 + KV ~1.6
+    # Профиль «Qwen-14B + UI-TARS-2B». ТОЧНЫЙ расчёт VRAM (всё в GiB, при общей
+    # памяти RTX 5090 ≈ 32.0 GiB и ВЫГРУЖЕННОЙ из LM Studio gemma):
+    #   • gpu_memory_utilization — доля от ПОЛНОЙ памяти; КАЖДЫЙ инстанс vLLM
+    #     резервирует util×32 под (веса + overhead + KV-кэш) и держит её, пока жив.
+    #   • Qwen2.5-Coder-14B-AWQ: веса 9.38 (замер из лога) + overhead 0.43 +
+    #     KV-кэш. KV/токен = 2·48·8·128·2 Б = 192 KiB → 16384 ток. = ровно 3.00 GiB.
+    #     util 0.45 → 14.40 GiB бюджет → KV-доступно 14.40−9.81 = 4.59 (нужно 3.00).
+    #   • UI-TARS-2B (Qwen2-VL-2B): веса ≈4.2 + overhead ≈0.6 + KV. KV/токен =
+    #     2·28·2·128·2 Б = 28 KiB → 8192 ток. = 0.22 GiB. util 0.20 → 6.40 бюджет
+    #     → KV-доступно ≈1.6 (нужно 0.22). С запасом.
+    #   • Аудио (Whisper int8_float16 + Kokoro) ≈ 2.0, отдельный процесс.
+    # ИТОГО: 14.40 + 6.40 + 2.00 = 22.80 GiB из 32.0 → резерв ≈ 9.2 GiB
+    # (рабочий стол Windows, драйвер, страховка). Запас огромный — не на грани.
+    qwen_gpu_util: float = 0.45     # 14.40 GiB: веса 9.38 + overhead 0.43 + KV 4.59
+    qwen_max_model_len: int = 16384  # KV ровно 3.00 GiB (доступно 4.59 → запас 1.6)
+    uitars_gpu_util: float = 0.20   # 6.40 GiB: веса ~4.2 + overhead ~0.6 + KV ~1.6
     uitars_enabled: bool = True
 
     notes: list[str] = field(default_factory=list)
@@ -869,8 +879,11 @@ class LMStudioClient:
             wsl_memory_gb (int), wsl_processors (int), wsl_swap_gb (int),
             qwen_gpu_util (float 0..1), qwen_max_model_len (int),
             uitars_gpu_util (float 0..1), notes (массив строк на русском).
-            Зарезервируй ~5.5 ГБ VRAM под хост/Xvfb/KV-кэш; сумма
-            (qwen_gpu_util + uitars_gpu_util) * 32 + 2 не должна превышать 26.5.
+            Модели: Qwen2.5-Coder-14B-AWQ (диспетчер+кодер) и UI-TARS-2B
+            (GUI-контроллер, лёгкий). Рекомендуемо: qwen_gpu_util≈0.45,
+            qwen_max_model_len=16384, uitars_gpu_util≈0.20. Держи аудио ~2 ГБ и
+            резерв ≥8 ГБ под рабочий стол Windows: сумма
+            (qwen_gpu_util + uitars_gpu_util) * 32 + 2 не должна превышать 24.
         """)
         user_prompt = "Факты о хосте (JSON):\n" + json.dumps(host_facts, ensure_ascii=False, indent=2)
         sys_msg = {"role": "system", "content": system_prompt}
@@ -1164,6 +1177,26 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
     log.info("→ Предзагрузка весов своим загрузчиком (resume + sha256 + индикация скорости)…")
     for repo, name in targets:
         dest = models_dir / name
+        # Защита от «смешивания» моделей: если в каталоге уже лежит ДРУГАЯ модель
+        # (напр. был UI-TARS-7B, теперь ставим 2B), её устаревшие шарды нужно
+        # снести, иначе vLLM получит мусорный набор весов. Маркер .jarvis_repo
+        # хранит repo-id ранее скачанной модели.
+        marker = dest / ".jarvis_repo"
+        if dest.exists():
+            prev = ""
+            try:
+                prev = marker.read_text(encoding="utf-8").strip()
+            except Exception:  # noqa: BLE001
+                prev = ""
+            if prev and prev != repo:
+                log.info("  В %s была другая модель (%s) — очищаю перед загрузкой %s.",
+                         dest, prev, repo)
+                shutil.rmtree(dest, ignore_errors=True)
+            elif not prev and any(dest.glob("*.safetensors")):
+                # Старый каталог без маркера и с чужими весами — на всякий случай чистим.
+                log.info("  В %s есть веса без маркера модели — очищаю во избежание "
+                         "смешивания версий.", dest)
+                shutil.rmtree(dest, ignore_errors=True)
         log.info("=== %s → %s ===", repo, dest)
         try:
             ok = hf_downloader.download_repo(repo, dest, token=token, retries=retries,
@@ -1172,6 +1205,10 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
             log.warning("  Ошибка загрузчика для %s (%s) — vLLM попробует сам.", repo, exc)
             ok = False
         if ok:
+            try:
+                (dest / ".jarvis_repo").write_text(repo, encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
             log.info("  ✔ %s готова в %s", repo, dest)
         else:
             log.warning("  ⚠ %s скачана НЕ полностью — повторный запуск продолжит докачку.", repo)
@@ -1201,7 +1238,9 @@ def sync_models_to_volume(data_dir: Path, names: list[str]) -> None:
     EXT4 Docker-том jarvis-models. vLLM грузит safetensors через mmap, а mmap по
     9P крашит загрузку — поэтому модели должны лежать на настоящей ФС.
     cp читает последовательно (по 9P это работает, в отличие от mmap).
-    Идемпотентно (cp -u). После копирования ПРОВЕРЯЕТ наличие config.json.
+    Идемпотентно (cp -u). Если модель в каталоге СМЕНИЛАСЬ (маркер .jarvis_repo
+    в томе ≠ на хосте) — сносим её в томе перед копией, чтобы не остались
+    устаревшие шарды (cp -u их не удаляет). После копии ПРОВЕРЯЕТ config.json.
     """
     names = [n for n in names if n]
     if not names:
@@ -1212,7 +1251,13 @@ def sync_models_to_volume(data_dir: Path, names: list[str]) -> None:
              "Первый раз может занять несколько минут…", ", ".join(names), MODELS_VOLUME)
     inner = (
         f'set -e; for n in {name_list}; do '
-        'if [ -d "/src/$n" ]; then echo "  копирую $n…"; cp -ru "/src/$n" /dest/; '
+        'if [ -d "/src/$n" ]; then '
+        # зеркалирование: при смене модели чистим устаревшие веса в томе
+        'sm=$(cat "/src/$n/.jarvis_repo" 2>/dev/null || echo ""); '
+        'dm=$(cat "/dest/$n/.jarvis_repo" 2>/dev/null || echo ""); '
+        'if [ "$sm" != "$dm" ] && [ -d "/dest/$n" ]; then '
+        'echo "  модель $n изменилась ($dm -> $sm) — пересоздаю в томе"; rm -rf "/dest/$n"; fi; '
+        'echo "  копирую $n…"; cp -ru "/src/$n" /dest/; '
         'else echo "  ✗ нет /src/$n на хосте"; fi; done; '
         'echo "--- проверка ---"; ok=1; '
         f'for n in {name_list}; do '
@@ -1281,7 +1326,7 @@ def bring_up_stack() -> None:
         log.warning("Сборка образов завершилась с ошибкой. Частая причина — недоступность "
                     "PyPI (SSL). Укажите рабочее зеркало в wsl/.env: JARVIS_PIP_INDEX_URL=…")
     # ПОЭТАПНЫЙ запуск с ВИДИМЫМ ожиданием. Иначе `docker compose up -d` молча
-    # висит на depends_on (ждёт healthcheck qwen, пока грузится 19 ГБ модели),
+    # висит на depends_on (ждёт healthcheck qwen, пока веса грузятся в VRAM),
     # а при «unhealthy» — каскадно валит зависимые. --no-deps: запускаем по
     # одному, порядок (qwen→ui-tars) сохраняем сами.
     # Перед стартом vLLM выгружаем модель-«мозг установки» из LM Studio, иначе
@@ -1292,9 +1337,9 @@ def bring_up_stack() -> None:
     _compose_with_retries(["up", "-d", "--remove-orphans", "--no-deps", "sandbox"], retries=2)
 
     stages = [
-        ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # веса ~18 ГБ
+        ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # веса ~9.4 ГБ
     ]
-    # UI-TARS включён по умолчанию (профиль Qwen-14B + UI-TARS). Отключение —
+    # UI-TARS-2B включён по умолчанию (профиль Qwen-14B + UI-TARS-2B). Отключение —
     # JARVIS_ENABLE_UITARS=0.
     if os.environ.get("JARVIS_ENABLE_UITARS", "1") != "0":
         stages.append(("vllm-ui-tars", HEALTH_ENDPOINTS["vllm-ui-tars"], 90))
@@ -1358,7 +1403,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wsl-ram", type=int, default=96)
     p.add_argument("--wsl-cpus", type=int, default=20)
     p.add_argument("--qwen-model", default="Qwen/Qwen2.5-Coder-14B-Instruct-AWQ")
-    p.add_argument("--uitars-model", default="bytedance-research/UI-TARS-7B-DPO")
+    p.add_argument("--uitars-model", default="bytedance-research/UI-TARS-2B-SFT",
+                   help="GUI-контроллер. По умолчанию лёгкий UI-TARS-2B (~4.2 ГБ "
+                        "FP16) — влезает рядом с Qwen-14B с большим запасом.")
     p.add_argument("--target-root", default=r"D:\jarvis",
                    help="Корневой путь переноса проекта и тяжёлых данных.")
     p.add_argument("--no-relocate", action="store_true",

@@ -14,7 +14,7 @@ hf_downloader.py — надёжный загрузчик моделей с Huggi
   • ТОКЕН HF из файла hf_token.txt / env HF_TOKEN (для gated-моделей и лимитов).
 
 Использование (CLI):
-    python hf_downloader.py Qwen/Qwen2.5-Coder-32B-Instruct-AWQ --dest D:\jarvis\data\models\qwen-coder
+    python hf_downloader.py Qwen/Qwen2.5-Coder-14B-Instruct-AWQ --dest D:\jarvis\data\models\qwen-coder-14b
     python hf_downloader.py <repo> --dest <dir> [--revision main] [--token-file hf_token.txt] [--verify]
 
 Как библиотека:
@@ -313,7 +313,7 @@ def _setup_console_utf8() -> None:
 def main() -> int:
     _setup_console_utf8()
     p = argparse.ArgumentParser(description="JARVIS-OS — надёжный загрузчик моделей с HuggingFace.")
-    p.add_argument("repo", help="ID репозитория HF, напр. Qwen/Qwen2.5-Coder-32B-Instruct-AWQ")
+    p.add_argument("repo", help="ID репозитория HF, напр. Qwen/Qwen2.5-Coder-14B-Instruct-AWQ")
     p.add_argument("--dest", required=True, help="Каталог назначения.")
     p.add_argument("--revision", default="main")
     p.add_argument("--token-file", default="", help="Файл с токеном HF (по умолчанию hf_token.txt).")

@@ -2,15 +2,16 @@
 #  docker-compose.agents.yml — контейнеризованный стек JARVIS-OS.
 #
 #  Сервисы:
-#    vllm-qwen-coder : Qwen2.5-Coder-32B-Instruct-AWQ  (диспетчер + кодер)  ~19 ГБ
-#    vllm-ui-tars    : UI-TARS-7B                       (контроллер GUI/ОС)  ~5.5 ГБ
+#    vllm-qwen-coder : Qwen2.5-Coder-14B-Instruct-AWQ  (диспетчер + кодер)  ~14.4 ГБ
+#    vllm-ui-tars    : UI-TARS-2B-SFT                   (контроллер GUI/ОС)  ~6.4 ГБ
 #    audio-layer     : Faster-Whisper Large-v3 + Kokoro (ASR + TTS)          ~2 ГБ
 #    sandbox         : изолированная среда исполнения кода кодер-агента
 #    backend         : FastAPI-ядро (server.py)
 #
-#  Распределение VRAM на RTX 5090 (32 ГБ) — см. README §3. Резерв хоста ~5.5 ГБ.
-#  Все сервисы делят один GPU (device 0); инстансы vLLM поднимаются
-#  последовательно (depends_on), чтобы корректно резервировать память.
+#  ТОЧНЫЙ бюджет VRAM на RTX 5090 (32 GiB): Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0
+#  = 22.8 GiB → резерв ~9.2 GiB (рабочий стол Windows, драйвер). Доли gpu_util —
+#  от ПОЛНОЙ памяти; инстансы vLLM поднимаются последовательно, каждый держит
+#  свою долю под (веса + overhead + KV-кэш). Расчёт — в bootstrap_installer.py.
 # =============================================================================
 
 x-gpu-reservation: &gpu-all
@@ -47,7 +48,9 @@ x-vllm-base: &vllm-base
 
 services:
   # ---------------------------------------------------------------------------
-  # 1. Диспетчер + Кодер-агент — Qwen2.5-Coder-32B (Int4 AWQ), ~19 ГБ VRAM
+  # 1. Диспетчер + Кодер-агент — Qwen2.5-Coder-14B (Int4 AWQ), ~14.4 ГБ VRAM
+  #    util 0.45 → 14.4 ГБ: веса 9.38 + overhead 0.43 + KV 4.59 (для 16384 нужно
+  #    ровно 3.00 ГБ → есть запас 1.6 ГБ). KV/токен = 192 KiB (48 слоёв, 8 KV-голов).
   # ---------------------------------------------------------------------------
   vllm-qwen-coder:
     <<: *vllm-base
@@ -64,7 +67,7 @@ services:
       --dtype half
       --enforce-eager
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
-      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.33}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
       --enable-prefix-caching
       --max-num-seqs 8
       --host 0.0.0.0
@@ -72,7 +75,7 @@ services:
     ports:
       - "127.0.0.1:8001:8001"
     # healthcheck через python3 (curl в образе vLLM может отсутствовать → ложный
-    # «unhealthy»). start_period большой: загрузка 19 ГБ модели в VRAM долгая.
+    # «unhealthy»). start_period большой: загрузка весов в VRAM небыстрая.
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 20s
@@ -81,23 +84,28 @@ services:
       start_period: 600s
 
   # ---------------------------------------------------------------------------
-  # 2. Контроллер ОС/GUI — UI-TARS-7B (Int4), ~5.5 ГБ VRAM
+  # 2. Контроллер ОС/GUI — UI-TARS-2B-SFT (Qwen2-VL-2B, FP16), ~6.4 ГБ VRAM
   #    Поднимается ПОСЛЕ Qwen, чтобы корректно учесть остаток свободной памяти.
+  #    util 0.20 → 6.4 ГБ: веса ~4.2 + overhead ~0.6 + KV ~1.6 (для 8192 нужно
+  #    всего 0.22 ГБ → запас огромный). KV/токен = 28 KiB (28 слоёв, 2 KV-головы).
   # ---------------------------------------------------------------------------
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
-    # Профиль «Qwen-14B + UI-TARS»: UI-TARS-7B FP16 ≈15 ГБ помещается рядом с
-    # Qwen-14B (~9 ГБ). Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует).
+    # Лёгкий UI-TARS-2B вместо 7B: 2B (~4.2 ГБ FP16) комфортно живёт рядом с
+    # Qwen-14B, тогда как 7B-FP16 (~16 ГБ) не помещался втроём с аудио в 32 ГБ.
+    # Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует этот сервис).
     # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
+    # Это VL-модель — vLLM сам определит архитектуру Qwen2VLForConditionalGeneration.
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
       --dtype half
       --enforce-eager
       --max-model-len 8192
-      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.52}
+      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.20}
       --max-num-seqs 4
+      --limit-mm-per-prompt image=4
       --host 0.0.0.0
       --port 8002
     ports:

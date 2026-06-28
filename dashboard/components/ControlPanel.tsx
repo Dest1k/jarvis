@@ -94,6 +94,13 @@ export default function ControlPanel() {
     setBusy("");
   };
 
+  const stack = async (action: string) => {
+    setBusy(`stack:${action}`);
+    await postJson(`${API}/stack`, { action });
+    setBusy("");
+    setTimeout(refresh, 1500);
+  };
+
   const services = (ov?.services || "")
     .split("\n")
     .map((l) => l.trim())
@@ -116,6 +123,18 @@ export default function ControlPanel() {
           RPC-мост: {ov?.bridge_connected ? "подключён" : "нет (запустите windows_rpc_bridge.py)"}
         </span>
         <button className="btn" style={{ marginLeft: "auto" }} onClick={refresh}>↻ Обновить</button>
+      </div>
+
+      {/* Стек целиком */}
+      <div className="panel" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <strong>Стек целиком</strong>
+        <button className="btn primary" disabled={!!busy} onClick={() => stack("up")}>▶ Поднять всё</button>
+        <button className="btn danger" disabled={!!busy} onClick={() => stack("down")}>⏹ Остановить всё</button>
+        <button className="btn" disabled={!!busy} onClick={() => stack("restart")}>↻ Рестарт всех</button>
+        <button className="btn" disabled={!!busy} onClick={() => stack("build")}>🔨 Пересобрать образы</button>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          «Поднять»/«Пересобрать» — в отдельном окне на хосте.
+        </span>
       </div>
 
       {/* GPU / VRAM */}

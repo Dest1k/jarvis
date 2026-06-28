@@ -411,6 +411,25 @@ async def control_model(payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 
 
+@app.post("/api/control/stack")
+async def control_stack(payload: dict[str, Any]) -> JSONResponse:
+    """Управление ВСЕМ стеком сразу: up | down | restart | build."""
+    action = payload.get("action", "")
+    base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
+    # up/build могут быть долгими (сборка/пул образов) → запускаем в отдельном
+    # окне на хосте, чтобы не упереться в тайм-аут моста; down/restart — быстрые.
+    if action == "up":
+        res = await _host_exec(f'start "jarvis-up" cmd /c {base} up -d --remove-orphans')
+        return JSONResponse({"ok": res["ok"], "started": True, "out": res["out"]})
+    if action == "build":
+        res = await _host_exec(f'start "jarvis-build" cmd /c {base} build')
+        return JSONResponse({"ok": res["ok"], "started": True, "out": res["out"]})
+    if action in ("down", "restart"):
+        res = await _host_exec(f"{base} {action}")
+        return JSONResponse(res)
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
 @app.post("/api/control/lmstudio")
 async def control_lmstudio(payload: dict[str, Any]) -> JSONResponse:
     """Управление LM Studio: load <model> | unload (через CLI lms на хосте)."""

@@ -30,14 +30,14 @@ COMPOSE_FILE="$SCRIPT_DIR/docker-compose.agents.yml"
 MODELS_DIR="${JARVIS_MODELS_DIR:-$HOME/.cache/jarvis/models}"
 HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}"
 
-# Профиль из bootstrap (с безопасными дефолтами)
-export JARVIS_QWEN_GPU_UTIL="${JARVIS_QWEN_GPU_UTIL:-0.60}"
-export JARVIS_QWEN_MAX_LEN="${JARVIS_QWEN_MAX_LEN:-32768}"
-export JARVIS_UITARS_GPU_UTIL="${JARVIS_UITARS_GPU_UTIL:-0.17}"
+# Профиль из bootstrap (с безопасными дефолтами; точный расчёт — docs/vram_matrix.md)
+export JARVIS_QWEN_GPU_UTIL="${JARVIS_QWEN_GPU_UTIL:-0.45}"
+export JARVIS_QWEN_MAX_LEN="${JARVIS_QWEN_MAX_LEN:-16384}"
+export JARVIS_UITARS_GPU_UTIL="${JARVIS_UITARS_GPU_UTIL:-0.20}"
 
 # Идентификаторы моделей (HuggingFace)
-QWEN_MODEL="${JARVIS_QWEN_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}"
-UITARS_MODEL="${JARVIS_UITARS_MODEL:-bytedance-research/UI-TARS-7B-DPO}"
+QWEN_MODEL="${JARVIS_QWEN_MODEL:-Qwen/Qwen2.5-Coder-14B-Instruct-AWQ}"
+UITARS_MODEL="${JARVIS_UITARS_MODEL:-bytedance-research/UI-TARS-2B-SFT}"
 
 log "================================================================"
 log "JARVIS-OS · оркестратор WSL2 · старт"
@@ -115,8 +115,8 @@ prefetch_model() {
   fi
 }
 # Предзагрузка опциональна; vLLM умеет тянуть веса сам при старте контейнера.
-prefetch_model "$QWEN_MODEL"   "qwen-coder-32b"   || true
-prefetch_model "$UITARS_MODEL" "ui-tars-7b"       || true
+prefetch_model "$QWEN_MODEL"   "qwen-coder-14b"   || true
+prefetch_model "$UITARS_MODEL" "ui-tars"          || true
 
 # --- ЭТАП 4: запуск стека -------------------------------------------------- #
 log "Запуск контейнеризованного стека (docker compose)…"

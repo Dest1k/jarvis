@@ -122,8 +122,14 @@ def sync_models() -> None:
     src = f"{data}/models"
     info("Синхронизация весов в ext4-том (нужно для стабильной загрузки vLLM)…")
     # Те же каталоги, что в bootstrap (MODEL_LOCAL_DIRS): qwen-coder-14b, ui-tars.
+    # При смене модели (маркер .jarvis_repo разный) — чистим устаревшие шарды в томе.
     inner = ('for n in qwen-coder-14b ui-tars; do '
-             'if [ -d "/src/$n" ]; then echo "  $n"; cp -ru "/src/$n" /dest/; fi; done; '
+             'if [ -d "/src/$n" ]; then '
+             'sm=$(cat "/src/$n/.jarvis_repo" 2>/dev/null || echo ""); '
+             'dm=$(cat "/dest/$n/.jarvis_repo" 2>/dev/null || echo ""); '
+             'if [ "$sm" != "$dm" ] && [ -d "/dest/$n" ]; then '
+             'echo "  $n изменилась — пересоздаю"; rm -rf "/dest/$n"; fi; '
+             'echo "  $n"; cp -ru "/src/$n" /dest/; fi; done; '
              'echo SYNC_DONE')
     subprocess.run(["docker", "run", "--rm", "-v", "jarvis-models:/dest",
                     "-v", f"{src}:/src:ro", "alpine", "sh", "-c", inner])
