@@ -48,8 +48,10 @@ services:
   vllm-qwen-coder:
     <<: *vllm-base
     container_name: jarvis-vllm-qwen
+    # Модель берётся из ЛОКАЛЬНОГО пути /models/qwen-coder (его наполняет
+    # hf_downloader на хосте). Контейнер ничего не качает на старте.
     command: >
-      --model ${JARVIS_QWEN_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}
+      --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder}
       --served-model-name qwen-coder
       --quantization awq_marlin
       --dtype half
@@ -75,8 +77,9 @@ services:
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
+    # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
     command: >
-      --model ${JARVIS_UITARS_MODEL:-bytedance-research/UI-TARS-7B-DPO}
+      --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
       --dtype half
       --max-model-len 8192

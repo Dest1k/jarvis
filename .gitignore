@@ -9,6 +9,7 @@ venv/
 .jarvis/
 *.token
 bridge.token
+hf_token.txt
 deployment_profile.json
 .wslconfig.bak.*
 .env

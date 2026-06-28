@@ -89,6 +89,8 @@ COMPOSE_FILE = REPO_DIR / "wsl" / "docker-compose.agents.yml"
 COMPOSE_ENV = REPO_DIR / "wsl" / ".env"
 WSLCONFIG_PATH = Path(os.path.expandvars(r"%USERPROFILE%")) / ".wslconfig"
 JARVIS_HOME = Path.home() / ".jarvis"
+HF_TOKEN_FILE = REPO_DIR / "hf_token.txt"
+HF_TOKEN_EXAMPLE = REPO_DIR / "hf_token.txt.example"
 
 # Системные дистрибутивы WSL, которые нельзя использовать как рабочие
 SYSTEM_DISTROS = {"docker-desktop", "docker-desktop-data", "docker_desktop"}
@@ -294,10 +296,12 @@ class WslManager:
 # --------------------------------------------------------------------------- #
 def set_repo_root(root: Path) -> None:
     """Переключить корень проекта (после переноса на другой диск)."""
-    global REPO_DIR, COMPOSE_FILE, COMPOSE_ENV
+    global REPO_DIR, COMPOSE_FILE, COMPOSE_ENV, HF_TOKEN_FILE, HF_TOKEN_EXAMPLE
     REPO_DIR = root
     COMPOSE_FILE = root / "wsl" / "docker-compose.agents.yml"
     COMPOSE_ENV = root / "wsl" / ".env"
+    HF_TOKEN_FILE = root / "hf_token.txt"
+    HF_TOKEN_EXAMPLE = root / "hf_token.txt.example"
 
 
 def _docker_path(p: Path) -> str:
@@ -1084,67 +1088,80 @@ def compose(*args: str, stream: bool = False, timeout: int = 1800) -> int:
 
 VLLM_IMAGE = os.environ.get("JARVIS_VLLM_IMAGE", "vllm/vllm-openai:latest")
 
+# Соответствие: HF-репозиторий → локальный подкаталог в data/models, который
+# монтируется в контейнер vLLM как /models/<имя> (см. docker-compose).
+MODEL_LOCAL_DIRS = {"qwen": "qwen-coder", "uitars": "ui-tars"}
+
+
+def ensure_hf_token_file() -> None:
+    """Создать hf_token.txt из шаблона, если его ещё нет (чтобы было что редактировать)."""
+    if HF_TOKEN_FILE.exists():
+        return
+    try:
+        if HF_TOKEN_EXAMPLE.exists():
+            shutil.copy2(HF_TOKEN_EXAMPLE, HF_TOKEN_FILE)
+            log.info("Создан файл для токена HF: %s (впишите туда токен при необходимости).",
+                     HF_TOKEN_FILE)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Не удалось создать hf_token.txt: %s", exc)
+
+
+def load_hf_token() -> str:
+    """Токен HF: env HF_TOKEN → файл hf_token.txt (плейсхолдер/комментарии игнорируются)."""
+    env = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env and env.strip():
+        return env.strip()
+    if HF_TOKEN_FILE.exists():
+        for line in HF_TOKEN_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "ВАШ_ТОКЕН" not in line:
+                return line
+    return ""
+
 
 def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
-                    retries: int = 4) -> None:
+                    retries: int = 8, verify: bool = False) -> None:
     """
-    ВОЗОБНОВЛЯЕМАЯ предзагрузка весов моделей в персистентный кэш HF на целевом
-    диске (data_dir/hf).
-
-    ВАЖНО: качаем через ОБРАЗ vLLM (в нём уже есть huggingface_hub) напрямую из
-    HuggingFace — БЕЗ pip и без обращения к PyPI (раньше pip install в одноразовом
-    python:slim падал по SSL к PyPI и блокировал загрузку). Образ vLLM всё равно
-    нужен для стека. hf_transfer выключен → при обрыве докачка продолжается с
-    места обрыва. Идемпотентно: уже скачанные файлы пропускаются.
+    Предзагрузка весов моделей СВОИМ загрузчиком (hf_downloader): напрямую из
+    HuggingFace, с докачкой по Range, проверкой sha256 (LFS) и живой индикацией
+    скорости/прогресса. Веса кладутся в data/models/<имя>, откуда их берёт vLLM
+    (локальный путь /models/<имя>) — без скачивания на старте контейнера.
     """
-    hf_cache = _docker_path(data_dir / "hf")
-    (data_dir / "hf").mkdir(parents=True, exist_ok=True)
-    models = [m for m in (qwen_model, uitars_model) if m]
-    log.info("→ Предзагрузка весов в кэш %s через образ vLLM (без pip/PyPI, resume)…", hf_cache)
+    models_dir = data_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    token = load_hf_token()
+    if token:
+        log.info("Токен HF загружен (gated-модели и повышенные лимиты доступны).")
 
-    # Образ vLLM большой — тянем его один раз заранее (с ретраями), потом
-    # переиспользуем и для загрузки весов, и для самого стека.
-    for attempt in range(1, retries + 1):
-        rc, _ = run_streamed(["docker", "pull", VLLM_IMAGE], timeout=7200)
-        if rc == 0:
-            break
-        log.warning("  Загрузка образа vLLM прервана (код %s, попытка %d/%d) — повтор…",
-                    rc, attempt, retries)
-        time.sleep(min(2 ** attempt, 30))
+    # Импортируем наш загрузчик из каталога проекта
+    sys.path.insert(0, str(REPO_DIR))
+    try:
+        import hf_downloader
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hf_downloader недоступен (%s) — пропускаю предзагрузку; "
+                    "vLLM попробует скачать сам.", exc)
+        return
 
-    for model in models:
-        done = False
-        for attempt in range(1, retries + 1):
-            log.info("  Модель %s — попытка %d/%d (через huggingface_hub образа vLLM)…",
-                     model, attempt, retries)
-            # В образе vLLM бинарь — python3 (не python). Берём sh с фолбэком,
-            # чтобы не зависеть от точного имени интерпретатора на PATH.
-            pycode = (
-                "from huggingface_hub import snapshot_download; "
-                f"snapshot_download('{model}'); print('PREFETCH_DONE')"
-            )
-            inner = f'python3 -c "{pycode}" || python -c "{pycode}"'
-            rc, _ = run_streamed([
-                "docker", "run", "--rm",
-                "-e", "HF_HUB_ENABLE_HF_TRANSFER=0",
-                "-e", "HF_HUB_DOWNLOAD_TIMEOUT=120",
-                "-e", f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
-                "-e", f"HUGGING_FACE_HUB_TOKEN={os.environ.get('HF_TOKEN', '')}",
-                "-v", f"{hf_cache}:/root/.cache/huggingface",
-                "--entrypoint", "sh", VLLM_IMAGE, "-c", inner,
-            ], timeout=36000)
-            if rc == 0:
-                done = True
-                break
-            wait = min(2 ** attempt, 30)
-            log.warning("  Загрузка %s прервана (код %s). Возобновлю через %d с "
-                        "(уже скачанное не теряется)…", model, rc, wait)
-            time.sleep(wait)
-        if done:
-            log.info("  ✔ %s — в кэше на D:.", model)
+    targets = []
+    if qwen_model:
+        targets.append((qwen_model, MODEL_LOCAL_DIRS["qwen"]))
+    if uitars_model:
+        targets.append((uitars_model, MODEL_LOCAL_DIRS["uitars"]))
+
+    log.info("→ Предзагрузка весов своим загрузчиком (resume + sha256 + индикация скорости)…")
+    for repo, name in targets:
+        dest = models_dir / name
+        log.info("=== %s → %s ===", repo, dest)
+        try:
+            ok = hf_downloader.download_repo(repo, dest, token=token, retries=retries,
+                                             verify=verify, log=print)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("  Ошибка загрузчика для %s (%s) — vLLM попробует сам.", repo, exc)
+            ok = False
+        if ok:
+            log.info("  ✔ %s готова в %s", repo, dest)
         else:
-            log.warning("  ✗ %s не докачана за %d попыток — vLLM докачает сам при старте "
-                        "(тоже с возобновлением).", model, retries)
+            log.warning("  ⚠ %s скачана НЕ полностью — повторный запуск продолжит докачку.", repo)
 
 
 def _compose_with_retries(action: list[str], retries: int = 4) -> int:
@@ -1231,6 +1248,8 @@ def parse_args() -> argparse.Namespace:
                    help="Только подготовка (без подъёма контейнеров).")
     p.add_argument("--skip-prefetch", action="store_true",
                    help="Не предзагружать веса моделей (vLLM скачает сам при старте).")
+    p.add_argument("--verify-models", action="store_true",
+                   help="Полная sha256-перепроверка уже скачанных LFS-весов (медленно).")
     p.add_argument("--skip-gpu-check", action="store_true",
                    help="Пропустить тест GPU в контейнере (если он долгий/не нужен).")
     p.add_argument("--skip-checks", action="store_true")
@@ -1286,6 +1305,12 @@ def main() -> int:
             relocator.relocate_docker()
         except Exception as exc:  # noqa: BLE001
             log.warning("Перенос диска Docker Desktop пропущен (%s).", exc)
+
+    # --- Токен HuggingFace (создаём файл и прокидываем в окружение) ---
+    ensure_hf_token_file()
+    _hf_token = load_hf_token()
+    if _hf_token:
+        os.environ["HF_TOKEN"] = _hf_token  # подхватится write_compose_env и предзагрузкой
 
     # --- Профиль развёртывания ---
     # ВАЖНО: по умолчанию bootstrap НЕ обращается к LM Studio и НЕ загружает
@@ -1364,7 +1389,8 @@ def main() -> int:
 
     # --- Возобновляемая предзагрузка весов моделей (в кэш на D:) ---
     if not args.skip_prefetch:
-        prefetch_models(data_dir, args.qwen_model, args.uitars_model)
+        prefetch_models(data_dir, args.qwen_model, args.uitars_model,
+                        verify=args.verify_models)
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()
