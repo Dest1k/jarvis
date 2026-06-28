@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -119,17 +120,29 @@ def ensure_token() -> str:
 # --------------------------------------------------------------------------- #
 # Классификация команд — определение «деструктивности» для HITL-гейта
 # --------------------------------------------------------------------------- #
-# Маркеры опасных операций (нижний регистр). При совпадении требуется
-# подтверждение оператора в дашборде.
-DESTRUCTIVE_MARKERS = (
-    "rm ", "rmdir", "del ", "format", "mkfs", "diskpart",
-    "shutdown", "reboot", "restart-computer", "stop-computer",
+# Однословные опасные команды/подкоманды. Сверяются с ТОКЕНАМИ команды, а не
+# подстрокой; токены-флаги (начинаются с '-') игнорируются — иначе безобидный
+# '--format' ложно ловился на 'format' (и каждый опрос статуса из дашборда
+# требовал подтверждения).
+DESTRUCTIVE_TOKENS = {
+    "rm", "rmdir", "del", "erase", "format", "mkfs", "diskpart",
+    "shutdown", "reboot", "restart-computer", "stop-computer", "stop-process",
+    "taskkill", "kill", "remove-item", "rd",
+    "curl", "wget", "invoke-webrequest", "iwr",  # сетевые операции (эксфильтрация)
+}
+# Многословные опасные паттерны — сверяются как подстрока.
+DESTRUCTIVE_PHRASES = (
     "git push", "git reset --hard", "git clean", "git checkout -- ",
-    "reg delete", "remove-item", "rd /s",
-    "taskkill", "kill ", "stop-process",
-    "net stop", "sc delete", "schtasks /delete",
-    "curl ", "wget ", "invoke-webrequest", "iwr ",  # сетевые операции
+    "reg delete", "net stop", "sc delete", "schtasks /delete",
     "pip uninstall", "npm uninstall",
+)
+# Явно READ-ONLY команды (статусные опросы дашборда) — НИКОГДА не требуют HITL.
+# Сверяются по началу нормализованной команды.
+READONLY_PREFIXES = (
+    "docker ps", "docker logs", "docker inspect", "docker version",
+    "docker stats", "docker compose ps", "docker compose ls",
+    "nvidia-smi", "cmd /c dir", "dir ", "type ", "where ", "ver",
+    "wmic", "systeminfo", "tasklist", "get-content", "gc ",
 )
 
 
@@ -141,8 +154,17 @@ def is_destructive(action: str, payload: dict[str, Any]) -> bool:
     if action in ("git_push", "delete_path", "kill_process", "system_power"):
         return True
     if action in ("exec", "powershell", "open_app"):
-        cmd = str(payload.get("command", "")).lower()
-        return any(marker in cmd for marker in DESTRUCTIVE_MARKERS)
+        cmd = str(payload.get("command", "")).strip().lower()
+        # 1) read-only статусные команды — без HITL (иначе опрос дашборда раз в
+        #    5 с заваливает оператора подтверждениями).
+        if any(cmd.startswith(p) for p in READONLY_PREFIXES):
+            return False
+        # 2) многословные опасные фразы — подстрокой.
+        if any(ph in cmd for ph in DESTRUCTIVE_PHRASES):
+            return True
+        # 3) однословные маркеры — по токенам, игнорируя флаги (-...).
+        tokens = [t for t in re.split(r"[\s|;&()]+", cmd) if t and not t.startswith("-")]
+        return any(t in DESTRUCTIVE_TOKENS for t in tokens)
     return False
 
 
