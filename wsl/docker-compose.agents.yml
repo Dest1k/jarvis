@@ -168,7 +168,13 @@ services:
   #    Без проброса GPU. Сетевой доступ ограничен. ФС — только рабочий volume.
   # ---------------------------------------------------------------------------
   sandbox:
-    image: python:3.11-slim
+    # Образ с компиляторами C/C++ и Node.js (для run_code на разных языках).
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.sandbox
+      args:
+        PIP_INDEX_URL: ${JARVIS_PIP_INDEX_URL:-https://pypi.org/simple}
+    image: jarvis/sandbox:latest
     container_name: jarvis-sandbox
     restart: unless-stopped
     command: ["sleep", "infinity"]
@@ -205,6 +211,14 @@ services:
       # RPC-мост слушает на Windows-хосте; из WSL зеркалируется в localhost
       - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
       - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
+      # Имена served-моделей и контекстные окна — для бюджета контекста агента
+      # (чтобы не упереться в окно Qwen/UI-TARS и не спровоцировать OOM по KV).
+      - JARVIS_QWEN_MODEL_NAME=qwen-coder
+      - JARVIS_UITARS_MODEL_NAME=ui-tars
+      - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
+      - JARVIS_UITARS_MAX_LEN=8192
+      # Каталог постоянной памяти агента (диалоги/сводки/факты).
+      - JARVIS_MEMORY_DIR=/data/memory
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -212,6 +226,8 @@ services:
       # Каталог ~/.jarvis хоста (токен RPC-моста) пробрасывается в контейнер.
       # JARVIS_HOME_HOST задаётся bootstrap_installer.py в wsl/.env.
       - ${JARVIS_HOME_HOST:-~/.jarvis}:/root/.jarvis
+      # Постоянная память агента — на томе данных (переживает рестарт контейнера).
+      - ${JARVIS_DATA_DIR:-../data}/memory:/data/memory
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

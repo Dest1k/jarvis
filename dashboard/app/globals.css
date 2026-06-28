@@ -118,3 +118,122 @@ html, body {
 .hitl-card { background: var(--panel); border: 1px solid var(--err); border-radius: 12px; padding: 24px; max-width: 480px; }
 .vu-meter { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
 .vu-fill { height: 100%; background: linear-gradient(90deg, var(--ok), var(--warn), var(--err)); transition: width 0.05s; }
+
+/* Базовые поля ввода в панелях */
+input, textarea, select {
+  background: #05080d;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+}
+input:focus, textarea:focus { border-color: var(--accent); }
+
+/* ===================== ЧАТ (Telegram-подобный) ===================== */
+.chat-wrap { display: flex; flex-direction: column; gap: 12px; height: 100%; min-height: 0; }
+.chat-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
+
+.chat-feed {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 6px 4px;
+}
+.chat-hello {
+  margin: auto; max-width: 520px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; padding: 22px 26px; font-size: 14px;
+}
+.chat-hello ul { margin: 10px 0; padding-left: 18px; color: var(--muted); }
+.chat-hello li { margin: 4px 0; }
+
+.msg-row { display: flex; }
+.msg-row.user { justify-content: flex-end; }
+.msg-row.assistant { justify-content: flex-start; }
+
+.bubble {
+  max-width: min(78%, 760px);
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  word-wrap: break-word;
+}
+.bubble.user {
+  background: linear-gradient(135deg, var(--accent-2), #4368c4);
+  color: #fff; border-bottom-right-radius: 5px;
+}
+.bubble.assistant {
+  background: var(--panel); border: 1px solid var(--border);
+  border-bottom-left-radius: 5px;
+}
+.bubble.error { border-color: var(--err); }
+.bubble-text { white-space: pre-wrap; }
+
+.caret { animation: blink 1s step-start infinite; color: var(--accent); }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Шаги агента (мысли/инструменты) внутри пузыря */
+.steps { margin-bottom: 8px; }
+.steps-toggle {
+  background: transparent; border: none; color: var(--accent);
+  cursor: pointer; font-size: 12px; padding: 0; margin-bottom: 4px;
+}
+.steps-body {
+  border-left: 2px solid var(--border); padding-left: 10px;
+  display: flex; flex-direction: column; gap: 5px; margin-bottom: 6px;
+}
+.step { font-size: 12.5px; color: var(--muted); }
+.step code { color: var(--accent); background: #05080d; padding: 1px 5px; border-radius: 4px; }
+.step.tool_result { color: var(--text); }
+
+.code-block {
+  position: relative;
+  background: #05080d; border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin: 8px 0;
+  overflow-x: auto; font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12.5px;
+}
+.code-lang {
+  position: absolute; top: 6px; right: 10px;
+  font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
+}
+
+/* Поле ввода чата */
+.chat-input { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; }
+.chat-input textarea {
+  flex: 1; resize: none; max-height: 140px; min-height: 24px;
+  line-height: 1.4; padding: 9px 12px;
+}
+.btn.mic { font-size: 18px; padding: 8px 12px; border-radius: 10px; }
+.btn.send { font-size: 16px; padding: 9px 15px; border-radius: 10px; }
+.mic-vu { width: 60px; align-self: center; }
+
+/* Панель памяти */
+.mem-card { max-width: 620px; width: 620px; border-color: var(--border); }
+.mem-section { margin: 14px 0; }
+.mem-section + .mem-section { border-top: 1px solid var(--border); padding-top: 12px; }
+
+/* ===================== МОНИТОРНАЯ ===================== */
+.monitor-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
+.monitor-grid {
+  flex: 1; min-height: 0;
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  grid-auto-rows: minmax(220px, 32vh);
+}
+.monitor-grid.single { grid-template-columns: 1fr; grid-auto-rows: 1fr; height: 78vh; }
+.log-pane { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.log-pane-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.log-pane-head strong { font-size: 13px; }
+.log-pane-head .pane-btn { margin-left: auto; padding: 4px 8px; }
+.log-pane-body {
+  flex: 1; min-height: 0; height: auto; border-radius: 0;
+  background: #05080d;
+}

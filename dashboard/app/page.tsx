@@ -1,29 +1,33 @@
 "use client";
 /**
- * page.tsx — главная страница Command Center.
- * Переключает четыре основных представления и держит глобальный HITL-гейт.
+ * page.tsx — главная страница Command Center JARVIS-OS.
+ *
+ * Три вкладки (по итогам рефакторинга):
+ *   🛠️  Пульт управления — системные/сервисные функции (без изменений по сути).
+ *   💬  Чат              — универсальный Telegram-подобный чат с агентом
+ *                          (текст + голос + память + шаги выполнения).
+ *   🖥️  Мониторная       — живые логи всех сервисов в одной сетке.
+ *
+ * Глобальный HITL-гейт остаётся поверх всего: при деструктивной команде на хосте
+ * всплывает окно подтверждения оператора.
  */
 import { useState } from "react";
-import DeploymentView from "@/components/DeploymentView";
-import DesktopViewer from "@/components/DesktopViewer";
-import CodeStudio from "@/components/CodeStudio";
-import AudioStream from "@/components/AudioStream";
 import ControlPanel from "@/components/ControlPanel";
+import ChatView from "@/components/ChatView";
+import MonitorView from "@/components/MonitorView";
 import HitlGate from "@/components/HitlGate";
 import StatusBar from "@/components/StatusBar";
 
-type View = "control" | "deploy" | "desktop" | "code" | "audio";
+type View = "chat" | "control" | "monitor";
 
 const NAV: { id: View; label: string }[] = [
+  { id: "chat", label: "💬 Чат" },
   { id: "control", label: "🛠️ Пульт управления" },
-  { id: "deploy", label: "🚀 Развёртывание" },
-  { id: "desktop", label: "🖥️ Виртуальный десктоп" },
-  { id: "code", label: "🧩 Code Studio" },
-  { id: "audio", label: "🎙️ Аудио-поток" },
+  { id: "monitor", label: "🖥️ Мониторная" },
 ];
 
 export default function Page() {
-  const [view, setView] = useState<View>("control");
+  const [view, setView] = useState<View>("chat");
 
   return (
     <div className="app-grid">
@@ -47,15 +51,15 @@ export default function Page() {
         ))}
       </nav>
 
+      {/* content: чат держим всегда смонтированным (live WS/аудио), прочие — по выбору */}
       <main className="content">
+        <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}>
+          <ChatView />
+        </div>
         {view === "control" && <ControlPanel />}
-        {view === "deploy" && <DeploymentView />}
-        {view === "desktop" && <DesktopViewer />}
-        {view === "code" && <CodeStudio />}
-        {view === "audio" && <AudioStream />}
+        {view === "monitor" && <MonitorView />}
       </main>
 
-      {/* Глобальный HITL-гейт: всплывает при деструктивных командах */}
       <HitlGate />
     </div>
   );

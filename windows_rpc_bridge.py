@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
 import secrets
 import shlex
+import struct
 import subprocess
 import sys
 import time
@@ -237,6 +239,17 @@ class ApprovalRegistry:
 
 
 # --------------------------------------------------------------------------- #
+# Утилита: размеры PNG из заголовка (IHDR), без внешних зависимостей
+# --------------------------------------------------------------------------- #
+def _png_size(data: bytes) -> tuple[int, int]:
+    """Вернуть (width, height) PNG по сигнатуре+IHDR или (0, 0)."""
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = struct.unpack(">II", data[16:24])
+        return int(w), int(h)
+    return 0, 0
+
+
+# --------------------------------------------------------------------------- #
 # Исполнители нативных хуков ОС Windows
 # --------------------------------------------------------------------------- #
 class HostExecutor:
@@ -324,9 +337,18 @@ class HostExecutor:
         )
         return await self.powershell(ps)
 
-    async def screenshot(self, out_path: Optional[str] = None) -> dict[str, Any]:
-        """Сделать скриншот экрана хоста (для контекста UI-TARS)."""
-        out = out_path or str(JARVIS_HOME / "runtime" / f"shot_{int(time.time())}.png")
+    async def screenshot(self, out_path: Optional[str] = None,
+                         return_b64: bool = False) -> dict[str, Any]:
+        """
+        Сделать скриншот экрана хоста (для контекста UI-TARS).
+
+        При return_b64=True дополнительно возвращает PNG в base64 и размеры
+        экрана — это нужно агенту в WSL/контейнере, который НЕ имеет доступа к
+        файловой системе хоста и не может прочитать сохранённый файл.
+        """
+        runtime_dir = JARVIS_HOME / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.png")
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
             "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
@@ -337,7 +359,70 @@ class HostExecutor:
         )
         res = await self.powershell(ps)
         res["path"] = out
+        if return_b64:
+            try:
+                data = Path(out).read_bytes()
+                res["image_b64"] = base64.b64encode(data).decode("ascii")
+                w, h = _png_size(data)
+                if w and h:
+                    res["screen_w"], res["screen_h"] = w, h
+            except Exception as exc:  # noqa: BLE001
+                res["screenshot_error"] = str(exc)
         return res
+
+    # --- Нативный ввод (мышь/клавиатура) для UI-TARS-управления хостом ----- #
+    @staticmethod
+    def _pyautogui():
+        try:
+            import pyautogui
+            pyautogui.FAILSAFE = False
+            return pyautogui
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _input_exec(self, fn) -> dict[str, Any]:
+        """Выполнить синхронный pyautogui-вызов в пуле потоков."""
+        pg = self._pyautogui()
+        if pg is None:
+            return {"returncode": 1,
+                    "stderr": "pyautogui не установлен (pip install pyautogui)."}
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            try:
+                fn(pg)
+                return {"returncode": 0, "stdout": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                return {"returncode": 1, "stderr": str(exc)}
+
+        return await loop.run_in_executor(None, _b)
+
+    async def mouse_move(self, x: int, y: int) -> dict[str, Any]:
+        return await self._input_exec(lambda pg: pg.moveTo(int(x), int(y)))
+
+    async def mouse_click(self, x: Optional[int] = None, y: Optional[int] = None,
+                          button: str = "left", double: bool = False) -> dict[str, Any]:
+        def _do(pg):
+            kw = {"button": button}
+            if x is not None and y is not None:
+                kw.update(x=int(x), y=int(y))
+            (pg.doubleClick if double else pg.click)(**kw)
+        return await self._input_exec(_do)
+
+    async def type_text(self, text: str) -> dict[str, Any]:
+        return await self._input_exec(lambda pg: pg.typewrite(str(text), interval=0.01))
+
+    async def key_press(self, keys: str) -> dict[str, Any]:
+        # 'ctrl+s' → hotkey('ctrl','s'); 'enter' → press('enter')
+        parts = [k.strip() for k in str(keys).replace("+", " ").split() if k.strip()]
+        if not parts:
+            return {"returncode": 1, "stderr": "Не заданы клавиши."}
+        if len(parts) == 1:
+            return await self._input_exec(lambda pg: pg.press(parts[0]))
+        return await self._input_exec(lambda pg: pg.hotkey(*parts))
+
+    async def scroll(self, amount: int = -3) -> dict[str, Any]:
+        return await self._input_exec(lambda pg: pg.scroll(int(amount) * 120))
 
     async def kill_process(self, name: str) -> dict[str, Any]:
         """Завершить процесс по имени (деструктивно → проходит через HITL)."""
@@ -420,7 +505,14 @@ class RpcRouter:
             "powershell": lambda p: self.host.powershell(p["command"]),
             "open_app": lambda p: self.host.open_app(p["command"]),
             "media_hook": lambda p: self.host.media_hook(p["key"]),
-            "screenshot": lambda p: self.host.screenshot(p.get("path")),
+            "screenshot": lambda p: self.host.screenshot(
+                p.get("path"), p.get("return_b64", False)),
+            "mouse_move": lambda p: self.host.mouse_move(p["x"], p["y"]),
+            "mouse_click": lambda p: self.host.mouse_click(
+                p.get("x"), p.get("y"), p.get("button", "left"), p.get("double", False)),
+            "type_text": lambda p: self.host.type_text(p.get("text", "")),
+            "key_press": lambda p: self.host.key_press(p.get("keys", "")),
+            "scroll": lambda p: self.host.scroll(p.get("amount", -3)),
             "kill_process": lambda p: self.host.kill_process(p["name"]),
             "system_power": lambda p: self.host.system_power(p["mode"]),
             "read_file": lambda p: self.host.read_file(p["path"]),
@@ -507,9 +599,13 @@ class RpcBridgeServer:
         role = msg.get("role", "orchestrator")
         await ws.send(json.dumps({"type": "auth", "ok": True, "role": role}))
         log.info("Авторизовано подключение (role=%s) от %s", role, ws.remote_address)
-        # Дашборд-подписчики получают HITL-уведомления
-        if role == "dashboard":
-            self.registry.subscribe(ws)
+        # HITL-уведомления получают ВСЕ авторизованные подключения. Важно:
+        # браузерный дашборд не ходит в мост напрямую — он подключён к ядру
+        # (backend), а ядро держит ЕДИНСТВЕННОЕ соединение с мостом с
+        # role=orchestrator и РЕТРАНСЛИРУЕТ hitl_request в дашборд (/ws/hitl).
+        # Поэтому подписываем и оркестратор, иначе HITL-модал не всплывёт и
+        # деструктивная команда «зависнет» в ожидании решения.
+        self.registry.subscribe(ws)
         return True
 
     async def handler(self, ws: WebSocketServerProtocol) -> None:

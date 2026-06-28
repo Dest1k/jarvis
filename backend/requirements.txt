@@ -1,9 +1,9 @@
-# Зависимости backend-ядра JARVIS-OS (server.py + orchestrator)
+# Зависимости backend-ядра JARVIS-OS (server.py + агентский оркестратор)
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 websockets==14.1
 pydantic==2.10.4
-langgraph==0.2.60
-langchain-core==0.3.28
 python-multipart==0.0.20
+# Парсинг веб-страниц/выдачи поиска для инструментов агента (web_fetch/web_search).
+beautifulsoup4==4.12.3

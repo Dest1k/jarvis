@@ -8,17 +8,21 @@ WebSocket-потоков между браузерным дашбордом, vLL
 виртуальным десктопом и RPC-мостом хоста.
 
 WebSocket-маршруты:
-    /ws/deploy      — стрим логов развёртывания и состояний установки.
-    /ws/chat        — текстовые токены агентов (диспетчер/кодер) в реальном времени.
+    /ws/deploy      — стрим логов всех контейнеров (мониторная) в реальном времени.
+    /ws/chat        — универсальный чат с агентом: поток событий (мысли, вызовы
+                      инструментов, токены ответа) + команды управления памятью.
     /ws/audio       — двунаправленный аудио-канал: входящие байты (VAD→ASR),
                       исходящие TTS-чанки (low-latency).
-    /ws/desktop     — кадры виртуального десктопа (framebuffer UI-TARS) → Canvas.
+    /ws/desktop     — кадры виртуального десктопа (framebuffer) → Canvas.
     /ws/hitl        — мост HITL-уведомлений и решений оператора ↔ RPC-bridge.
 
 REST:
-    GET /health     — проверка готовности.
-    GET /status     — сводный статус подсистем.
-    POST /task      — постановка задачи в LangGraph-оркестратор.
+    GET  /health            — проверка готовности.
+    GET  /status            — сводный статус подсистем.
+    POST /task              — постановка задачи в агент-оркестратор.
+    GET  /api/agent/memory  — состояние памяти агента.
+    POST /api/agent/memory  — управление памятью (reset/flush/clear/save).
+    /api/control/*          — Пульт управления (сервисы, GPU, модели, конфиг).
 
 Запуск:
     uvicorn server:app --host 0.0.0.0 --port 8000
@@ -449,86 +453,158 @@ async def control_lmstudio(payload: dict[str, Any]) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # WS: логи развёртывания
 # --------------------------------------------------------------------------- #
+# Активные «следящие» процессы docker logs -f (по одному на сервис — без
+# дублей при переподключениях дашборда). Живут до завершения процесса backend.
+_log_followers: dict[str, asyncio.Task] = {}
+
+
 @app.websocket("/ws/deploy")
 async def ws_deploy(ws: WebSocket) -> None:
     await manager.connect("deploy", ws)
     try:
-        await ws.send_text(json.dumps({"type": "hello", "channel": "deploy"}))
+        await ws.send_text(json.dumps({"type": "hello", "channel": "deploy",
+                                       "services": list(CONTAINERS.keys())}))
         while True:
-            # Дашборд может присылать команды управления развёртыванием
+            # Дашборд (мониторная) просит подписаться на логи сервисов
             raw = await ws.receive_text()
             msg = json.loads(raw)
             if msg.get("type") == "tail_logs":
-                asyncio.create_task(_stream_container_logs(msg.get("service", "vllm-qwen-coder")))
+                svc = msg.get("service", "qwen")
+                _ensure_log_follower(svc)
+            elif msg.get("type") == "tail_all":
+                for svc in CONTAINERS:
+                    _ensure_log_follower(svc)
     except WebSocketDisconnect:
         await manager.disconnect("deploy", ws)
 
 
-async def _stream_container_logs(service: str) -> None:
-    """Стримить логи docker-контейнера в канал deploy."""
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "logs", "-f", "--tail", "100", service,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
+def _ensure_log_follower(svc: str) -> None:
+    """Запустить (идемпотентно) слежение за логами контейнера сервиса."""
+    container = CONTAINERS.get(svc, svc)
+    if svc in _log_followers and not _log_followers[svc].done():
+        return
+    _log_followers[svc] = asyncio.create_task(_stream_container_logs(svc, container))
+
+
+async def _stream_container_logs(svc: str, container: str) -> None:
+    """Стримить логи docker-контейнера в канал deploy (тег = ключ сервиса)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "logs", "-f", "--tail", "120", container,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await manager.broadcast("deploy", {"type": "log", "service": svc,
+                                           "line": f"[не удалось открыть логи: {exc}]"})
+        _log_followers.pop(svc, None)
+        return
     assert proc.stdout is not None
     try:
         async for line in proc.stdout:
             await manager.broadcast("deploy", {
-                "type": "log", "service": service,
+                "type": "log", "service": svc,
                 "line": line.decode("utf-8", "replace").rstrip(),
             })
     finally:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        _log_followers.pop(svc, None)
 
 
 # --------------------------------------------------------------------------- #
-# WS: текстовые токены агентов
+# WS: универсальный чат с агентом (Telegram-like канал)
 # --------------------------------------------------------------------------- #
+# Дашборд держит ОДНУ диалоговую сессию; при желании можно мультиплексировать
+# по session_id из сообщения. Ход агента сериализуется на сессию (lock), чтобы
+# параллельные сообщения не путали оперативный контекст и не плодили нагрузку
+# на vLLM (защита от затыков и роста KV-кэша).
+_chat_locks: dict[str, asyncio.Lock] = {}
+
+
+def _chat_lock(session: str) -> asyncio.Lock:
+    if session not in _chat_locks:
+        _chat_locks[session] = asyncio.Lock()
+    return _chat_locks[session]
+
+
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket) -> None:
     await manager.connect("chat", ws)
     try:
+        await ws.send_text(json.dumps({"type": "hello", "channel": "chat"}))
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw)
-            if msg.get("type") == "user_message":
-                # Стримим ответ диспетчера/кодера токен за токеном
-                asyncio.create_task(_stream_agent_reply(msg.get("text", "")))
+            mtype = msg.get("type")
+            if mtype == "user_message":
+                asyncio.create_task(_run_agent_turn(
+                    msg.get("text", ""),
+                    msg.get("id", ""),
+                    msg.get("session", "default"),
+                ))
+            elif mtype == "reset_context":
+                from orchestrator import agent
+                agent.reset_context(msg.get("session", "default"),
+                                    keep_summary=bool(msg.get("keep_summary")))
+                await manager.broadcast("chat", {"type": "memory", "event": "reset",
+                                                 "text": "Оперативный контекст очищен."})
+            elif mtype == "flush_context":
+                from orchestrator import agent
+                ok = await agent.flush_context(msg.get("session", "default"))
+                await manager.broadcast("chat", {"type": "memory", "event": "flushed",
+                                                 "text": "Контекст сжат в сводку." if ok
+                                                 else "Нечего сжимать."})
     except WebSocketDisconnect:
         await manager.disconnect("chat", ws)
 
 
-async def _stream_agent_reply(user_text: str) -> None:
-    """Запрос к vLLM (Qwen-Coder) с потоковой выдачей токенов в канал chat."""
-    body = {
-        "model": "qwen-coder",
-        "messages": [
-            {"role": "system", "content": "Ты — диспетчер JARVIS-OS. Отвечай по-русски."},
-            {"role": "user", "content": user_text},
-        ],
-        "stream": True,
-        "temperature": 0.3,
-        "max_tokens": 2048,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=None) as cli:
-            async with cli.stream("POST", f"{QWEN_URL}/chat/completions", json=body) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        delta = chunk["choices"][0]["delta"].get("content", "")
-                        if delta:
-                            await manager.broadcast("chat", {"type": "token", "content": delta})
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        continue
-        await manager.broadcast("chat", {"type": "done"})
-    except Exception as exc:  # noqa: BLE001
-        await manager.broadcast("chat", {"type": "error", "error": str(exc)})
+async def _run_agent_turn(user_text: str, msg_id: str, session: str) -> None:
+    """Прогнать ход агента и транслировать поток событий в канал chat."""
+    from orchestrator.agent import run_chat  # ленивый импорт (синглтоны агента)
+
+    async with _chat_lock(session):
+        try:
+            async for ev in run_chat(session, user_text, bridge=bridge):
+                await manager.broadcast("chat", {"id": msg_id, **ev})
+        except Exception as exc:  # noqa: BLE001
+            await manager.broadcast("chat", {"id": msg_id, "type": "error",
+                                             "error": str(exc)})
+
+
+# --------------------------------------------------------------------------- #
+# REST: управление памятью агента (для вкладки «Чат»)
+# --------------------------------------------------------------------------- #
+@app.get("/api/agent/memory")
+async def agent_memory(session: str = "default") -> JSONResponse:
+    from orchestrator import agent
+    return JSONResponse(agent.memory_overview(session))
+
+
+@app.post("/api/agent/memory")
+async def agent_memory_action(payload: dict[str, Any]) -> JSONResponse:
+    """Действия: reset | flush | clear_longterm | save."""
+    from orchestrator import agent
+    action = payload.get("action", "")
+    session = payload.get("session", "default")
+    if action == "reset":
+        agent.reset_context(session, keep_summary=bool(payload.get("keep_summary")))
+        return JSONResponse({"ok": True})
+    if action == "flush":
+        ok = await agent.flush_context(session)
+        return JSONResponse({"ok": ok})
+    if action == "clear_longterm":
+        n = agent.clear_longterm()
+        return JSONResponse({"ok": True, "cleared": n})
+    if action == "save":
+        text = payload.get("text", "").strip()
+        if not text:
+            return JSONResponse({"ok": False, "error": "Пустая заметка."}, status_code=400)
+        tags = payload.get("tags") or []
+        item = agent.save_memory(text, tags=tags)
+        return JSONResponse({"ok": True, "item": item})
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 
 
 # --------------------------------------------------------------------------- #

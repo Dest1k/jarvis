@@ -25,6 +25,8 @@ dashboard/node_modules/
 dashboard/.next/
 dashboard/out/
 dashboard/next-env.d.ts
+dashboard/tsconfig.tsbuildinfo
+dashboard/package-lock.json
 npm-debug.log*
 
 # Логи и временные файлы
