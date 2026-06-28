@@ -54,13 +54,13 @@ services:
     # ~10+ мин до ~1-2 мин, меньше VRAM, обход возможных проблем компиляции под
     # Blackwell (sm_120). Цена — инференс на ~10-15% медленнее.
     command: >
-      --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder}
+      --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder-14b}
       --served-model-name qwen-coder
       --quantization awq_marlin
       --dtype half
       --enforce-eager
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
-      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.88}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.33}
       --enable-prefix-caching
       --max-num-seqs 8
       --host 0.0.0.0
@@ -83,10 +83,8 @@ services:
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
-    # ОПЦИОНАЛЬНО (профиль "uitars"). UI-TARS-7B-DPO в FP16 ≈15 ГБ и НЕ помещается
-    # рядом с Qwen-32B-AWQ (18 ГБ) в 32 ГБ VRAM. Включается явно (JARVIS_ENABLE_UITARS=1
-    # / профиль uitars) и требует уменьшить Qwen либо квантизовать UI-TARS.
-    profiles: ["uitars"]
+    # Профиль «Qwen-14B + UI-TARS»: UI-TARS-7B FP16 ≈15 ГБ помещается рядом с
+    # Qwen-14B (~9 ГБ). Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует).
     # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
@@ -94,7 +92,7 @@ services:
       --dtype half
       --enforce-eager
       --max-model-len 8192
-      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.17}
+      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.50}
       --max-num-seqs 4
       --host 0.0.0.0
       --port 8002

@@ -121,13 +121,13 @@ class DeploymentProfile:
     gpu_total_vram_gb: float = 32.0
     gpu_host_reserve_gb: float = 3.0
 
-    # По умолчанию работает ОДИН крупный vLLM (Qwen-32B-AWQ ~18 ГБ весов).
-    # UI-TARS-7B в FP16 (~15 ГБ) не помещается рядом → по умолчанию ВЫКЛЮЧЕН
-    # (JARVIS_ENABLE_UITARS=1 включает, но тогда нужно ужать Qwen).
-    qwen_gpu_util: float = 0.88
+    # Профиль «Qwen-14B + UI-TARS»: оба агента влезают в 32 ГБ при выгруженной
+    # gemma. Qwen2.5-Coder-14B-AWQ ~9 ГБ + UI-TARS-7B FP16 ~15 ГБ + аудио ~2 ГБ.
+    # Доли — от ПОЛНОЙ памяти (32 ГБ), инстансы стартуют последовательно.
+    qwen_gpu_util: float = 0.33     # ~10.6 ГБ: веса 9 + KV ~1.6
     qwen_max_model_len: int = 16384
-    uitars_gpu_util: float = 0.17
-    uitars_enabled: bool = False
+    uitars_gpu_util: float = 0.50   # ~16 ГБ: веса 15 + KV ~1
+    uitars_enabled: bool = True
 
     notes: list[str] = field(default_factory=list)
 
@@ -1102,7 +1102,7 @@ VLLM_IMAGE = os.environ.get("JARVIS_VLLM_IMAGE", "vllm/vllm-openai:latest")
 
 # Соответствие: HF-репозиторий → локальный подкаталог в data/models, который
 # монтируется в контейнер vLLM как /models/<имя> (см. docker-compose).
-MODEL_LOCAL_DIRS = {"qwen": "qwen-coder", "uitars": "ui-tars"}
+MODEL_LOCAL_DIRS = {"qwen": "qwen-coder-14b", "uitars": "ui-tars"}
 
 
 def ensure_hf_token_file() -> None:
@@ -1157,8 +1157,8 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
     targets = []
     if qwen_model:
         targets.append((qwen_model, MODEL_LOCAL_DIRS["qwen"]))
-    # UI-TARS качаем только если он включён (иначе зря тянем/проверяем ~15 ГБ).
-    if uitars_model and os.environ.get("JARVIS_ENABLE_UITARS") == "1":
+    # UI-TARS качаем, если он не выключен явно (JARVIS_ENABLE_UITARS=0).
+    if uitars_model and os.environ.get("JARVIS_ENABLE_UITARS", "1") != "0":
         targets.append((uitars_model, MODEL_LOCAL_DIRS["uitars"]))
 
     log.info("→ Предзагрузка весов своим загрузчиком (resume + sha256 + индикация скорости)…")
@@ -1192,6 +1192,38 @@ def _compose_with_retries(action: list[str], retries: int = 4) -> int:
     return rc
 
 
+def unload_lmstudio_models(base_url: str) -> None:
+    """
+    Выгрузить модели LM Studio, чтобы освободить VRAM под vLLM. Сначала пробуем
+    официальный CLI `lms unload --all`, затем REST. Best-effort; при неудаче —
+    просьба выгрузить вручную (Eject в LM Studio).
+    """
+    log.info("→ Выгрузка моделей LM Studio (освобождаю VRAM под vLLM)…")
+    if shutil.which("lms"):
+        r = run(["lms", "unload", "--all"], check=False, timeout=60)
+        if r.returncode == 0:
+            log.info("  ✔ Модели LM Studio выгружены (lms unload --all).")
+            time.sleep(3)
+            return
+        log.warning("  'lms unload' не сработал: %s",
+                    ((r.stdout or "") + (r.stderr or "")).strip()[:160])
+    else:
+        log.info("  CLI 'lms' не найден.")
+    # REST-фолбэк (эндпоинты выгрузки различаются по версиям LM Studio)
+    host = base_url.split("/v1")[0].rstrip("/")
+    for path in ("/api/v1/models/unload", "/api/v0/models/unload"):
+        try:
+            resp = requests.post(host + path, timeout=8)
+            if resp.status_code < 500:
+                log.info("  Запрос выгрузки отправлен (%s, код %s).", path, resp.status_code)
+                time.sleep(2)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+    log.warning("  Не удалось выгрузить автоматически. ВЫГРУЗИТЕ модель в LM Studio "
+                "вручную (Eject) перед запуском vLLM, иначе не хватит VRAM.")
+
+
 def bring_up_stack() -> None:
     """Автоматически поднять весь контейнерный стек через Docker Desktop."""
     # BuildKit обязателен для кеш-маунтов pip (--mount=type=cache) в Dockerfile'ах,
@@ -1211,28 +1243,29 @@ def bring_up_stack() -> None:
     # висит на depends_on (ждёт healthcheck qwen, пока грузится 19 ГБ модели),
     # а при «unhealthy» — каскадно валит зависимые. --no-deps: запускаем по
     # одному, порядок (qwen→ui-tars) сохраняем сами.
+    # Перед стартом vLLM выгружаем модель-«мозг установки» из LM Studio, иначе
+    # она держит VRAM и Qwen/UI-TARS не влезут (выбор пользователя).
+    unload_lmstudio_models(os.environ.get("JARVIS_LMSTUDIO_URL", "http://localhost:1234/v1"))
+
     log.info("→ Поэтапный запуск стека (с видимым ожиданием готовности)…")
     _compose_with_retries(["up", "-d", "--remove-orphans", "--no-deps", "sandbox"], retries=2)
 
     stages = [
         ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # веса ~18 ГБ
     ]
-    # UI-TARS-7B FP16 (~15 ГБ) не помещается рядом с Qwen-32B — только по флагу.
-    if os.environ.get("JARVIS_ENABLE_UITARS") == "1":
+    # UI-TARS включён по умолчанию (профиль Qwen-14B + UI-TARS). Отключение —
+    # JARVIS_ENABLE_UITARS=0.
+    if os.environ.get("JARVIS_ENABLE_UITARS", "1") != "0":
         stages.append(("vllm-ui-tars", HEALTH_ENDPOINTS["vllm-ui-tars"], 90))
     else:
-        log.info("UI-TARS отключён (не помещается рядом с Qwen-32B в 32 ГБ). "
-                 "Включение: JARVIS_ENABLE_UITARS=1 (с уменьшением Qwen).")
+        log.info("UI-TARS отключён (JARVIS_ENABLE_UITARS=0).")
     stages += [
         ("audio-layer", HEALTH_ENDPOINTS["audio-layer"], 60),
         ("backend",     HEALTH_ENDPOINTS["backend"],     45),
     ]
     for name, url, retries in stages:
         log.info("→ Запуск %s…", name)
-        up_args = ["up", "-d", "--no-deps", name]
-        if name == "vllm-ui-tars":          # сервис за профилем "uitars"
-            up_args = ["--profile", "uitars"] + up_args
-        _compose_with_retries(up_args, retries=2)
+        _compose_with_retries(["up", "-d", "--no-deps", name], retries=2)
         if not _wait_health(name, url, retries):
             log.warning("  ✗ %s не вышел в готовность. Причина — в логах ниже.", name)
             _dump_logs(name)
@@ -1283,7 +1316,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--distro", default="", help="Имя дистрибутива WSL (по умолчанию — авто).")
     p.add_argument("--wsl-ram", type=int, default=96)
     p.add_argument("--wsl-cpus", type=int, default=20)
-    p.add_argument("--qwen-model", default="Qwen/Qwen2.5-Coder-32B-Instruct-AWQ")
+    p.add_argument("--qwen-model", default="Qwen/Qwen2.5-Coder-14B-Instruct-AWQ")
     p.add_argument("--uitars-model", default="bytedance-research/UI-TARS-7B-DPO")
     p.add_argument("--target-root", default=r"D:\jarvis",
                    help="Корневой путь переноса проекта и тяжёлых данных.")
@@ -1366,6 +1399,9 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log.warning("Перенос диска Docker Desktop пропущен (%s).", exc)
 
+    # URL LM Studio — для выгрузки модели-«мозга» перед стартом vLLM
+    os.environ["JARVIS_LMSTUDIO_URL"] = args.lmstudio
+
     # --- Токен HuggingFace (создаём файл и прокидываем в окружение) ---
     ensure_hf_token_file()
     _hf_token = load_hf_token()
@@ -1397,7 +1433,7 @@ def main() -> int:
                         "пропускаю запрос к LM Studio.")
         log.info("Профиль развёртывания: детерминированный дефолт (без обращения к LLM).")
         profile = base_profile
-    profile.uitars_enabled = os.environ.get("JARVIS_ENABLE_UITARS") == "1"
+    profile.uitars_enabled = os.environ.get("JARVIS_ENABLE_UITARS", "1") != "0"
     profile.validate_vram()
     log.info("Итоговый профиль:\n%s", json.dumps(asdict(profile), ensure_ascii=False, indent=2))
 
