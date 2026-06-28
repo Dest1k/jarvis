@@ -1117,11 +1117,13 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
         for attempt in range(1, retries + 1):
             log.info("  Модель %s — попытка %d/%d (через huggingface_hub образа vLLM)…",
                      model, attempt, retries)
+            # В образе vLLM бинарь — python3 (не python). Берём sh с фолбэком,
+            # чтобы не зависеть от точного имени интерпретатора на PATH.
             pycode = (
-                "import sys; from huggingface_hub import snapshot_download; "
-                f"snapshot_download('{model}'); "
-                f"print('PREFETCH_DONE {model}')"
+                "from huggingface_hub import snapshot_download; "
+                f"snapshot_download('{model}'); print('PREFETCH_DONE')"
             )
+            inner = f'python3 -c "{pycode}" || python -c "{pycode}"'
             rc, _ = run_streamed([
                 "docker", "run", "--rm",
                 "-e", "HF_HUB_ENABLE_HF_TRANSFER=0",
@@ -1129,7 +1131,7 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
                 "-e", f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
                 "-e", f"HUGGING_FACE_HUB_TOKEN={os.environ.get('HF_TOKEN', '')}",
                 "-v", f"{hf_cache}:/root/.cache/huggingface",
-                "--entrypoint", "python", VLLM_IMAGE, "-c", pycode,
+                "--entrypoint", "sh", VLLM_IMAGE, "-c", inner,
             ], timeout=36000)
             if rc == 0:
                 done = True
