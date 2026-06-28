@@ -1,0 +1,16 @@
+# Нормализация переводов строк.
+#
+# Шелл-скрипты и Dockerfile ОБЯЗАТЕЛЬНО с LF: при checkout на Windows
+# (core.autocrlf=true) они иначе получают CRLF, и Linux/Docker не может их
+# выполнить — '#!/usr/bin/env bash\r' даёт "env: 'bash\r': No such file or
+# directory", контейнер падает в Restarting (127).
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile  text eol=lf
+Dockerfile.* text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Windows-скрипты остаются с CRLF.
+*.bat       text eol=crlf
+*.ps1       text eol=crlf

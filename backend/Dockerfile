@@ -29,7 +29,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY server.py ./
 COPY orchestrator ./orchestrator
 COPY entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+# Страховка от CRLF: если entrypoint.sh пришёл с Windows-переводами строк
+# (git core.autocrlf=true), shebang '…/env bash\r' не выполнится на Linux и
+# контейнер уйдёт в Restarting (127). Срезаем \r при сборке — образ всегда LF.
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 ENV JARVIS_XDISPLAY=:99
 EXPOSE 8000
