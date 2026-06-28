@@ -1192,6 +1192,35 @@ def _compose_with_retries(action: list[str], retries: int = 4) -> int:
     return rc
 
 
+MODELS_VOLUME = "jarvis-models"
+
+
+def sync_models_to_volume(data_dir: Path) -> None:
+    """
+    Скопировать веса из host-папки (data/models, 9P bind) в EXT4 Docker-том
+    jarvis-models. vLLM грузит safetensors через mmap, а mmap по 9P крашит
+    загрузку — поэтому модели должны лежать на настоящей ФС (ext4-том).
+    Копирование делает обычный cp (последовательное чтение по 9P работает).
+    Идемпотентно (cp -u): повторный запуск копирует только новое.
+    """
+    src = _docker_path(data_dir / "models")
+    log.info("→ Синхронизация весов в ext4-том '%s' (устраняет крах vLLM на 9P). "
+             "Первый раз может занять несколько минут…", MODELS_VOLUME)
+    inner = ('set -e; for d in /src/*/; do n=$(basename "$d"); '
+             'echo "  копирую $n…"; cp -ru "$d" /dest/; done; echo SYNC_DONE')
+    rc, out = run_streamed([
+        "docker", "run", "--rm",
+        "-v", f"{MODELS_VOLUME}:/dest",
+        "-v", f"{src}:/src:ro",
+        "alpine", "sh", "-c", inner,
+    ], timeout=7200)
+    if rc == 0 and "SYNC_DONE" in out:
+        log.info("  ✔ Веса в ext4-томе — vLLM будет грузить их быстро и без 9P.")
+    else:
+        log.warning("  ⚠ Синхронизация весов в том завершилась с кодом %s. "
+                    "vLLM может упасть при загрузке с 9P.", rc)
+
+
 def unload_lmstudio_models(base_url: str) -> None:
     """
     Выгрузить модели LM Studio, чтобы освободить VRAM под vLLM. Сначала пробуем
@@ -1483,6 +1512,9 @@ def main() -> int:
     if not args.skip_prefetch:
         prefetch_models(data_dir, args.qwen_model, args.uitars_model,
                         verify=args.verify_models)
+
+    # --- Синхронизация весов в ext4-том (иначе vLLM крашится на mmap по 9P) ---
+    sync_models_to_volume(data_dir)
 
     # --- Авто-подъём стека через Docker Desktop ---
     bring_up_stack()

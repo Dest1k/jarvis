@@ -26,10 +26,12 @@ x-vllm-base: &vllm-base
   image: vllm/vllm-openai:latest
   restart: unless-stopped
   ipc: host                      # vLLM требует большой /dev/shm
-  # Тяжёлые данные (веса моделей, кэш HF) хранятся на целевом диске через
-  # bind-mount: JARVIS_DATA_DIR задаётся bootstrap'ом в wsl/.env (напр. D:/jarvis/data).
+  # Веса моделей — в EXT4 Docker-томе (jarvis-models), а НЕ в Windows bind-mount:
+  # bind-mount монтируется как 9P, и mmap safetensors по 9P крашит vLLM при
+  # загрузке. Том наполняет bootstrap (копирует из data/models). Том физически
+  # на D: (диск Docker перенесён на D:\jarvis\docker). Кэш HF остаётся bind'ом.
   volumes:
-    - ${JARVIS_DATA_DIR:-../data}/models:/models
+    - jarvis-models:/models
     - ${JARVIS_DATA_DIR:-../data}/hf:/root/.cache/huggingface
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -216,5 +218,11 @@ networks:
     driver: bridge
     internal: true            # sandbox изолирован от внешней сети
 
-# Тяжёлые данные хранятся bind-mount'ом на целевом диске (JARVIS_DATA_DIR),
-# а не в Docker-managed томах — чтобы веса моделей (~25+ ГБ) лежали на D:.
+volumes:
+  # EXT4-том для весов vLLM (быстрый mmap, без 9P). Имя фиксировано (без префикса
+  # проекта), чтобы bootstrap мог наполнить его тем же именем. Физически — на
+  # диске Docker (перенесён на D:\jarvis\docker).
+  jarvis-models:
+    name: jarvis-models
+
+# Кэш HF и sandbox остаются bind-mount'ом на D: (JARVIS_DATA_DIR) — им 9P не мешает.
