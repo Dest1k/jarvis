@@ -50,11 +50,15 @@ services:
     container_name: jarvis-vllm-qwen
     # Модель берётся из ЛОКАЛЬНОГО пути /models/qwen-coder (его наполняет
     # hf_downloader на хосте). Контейнер ничего не качает на старте.
+    # --enforce-eager: пропустить torch.compile/CUDA-graph capture → старт с
+    # ~10+ мин до ~1-2 мин, меньше VRAM, обход возможных проблем компиляции под
+    # Blackwell (sm_120). Цена — инференс на ~10-15% медленнее.
     command: >
       --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder}
       --served-model-name qwen-coder
       --quantization awq_marlin
       --dtype half
+      --enforce-eager
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-32768}
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.60}
       --enable-prefix-caching
@@ -84,6 +88,7 @@ services:
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
       --dtype half
+      --enforce-eager
       --max-model-len 8192
       --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.17}
       --max-num-seqs 4
