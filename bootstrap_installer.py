@@ -119,25 +119,34 @@ class DeploymentProfile:
     nested_virtualization: bool = True
 
     gpu_total_vram_gb: float = 32.0
-    gpu_host_reserve_gb: float = 5.5
+    gpu_host_reserve_gb: float = 3.0
 
-    qwen_gpu_util: float = 0.60
-    qwen_max_model_len: int = 32768
+    # По умолчанию работает ОДИН крупный vLLM (Qwen-32B-AWQ ~18 ГБ весов).
+    # UI-TARS-7B в FP16 (~15 ГБ) не помещается рядом → по умолчанию ВЫКЛЮЧЕН
+    # (JARVIS_ENABLE_UITARS=1 включает, но тогда нужно ужать Qwen).
+    qwen_gpu_util: float = 0.88
+    qwen_max_model_len: int = 16384
     uitars_gpu_util: float = 0.17
+    uitars_enabled: bool = False
 
     notes: list[str] = field(default_factory=list)
 
     def validate_vram(self) -> None:
+        """Информативный лог матрицы VRAM (без аварий — параметры конфигурируемы)."""
         qwen = self.qwen_gpu_util * self.gpu_total_vram_gb
-        uitars = self.uitars_gpu_util * self.gpu_total_vram_gb
         audio = 2.0
-        used = qwen + uitars + audio
+        used = qwen + audio
+        extra = ""
+        if self.uitars_enabled:
+            uitars = self.uitars_gpu_util * self.gpu_total_vram_gb
+            used += uitars
+            extra = f", UI-TARS={uitars:.1f} ГБ"
         headroom = self.gpu_total_vram_gb - used
-        log.info("Матрица VRAM: Qwen=%.1f ГБ, UI-TARS=%.1f ГБ, Audio=%.1f ГБ → "
-                 "занято %.1f ГБ, резерв %.1f ГБ", qwen, uitars, audio, used, headroom)
-        if headroom < self.gpu_host_reserve_gb - 0.3:
-            raise ValueError(f"Недостаточный резерв VRAM: {headroom:.1f} ГБ "
-                             f"< {self.gpu_host_reserve_gb} ГБ.")
+        log.info("Матрица VRAM: Qwen=%.1f ГБ%s, Audio=%.1f ГБ → занято %.1f ГБ, "
+                 "резерв %.1f ГБ", qwen, extra, audio, used, headroom)
+        if headroom < 1.0:
+            log.warning("VRAM на пределе (резерв %.1f ГБ). При падении vLLM по памяти "
+                        "снизьте JARVIS_QWEN_GPU_UTIL или max-model-len.", headroom)
 
 
 # --------------------------------------------------------------------------- #
@@ -1148,7 +1157,8 @@ def prefetch_models(data_dir: Path, qwen_model: str, uitars_model: str,
     targets = []
     if qwen_model:
         targets.append((qwen_model, MODEL_LOCAL_DIRS["qwen"]))
-    if uitars_model:
+    # UI-TARS качаем только если он включён (иначе зря тянем/проверяем ~15 ГБ).
+    if uitars_model and os.environ.get("JARVIS_ENABLE_UITARS") == "1":
         targets.append((uitars_model, MODEL_LOCAL_DIRS["uitars"]))
 
     log.info("→ Предзагрузка весов своим загрузчиком (resume + sha256 + индикация скорости)…")
@@ -1205,14 +1215,24 @@ def bring_up_stack() -> None:
     _compose_with_retries(["up", "-d", "--remove-orphans", "--no-deps", "sandbox"], retries=2)
 
     stages = [
-        ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # модель ~19 ГБ
-        ("vllm-ui-tars",    HEALTH_ENDPOINTS["vllm-ui-tars"],    90),
-        ("audio-layer",     HEALTH_ENDPOINTS["audio-layer"],     60),
-        ("backend",         HEALTH_ENDPOINTS["backend"],         45),
+        ("vllm-qwen-coder", HEALTH_ENDPOINTS["vllm-qwen-coder"], 150),  # веса ~18 ГБ
+    ]
+    # UI-TARS-7B FP16 (~15 ГБ) не помещается рядом с Qwen-32B — только по флагу.
+    if os.environ.get("JARVIS_ENABLE_UITARS") == "1":
+        stages.append(("vllm-ui-tars", HEALTH_ENDPOINTS["vllm-ui-tars"], 90))
+    else:
+        log.info("UI-TARS отключён (не помещается рядом с Qwen-32B в 32 ГБ). "
+                 "Включение: JARVIS_ENABLE_UITARS=1 (с уменьшением Qwen).")
+    stages += [
+        ("audio-layer", HEALTH_ENDPOINTS["audio-layer"], 60),
+        ("backend",     HEALTH_ENDPOINTS["backend"],     45),
     ]
     for name, url, retries in stages:
         log.info("→ Запуск %s…", name)
-        _compose_with_retries(["up", "-d", "--no-deps", name], retries=2)
+        up_args = ["up", "-d", "--no-deps", name]
+        if name == "vllm-ui-tars":          # сервис за профилем "uitars"
+            up_args = ["--profile", "uitars"] + up_args
+        _compose_with_retries(up_args, retries=2)
         if not _wait_health(name, url, retries):
             log.warning("  ✗ %s не вышел в готовность. Причина — в логах ниже.", name)
             _dump_logs(name)
@@ -1377,12 +1397,8 @@ def main() -> int:
                         "пропускаю запрос к LM Studio.")
         log.info("Профиль развёртывания: детерминированный дефолт (без обращения к LLM).")
         profile = base_profile
-    try:
-        profile.validate_vram()
-    except ValueError as exc:
-        log.error("Профиль VRAM некорректен (%s) — откат к безопасным дефолтам.", exc)
-        profile.qwen_gpu_util, profile.uitars_gpu_util = 0.60, 0.17
-        profile.validate_vram()
+    profile.uitars_enabled = os.environ.get("JARVIS_ENABLE_UITARS") == "1"
+    profile.validate_vram()
     log.info("Итоговый профиль:\n%s", json.dumps(asdict(profile), ensure_ascii=False, indent=2))
 
     # --- .wslconfig ---

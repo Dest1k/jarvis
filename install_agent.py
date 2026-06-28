@@ -268,10 +268,10 @@ class HostTools:
         """Проверить ВСЕ сервисы целевой архитектуры (критерий готовности)."""
         import socket
         results: dict[str, str] = {}
+        # ОБЯЗАТЕЛЬНЫЕ сервисы (по ним считается «готово полностью»):
         http_eps = {
             "backend(8000)": "http://127.0.0.1:8000/health",
             "vllm_qwen(8001)": "http://127.0.0.1:8001/health",
-            "vllm_uitars(8002)": "http://127.0.0.1:8002/health",
             "audio(8003)": "http://127.0.0.1:8003/health",
             "dashboard(3000)": "http://127.0.0.1:3000",
         }
@@ -288,6 +288,13 @@ class HostTools:
         except Exception:  # noqa: BLE001
             results["rpc_bridge(8765)"] = "НЕТ (8765 не слушает)"
         all_ok = all(v.startswith("OK") for v in results.values())
+        # UI-TARS (8002) — ОПЦИОНАЛЬНЫЙ (не помещается рядом с Qwen-32B), не влияет
+        # на критерий готовности; просто показываем статус.
+        try:
+            requests.get("http://127.0.0.1:8002/health", timeout=3)
+            results["vllm_uitars(8002,опц.)"] = "OK"
+        except Exception:  # noqa: BLE001
+            results["vllm_uitars(8002,опц.)"] = "выключен/нет"
         results["_ГОТОВО_ПОЛНОСТЬЮ"] = "ДА" if all_ok else "НЕТ"
         return {"returncode": 0, "output": json.dumps(results, ensure_ascii=False, indent=2)}
 

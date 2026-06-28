@@ -59,10 +59,10 @@ services:
       --quantization awq_marlin
       --dtype half
       --enforce-eager
-      --max-model-len ${JARVIS_QWEN_MAX_LEN:-32768}
-      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.60}
+      --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.88}
       --enable-prefix-caching
-      --max-num-seqs 16
+      --max-num-seqs 8
       --host 0.0.0.0
       --port 8001
     ports:
@@ -83,6 +83,10 @@ services:
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
+    # ОПЦИОНАЛЬНО (профиль "uitars"). UI-TARS-7B-DPO в FP16 ≈15 ГБ и НЕ помещается
+    # рядом с Qwen-32B-AWQ (18 ГБ) в 32 ГБ VRAM. Включается явно (JARVIS_ENABLE_UITARS=1
+    # / профиль uitars) и требует уменьшить Qwen либо квантизовать UI-TARS.
+    profiles: ["uitars"]
     # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
