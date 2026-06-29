@@ -43,8 +43,6 @@ from urllib.parse import quote
 
 import httpx
 
-from . import llm
-
 log = logging.getLogger("jarvis.tools")
 
 SANDBOX_CONTAINER = os.environ.get("JARVIS_SANDBOX_CONTAINER", "jarvis-sandbox")
@@ -69,6 +67,8 @@ class ToolContext:
     bridge: Any = None                 # HostBridgeClient (RPC-мост)
     longterm: Any = None               # LongTermMemory
     session_id: str = "default"
+    emit: Any = None                   # async (dict)->None: стрим событий шага в чат
+                                       # (нужно итеративным инструментам — gui/TARS)
 
 
 @dataclass
@@ -275,143 +275,31 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
     return {"ok": True, "content": done}
 
 
-# --- 3. Визуальное управление GUI через UI-TARS --------------------------- #
+# --- 3. Визуальное управление GUI через UI-TARS («TARS») ------------------- #
 async def tool_gui(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """
-    Один шаг визуального управления Windows: снять скриншот хоста, передать его
-    UI-TARS вместе с целью, получить ОДНО действие и выполнить его через мост.
+    Полноценная визуальная подзадача: отдать ЦЕЛЬ GUI-суб-агенту (UI-TARS), который
+    в цикле «скриншот → действие → скриншот» доводит её до конца сам.
 
-    Это лучшее-усилие: точное GUI-управление сильно зависит от модели/железа,
-    поэтому действия атомарные, а оркестратор вызывает gui повторно по шагам.
+    Один вызов = вся визуальная подзадача (открыть меню и нажать пункт, пройти
+    мастер установки, переключить настройку…). Внутри UI-TARS видит свою историю
+    ходов и каждый шаг стримится в чат (видно, как «зрение» системы тыкает мышью).
+    Использовать, когда нет CLI-способа или CLI не сработал — только графика.
     """
     if ctx.bridge is None:
         return {"ok": False, "content": "RPC-мост недоступен — GUI-управление невозможно."}
-    goal = args.get("goal", "")
+    goal = str(args.get("goal") or args.get("task") or "").strip()
     if not goal:
         return {"ok": False, "content": "Не задана цель 'goal'."}
 
-    shot = await ctx.bridge.call("screenshot", {"return_b64": True})
-    result = (shot.get("result", {}) or {})
-    img_b64 = result.get("image_b64")
-    if not shot.get("ok") or not img_b64:
-        return {"ok": False,
-                "content": "Не удалось получить скриншот хоста "
-                           f"({shot.get('error', 'нет image_b64')})."}
-    screen_w = int(result.get("screen_w", 1920))
-    screen_h = int(result.get("screen_h", 1080))
-
-    system = (
-        "You are UI-TARS, a GUI agent controlling a Windows computer via screenshots.\n"
-        "Given a screenshot and a task, output your NEXT SINGLE action.\n\n"
-        "## Action Space (coordinates are NORMALIZED 0-1000)\n"
-        "click(start_box='(x,y)')\n"
-        "left_double(start_box='(x,y)')\n"
-        "right_single(start_box='(x,y)')\n"
-        "hotkey(key='ctrl s')        # space-separated keys\n"
-        "type(content='text to type')\n"
-        "scroll(start_box='(x,y)', direction='down')   # or up\n"
-        "wait()\n"
-        "finished(content='done')    # when the task is complete\n\n"
-        "Output EXACTLY two lines:\n"
-        "Thought: <very brief reasoning>\n"
-        "Action: <one action from the space above>"
-    )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": [
-            {"type": "text", "text": f"## Task\n{goal}"},
-            {"type": "image_url",
-             "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-        ]},
-    ]
+    from .gui_agent import GuiAgent
     try:
-        raw = await llm.chat(messages, base_url=llm.UITARS_URL, model=llm.UITARS_MODEL,
-                             temperature=0.0, max_tokens=256, timeout=90)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "content": f"UI-TARS недоступен: {exc}"}
-
-    act = _parse_uitars_action(raw)
-    if not act:
-        return {"ok": False, "content": f"UI-TARS вернул неразборчивый ответ: {raw[:300]}"}
-    kind = act["kind"]
-
-    if kind in ("finished", "done", "complete"):
-        return {"ok": True, "content": f"UI-TARS: цель достигнута. {act.get('content', '')}"}
-    if kind == "wait":
-        return {"ok": True, "content": "UI-TARS: ожидание (экран ещё меняется)."}
-    if kind in ("fail", "impossible"):
-        return {"ok": False, "content": f"UI-TARS: не удалось — {act.get('content', '')}"}
-
-    # координаты: нормированные 0-1000 → пиксели (или уже пиксели, если > 1000)
-    def _px(v: int, dim: int) -> int:
-        return int(v) if int(v) > 1000 else int(int(v) / 1000.0 * dim)
-
-    if kind in ("click", "left_single", "left_double", "right_single",
-                "double_click", "right_click"):
-        button = "right" if "right" in kind else "left"
-        double = "double" in kind
-        res = await ctx.bridge.call("mouse_click", {
-            "x": _px(act.get("x", 0), screen_w), "y": _px(act.get("y", 0), screen_h),
-            "button": button, "double": double})
-    elif kind == "type":
-        res = await ctx.bridge.call("type_text", {"text": act.get("content", "")})
-    elif kind == "hotkey":
-        res = await ctx.bridge.call("key_press",
-                                    {"keys": str(act.get("key", "")).replace(" ", "+")})
-    elif kind == "scroll":
-        amount = -3 if act.get("direction", "down") == "down" else 3
-        if "x" in act:  # навести курсор перед прокруткой
-            await ctx.bridge.call("mouse_move",
-                                  {"x": _px(act["x"], screen_w), "y": _px(act["y"], screen_h)})
-        res = await ctx.bridge.call("scroll", {"amount": amount})
-    elif kind in ("drag",):
-        # упрощённо: клик в стартовой точке (полноценный drag не реализуем здесь)
-        res = await ctx.bridge.call("mouse_click",
-                                    {"x": _px(act.get("x", 0), screen_w),
-                                     "y": _px(act.get("y", 0), screen_h)})
-    else:
-        return {"ok": False, "content": f"Неизвестное GUI-действие UI-TARS: {kind}"}
-
-    ok = bool(res.get("ok"))
-    return {"ok": ok,
-            "content": f"GUI-действие '{kind}' выполнено."
-                       if ok else f"GUI-действие '{kind}' не выполнено: {res.get('error')}"}
-
-
-def _parse_uitars_action(text: str) -> Optional[dict[str, Any]]:
-    """Разобрать действие UI-TARS из строки 'Action: click(start_box='(x,y)')'."""
-    if not text:
-        return None
-    m = re.search(r"Action\s*:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
-    seg = (m.group(1) if m else text).strip()
-    call = re.search(r"([A-Za-z_]+)\s*\((.*)\)", seg, re.DOTALL)
-    low = seg.lower()
-    if not call:
-        if any(w in low for w in ("finish", "done", "complete")):
-            return {"kind": "finished", "content": seg[:160]}
-        if "wait" in low:
-            return {"kind": "wait"}
-        if any(w in low for w in ("fail", "impossible", "cannot")):
-            return {"kind": "fail", "content": seg[:160]}
-        return None
-    out: dict[str, Any] = {"kind": call.group(1).lower()}
-    arg = call.group(2)
-    sb = re.search(r"start_box\s*=\s*['\"]?\(?\s*(\d+)\s*,\s*(\d+)", arg)
-    if sb:
-        out["x"], out["y"] = int(sb.group(1)), int(sb.group(2))
-    eb = re.search(r"end_box\s*=\s*['\"]?\(?\s*(\d+)\s*,\s*(\d+)", arg)
-    if eb:
-        out["x2"], out["y2"] = int(eb.group(1)), int(eb.group(2))
-    cont = re.search(r"content\s*=\s*'([^']*)'|content\s*=\s*\"([^\"]*)\"", arg)
-    if cont:
-        out["content"] = cont.group(1) if cont.group(1) is not None else cont.group(2)
-    key = re.search(r"key\s*=\s*'([^']*)'|key\s*=\s*\"([^\"]*)\"", arg)
-    if key:
-        out["key"] = key.group(1) if key.group(1) is not None else key.group(2)
-    direction = re.search(r"direction\s*=\s*['\"]?(\w+)", arg)
-    if direction:
-        out["direction"] = direction.group(1).lower()
-    return out
+        max_steps = int(args.get("max_steps") or 0) or None
+    except (TypeError, ValueError):
+        max_steps = None
+    agent = GuiAgent(ctx.bridge, max_steps=max_steps or 14)
+    result = await agent.run(goal, emit=ctx.emit)
+    return {"ok": bool(result.get("ok")), "content": _truncate(result.get("content", ""))}
 
 
 # --- 4. Веб: скачать и извлечь текст --------------------------------------- #
@@ -929,12 +817,13 @@ class ToolRegistry:
         ))
         self.add(Tool(
             "windows",
-            "Полноценное взаимодействие с ХОСТ-машиной Windows через защищённый мост: "
+            "Полноценное взаимодействие с ХОСТ-машиной через защищённый мост "
+            "(работает и на Windows, и на Linux — мост сам выбирает бэкенд): "
             "запуск программ, ВВОД ТЕКСТА в активное окно (paste_text — надёжно, через "
             "буфер обмена), управляющие клавиши (send_keys), создание/чтение файлов, "
-            "команды cmd/PowerShell, скриншот, медиа, процессы/питание. "
-            "Чтобы 'написать текст/код в программе' — open_app, затем paste_text. "
-            "Деструктивное — с подтверждением оператора.",
+            "команды оболочки (exec=cmd/bash, powershell=pwsh), скриншот, медиа, "
+            "процессы/питание. Чтобы 'написать текст/код в программе' — open_app, затем "
+            "paste_text. Деструктивное — с подтверждением оператора.",
             {"action": "open_app|paste_text|send_keys|write_file|read_file|exec|powershell|"
                        "set_clipboard|type_text|key_press|screenshot|media_hook|"
                        "kill_process|system_power",
@@ -964,10 +853,14 @@ class ToolRegistry:
         ))
         self.add(Tool(
             "gui",
-            "Визуально управлять Windows через UI-TARS: один шаг (скриншот → "
-            "клик/ввод/прокрутка). Использовать, когда нет CLI-способа, только "
-            "графический. Вызывать повторно по шагам до достижения цели.",
-            {"goal": "что нужно сделать на экране (одним коротким шагом или целью)"},
+            "ВИЗУАЛЬНО выполнить задачу на экране через GUI-суб-агента UI-TARS "
+            "(зрение + мышь + клавиатура). ОДИН вызов доводит подзадачу до конца "
+            "сам: внутри цикл «скриншот→клик/ввод/прокрутка→скриншот». Используй, "
+            "когда нет CLI-способа ИЛИ команда/скрипт не сработали — нужно нажать "
+            "кнопку, пройти мастер установки, переключить настройку в окне. "
+            "Формулируй ЦЕЛЬ человеческим языком, не отдельные клики.",
+            {"goal": "цель на экране целиком, напр. «открой Параметры и включи тёмную тему»",
+             "max_steps": "(опц.) потолок атомарных действий, по умолч. 14"},
             tool_gui,
         ))
         self.add(Tool(

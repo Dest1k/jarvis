@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-windows_rpc_bridge.py — защищённый асинхронный RPC-демон на Windows-хосте.
+windows_rpc_bridge.py — защищённый асинхронный RPC-демон хоста (Windows И Linux).
 
 Зачем нужен:
-    Центральный оркестратор (LangGraph) работает внутри Linux/WSL2 и не может
-    напрямую управлять хостом Windows. Этот демон предоставляет ему безопасный
-    канал управления хостом (операции ОС, медиа-хуки, запуск приложений)
-    через локальные защищённые WebSockets с токен-хендшейком.
+    Центральный оркестратор (JARVIS) работает внутри контейнера/WSL2 и не может
+    напрямую управлять хостом. Этот демон даёт ему безопасный канал управления
+    хостом (команды ОС, экран/мышь/клавиатура для UI-TARS, медиа, запуск
+    приложений, буфер обмена, питание) через локальные защищённые WebSockets с
+    токен-хендшейком.
+
+    КРОСС-ПЛАТФОРМЕННОСТЬ: бэкенд выбирается автоматически по ОС хоста —
+    WindowsHostExecutor (PowerShell + user32) или LinuxHostExecutor (X11:
+    xdotool/scrot/xclip; Wayland: ydotool/grim/wl-clipboard). Контракт RPC один
+    и тот же, поэтому оркестратор и GUI-суб-агент работают одинаково на обеих
+    системах. Имя файла историческое — демон давно не только для Windows.
 
 Ключевые свойства безопасности:
     • Слушает ИСКЛЮЧИТЕЛЬНО 127.0.0.1 (никаких внешних подключений).
@@ -39,6 +46,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -272,10 +280,18 @@ def _to_sendkeys(keys: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Исполнители нативных хуков ОС Windows
+# Исполнители нативных хуков ОС — кросс-платформенно (Windows + Linux)
+#
+# Базовый класс держит ОС-независимые операции (файлы, временные файлы, листинг
+# каталога, общий запуск процесса). Платформенные подклассы реализуют экран,
+# мышь/клавиатуру, буфер обмена, запуск приложений, медиа и питание.
+# Фабрика make_host_executor() подбирает реализацию под текущую ОС, так что
+# оркестратор и GUI-суб-агент (UI-TARS) работают одинаково на обеих системах.
 # --------------------------------------------------------------------------- #
 class HostExecutor:
-    """Набор нативных операций на хосте Windows."""
+    """Общие, ОС-независимые операции хоста (файлы/процессы/каталоги)."""
+
+    platform = "generic"
 
     @staticmethod
     async def _run(cmd: list[str] | str, shell: bool = False,
@@ -305,14 +321,9 @@ class HostExecutor:
 
         return await loop.run_in_executor(None, _blocking)
 
-    async def exec_command(self, command: str) -> dict[str, Any]:
-        """Выполнить произвольную команду cmd.exe."""
-        log.info("Выполняю команду хоста: %s", command)
-        return await self._run(command, shell=True)
-
     @staticmethod
     def _expand_path(path: str) -> str:
-        """Развернуть %ENV% и ~ в пути (агент часто шлёт %USERPROFILE%\\...)."""
+        """Развернуть %ENV%/$ENV и ~ в пути (агент часто шлёт %USERPROFILE%/~)."""
         return os.path.expanduser(os.path.expandvars(path))
 
     async def read_file(self, path: str) -> dict[str, Any]:
@@ -348,14 +359,6 @@ class HostExecutor:
 
         return await loop.run_in_executor(None, _b)
 
-    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
-        """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики)."""
-        log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
-        return await self._run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            hidden=hidden,
-        )
-
     async def _write_temp(self, text: str) -> Path:
         """Записать текст во временный UTF-8 файл (для буфера обмена)."""
         tmp = JARVIS_HOME / "runtime" / f"clip_{int(time.time() * 1000)}.txt"
@@ -367,6 +370,121 @@ class HostExecutor:
 
         await loop.run_in_executor(None, _w)
         return tmp
+
+    async def list_dir(self, path: str, max_entries: int = 300,
+                       max_depth: int = 3) -> dict[str, Any]:
+        """Перечислить файлы в каталоге на хосте (рекурсивно, с ограничениями)."""
+        real = self._expand_path(path)
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            base = Path(real)
+            if not base.exists():
+                return {"returncode": 1, "stderr": f"Путь не найден: {real}"}
+            if base.is_file():
+                return {"returncode": 0,
+                        "stdout": f"{real} — файл ({base.stat().st_size} байт)"}
+            lines: list[str] = []
+            count = 0
+            for root, dirs, files in os.walk(real):
+                rel = os.path.relpath(root, real)
+                depth = 0 if rel == "." else rel.count(os.sep) + 1
+                if depth > max_depth:
+                    dirs[:] = []
+                    continue
+                dirs.sort()
+                for f in sorted(files):
+                    fp = os.path.join(root, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                    except OSError:
+                        sz = 0
+                    name = f if rel == "." else os.path.join(rel, f)
+                    lines.append(f"{name} ({sz} б)")
+                    count += 1
+                    if count >= max_entries:
+                        break
+                if count >= max_entries:
+                    lines.append("…(список усечён)")
+                    break
+            return {"returncode": 0,
+                    "stdout": f"Содержимое {real} ({count} файлов):\n" + "\n".join(lines)}
+
+        return await loop.run_in_executor(None, _b)
+
+    # --- ОС-специфичные операции: реализуются в подклассах ----------------- #
+    async def exec_command(self, command: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def open_app(self, command: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def media_hook(self, key: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def screenshot(self, out_path: Optional[str] = None,
+                         return_b64: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def mouse_move(self, x: int, y: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def mouse_click(self, x: Optional[int] = None, y: Optional[int] = None,
+                          button: str = "left", double: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def drag(self, x: int, y: int, x2: int, y2: int,
+                   button: str = "left") -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def scroll(self, amount: int = -3, direction: str = "down") -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def type_text(self, text: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def send_keys(self, keys: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def key_press(self, keys: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def paste_text(self, text: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def set_clipboard(self, text: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def get_clipboard(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def kill_process(self, name: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def system_power(self, mode: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class WindowsHostExecutor(HostExecutor):
+    """Нативные операции на хосте Windows (PowerShell + user32, без pyautogui)."""
+
+    platform = "windows"
+
+    async def exec_command(self, command: str) -> dict[str, Any]:
+        """Выполнить произвольную команду cmd.exe."""
+        log.info("Выполняю команду хоста: %s", command)
+        return await self._run(command, shell=True)
+
+    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+        """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики)."""
+        log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
+        return await self._run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            hidden=hidden,
+        )
 
     async def set_clipboard(self, text: str) -> dict[str, Any]:
         """Положить произвольный (юникод) текст в буфер обмена Windows."""
@@ -419,47 +537,6 @@ class HostExecutor:
     async def get_clipboard(self) -> dict[str, Any]:
         """Прочитать текущий текст из буфера обмена Windows."""
         return await self.powershell("Get-Clipboard -Raw", hidden=True)
-
-    async def list_dir(self, path: str, max_entries: int = 300,
-                       max_depth: int = 3) -> dict[str, Any]:
-        """Перечислить файлы в каталоге на хосте (рекурсивно, с ограничениями)."""
-        real = self._expand_path(path)
-        loop = asyncio.get_running_loop()
-
-        def _b() -> dict[str, Any]:
-            base = Path(real)
-            if not base.exists():
-                return {"returncode": 1, "stderr": f"Путь не найден: {real}"}
-            if base.is_file():
-                return {"returncode": 0,
-                        "stdout": f"{real} — файл ({base.stat().st_size} байт)"}
-            lines: list[str] = []
-            count = 0
-            for root, dirs, files in os.walk(real):
-                rel = os.path.relpath(root, real)
-                depth = 0 if rel == "." else rel.count(os.sep) + 1
-                if depth > max_depth:
-                    dirs[:] = []
-                    continue
-                dirs.sort()
-                for f in sorted(files):
-                    fp = os.path.join(root, f)
-                    try:
-                        sz = os.path.getsize(fp)
-                    except OSError:
-                        sz = 0
-                    name = f if rel == "." else os.path.join(rel, f)
-                    lines.append(f"{name} ({sz} б)")
-                    count += 1
-                    if count >= max_entries:
-                        break
-                if count >= max_entries:
-                    lines.append("…(список усечён)")
-                    break
-            return {"returncode": 0,
-                    "stdout": f"Содержимое {real} ({count} файлов):\n" + "\n".join(lines)}
-
-        return await loop.run_in_executor(None, _b)
 
     async def open_app(self, command: str) -> dict[str, Any]:
         """Запустить приложение/исполняемый файл на хосте."""
@@ -542,7 +619,18 @@ class HostExecutor:
         ps += one + (("Start-Sleep -Milliseconds 60;" + one) if double else "")
         return await self.powershell(ps, hidden=True)
 
-    async def scroll(self, amount: int = -3) -> dict[str, Any]:
+    async def drag(self, x: int, y: int, x2: int, y2: int,
+                   button: str = "left") -> dict[str, Any]:
+        """Перетаскивание: зажать в (x,y), переместить в (x2,y2), отпустить."""
+        down, up = (0x0008, 0x0010) if button == "right" else (0x0002, 0x0004)
+        ps = (self._MOUSE_SIG
+              + f"$t::SetCursorPos({int(x)},{int(y)});Start-Sleep -Milliseconds 80;"
+              + f"$t::mouse_event({down},0,0,0,0);Start-Sleep -Milliseconds 80;"
+              + f"$t::SetCursorPos({int(x2)},{int(y2)});Start-Sleep -Milliseconds 120;"
+              + f"$t::mouse_event({up},0,0,0,0);")
+        return await self.powershell(ps, hidden=True)
+
+    async def scroll(self, amount: int = -3, direction: str = "down") -> dict[str, Any]:
         delta = (int(amount) * 120) & 0xFFFFFFFF   # 120 на «щелчок»; минус = вниз
         ps = self._MOUSE_SIG + f"$t::mouse_event(0x0800,0,0,[uint32]{delta},0)"
         return await self.powershell(ps, hidden=True)
@@ -571,6 +659,288 @@ class HostExecutor:
         if not cmd:
             return {"returncode": 1, "stderr": f"Неизвестный режим питания: {mode}"}
         return await self._run(cmd, shell=True)
+
+
+# --------------------------------------------------------------------------- #
+# Linux-бэкенд: X11 (xdotool/scrot/xclip) и Wayland (ydotool/grim/wl-clipboard)
+# --------------------------------------------------------------------------- #
+def _which(*names: str) -> Optional[str]:
+    """Первый доступный исполняемый файл из перечисленных (или None)."""
+    for n in names:
+        if shutil.which(n):
+            return n
+    return None
+
+
+# 'ctrl+shift+s'/'enter' → клавиши xdotool ('ctrl+shift+s'/'Return').
+_XDO_KEYS = {
+    "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "shift": "shift",
+    "win": "super", "super": "super", "meta": "super", "cmd": "super",
+    "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
+    "tab": "Tab", "space": "space", "backspace": "BackSpace", "bksp": "BackSpace",
+    "delete": "Delete", "del": "Delete", "up": "Up", "down": "Down",
+    "left": "Left", "right": "Right", "home": "Home", "end": "End",
+    "pgup": "Prior", "pageup": "Prior", "pgdn": "Next", "pagedown": "Next",
+    "f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4", "f5": "F5", "f6": "F6",
+    "f7": "F7", "f8": "F8", "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
+}
+
+
+def _to_xdotool_key(keys: str) -> str:
+    """Нормализовать 'Ctrl+S'/'enter'/'alt tab' → 'ctrl+s'/'Return'/'alt+Tab'."""
+    parts = [p.strip().lower() for p in str(keys).replace("+", " ").split() if p.strip()]
+    out = []
+    for p in parts:
+        out.append(_XDO_KEYS.get(p, p if len(p) > 1 else p))
+    return "+".join(out)
+
+
+def _sendkeys_to_xdotool(keys: str) -> str:
+    """Грубо перевести .NET SendKeys ('^s','%{F4}','{ENTER}') → клавиши xdotool."""
+    s = str(keys)
+    s = s.replace("^", "ctrl+").replace("%", "alt+").replace("+", "shift+") \
+        if False else s  # placeholder, реальный разбор ниже
+    mods = ""
+    i = 0
+    combo: list[str] = []
+    while i < len(s):
+        ch = s[i]
+        if ch == "^":
+            mods += "ctrl+"
+        elif ch == "%":
+            mods += "alt+"
+        elif ch == "+":
+            mods += "shift+"
+        elif ch == "{":
+            j = s.find("}", i)
+            token = s[i + 1:j] if j != -1 else s[i + 1:]
+            combo.append(mods + _XDO_KEYS.get(token.lower(), token))
+            mods = ""
+            i = j if j != -1 else len(s)
+        else:
+            combo.append(mods + ch)
+            mods = ""
+        i += 1
+    return " ".join(combo) if combo else _to_xdotool_key(keys)
+
+
+class LinuxHostExecutor(HostExecutor):
+    """
+    Нативные операции на хосте Linux. Поддерживает X11 (xdotool/scrot/xclip) и
+    Wayland (ydotool/grim/wl-clipboard). Инструменты определяются в рантайме;
+    если нужного нет — операция возвращает понятную ошибку (а не падает).
+    """
+
+    platform = "linux"
+
+    def __init__(self) -> None:
+        self.is_wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or \
+            os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+
+    # --- консоль/PowerShell/приложения ------------------------------------ #
+    async def exec_command(self, command: str) -> dict[str, Any]:
+        """Выполнить команду через bash -lc (полноценный Linux-хост)."""
+        log.info("Выполняю команду хоста (bash): %s", command)
+        return await self._run(["bash", "-lc", command], shell=False)
+
+    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+        """PowerShell на Linux — через pwsh, если установлен; иначе подсказка."""
+        pwsh = _which("pwsh", "powershell")
+        if not pwsh:
+            return {"returncode": 127,
+                    "stderr": "PowerShell на этом Linux-хосте не установлен. "
+                              "Используй обычные команды (exec/shell)."}
+        return await self._run([pwsh, "-NoProfile", "-NonInteractive",
+                                "-Command", command], shell=False)
+
+    async def open_app(self, command: str) -> dict[str, Any]:
+        """Открыть URL/файл (xdg-open) либо запустить приложение в фоне."""
+        log.info("Запуск приложения/ссылки: %s", command)
+        cmd = command.strip()
+        looks_like_target = cmd.startswith(("http://", "https://", "/", "~", "file:")) \
+            or os.path.exists(self._expand_path(cmd.split()[0])) if cmd else False
+        if looks_like_target and _which("xdg-open"):
+            launch = f"xdg-open {shlex.quote(self._expand_path(cmd))}"
+        else:
+            launch = cmd  # имя приложения с аргументами, как есть
+        # Запуск в фоне, чтобы GUI-программа не блокировала ответ моста.
+        return await self._run(
+            ["bash", "-lc", f"nohup {launch} >/dev/null 2>&1 &"], shell=False)
+
+    async def media_hook(self, key: str) -> dict[str, Any]:
+        """Медиа-клавиши через XF86-символы (xdotool/ydotool)."""
+        sym = {
+            "play_pause": "XF86AudioPlay", "next": "XF86AudioNext",
+            "prev": "XF86AudioPrev", "stop": "XF86AudioStop",
+            "vol_up": "XF86AudioRaiseVolume", "vol_down": "XF86AudioLowerVolume",
+            "mute": "XF86AudioMute",
+        }.get(key)
+        if not sym:
+            return {"returncode": 1, "stderr": f"Неизвестная медиа-клавиша: {key}"}
+        return await self.key_press(sym)
+
+    # --- экран ------------------------------------------------------------- #
+    async def screenshot(self, out_path: Optional[str] = None,
+                         return_b64: bool = False) -> dict[str, Any]:
+        runtime_dir = JARVIS_HOME / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.png")
+        if self.is_wayland and _which("grim"):
+            cmd = ["grim", out]
+        elif _which("scrot"):
+            cmd = ["scrot", "-o", out]
+        elif _which("maim"):
+            cmd = ["maim", out]
+        elif _which("import"):  # ImageMagick
+            cmd = ["bash", "-lc", f"import -window root {shlex.quote(out)}"]
+        elif _which("gnome-screenshot"):
+            cmd = ["gnome-screenshot", "-f", out]
+        else:
+            return {"returncode": 1,
+                    "stderr": "Нет утилиты скриншота (поставь scrot/maim/grim/imagemagick)."}
+        res = await self._run(cmd, shell=False, timeout=30)
+        res["path"] = out
+        if return_b64:
+            try:
+                data = Path(out).read_bytes()
+                res["image_b64"] = base64.b64encode(data).decode("ascii")
+                w, h = _png_size(data)
+                if w and h:
+                    res["screen_w"], res["screen_h"] = w, h
+            except Exception as exc:  # noqa: BLE001
+                res["screenshot_error"] = str(exc)
+        return res
+
+    # --- мышь/клавиатура --------------------------------------------------- #
+    async def _xdo(self, *args: str) -> dict[str, Any]:
+        xdo = _which("xdotool")
+        if not xdo:
+            return {"returncode": 127,
+                    "stderr": "xdotool не установлен (нужен для GUI-управления в X11)."}
+        return await self._run([xdo, *args], shell=False)
+
+    async def mouse_move(self, x: int, y: int) -> dict[str, Any]:
+        return await self._xdo("mousemove", str(int(x)), str(int(y)))
+
+    async def mouse_click(self, x: Optional[int] = None, y: Optional[int] = None,
+                          button: str = "left", double: bool = False) -> dict[str, Any]:
+        btn = {"left": "1", "middle": "2", "right": "3"}.get(button, "1")
+        args: list[str] = []
+        if x is not None and y is not None:
+            args += ["mousemove", str(int(x)), str(int(y))]
+        args += ["click"]
+        if double:
+            args += ["--repeat", "2"]
+        args += [btn]
+        return await self._xdo(*args)
+
+    async def drag(self, x: int, y: int, x2: int, y2: int,
+                   button: str = "left") -> dict[str, Any]:
+        btn = {"left": "1", "middle": "2", "right": "3"}.get(button, "1")
+        return await self._xdo(
+            "mousemove", str(int(x)), str(int(y)),
+            "mousedown", btn, "mousemove", str(int(x2)), str(int(y2)), "mouseup", btn)
+
+    async def scroll(self, amount: int = -3, direction: str = "down") -> dict[str, Any]:
+        # Колесо: button 4 = вверх, 5 = вниз, 6 = влево, 7 = вправо.
+        btn = {"down": "5", "up": "4", "left": "6", "right": "7"}.get(direction,
+              "5" if amount < 0 else "4")
+        clicks = max(1, abs(int(amount)))
+        return await self._xdo("click", "--repeat", str(clicks), btn)
+
+    async def type_text(self, text: str) -> dict[str, Any]:
+        # xdotool type корректно вводит юникод; --clearmodifiers убирает залипшие моды.
+        res = await self._xdo("type", "--clearmodifiers", "--", str(text))
+        if res.get("returncode") == 127:
+            # X11-утилиты нет — пробуем через буфер обмена + Ctrl+V
+            return await self.paste_text(text)
+        return res
+
+    async def key_press(self, keys: str) -> dict[str, Any]:
+        return await self._xdo("key", "--clearmodifiers", _to_xdotool_key(keys))
+
+    async def send_keys(self, keys: str) -> dict[str, Any]:
+        """Принять и .NET-SendKeys ('^s'), и обычный вид ('ctrl+s')."""
+        seq = _sendkeys_to_xdotool(keys)
+        # seq может содержать несколько комбо через пробел — шлём по очереди.
+        last = {"returncode": 0, "stdout": ""}
+        for combo in seq.split():
+            last = await self._xdo("key", "--clearmodifiers", combo)
+        return last
+
+    # --- буфер обмена ------------------------------------------------------ #
+    async def set_clipboard(self, text: str) -> dict[str, Any]:
+        tmp = await self._write_temp(text)
+        try:
+            if self.is_wayland and _which("wl-copy"):
+                return await self._run(["bash", "-lc",
+                                        f"wl-copy < {shlex.quote(str(tmp))}"], shell=False)
+            xclip = _which("xclip")
+            if xclip:
+                return await self._run(["bash", "-lc",
+                    f"{xclip} -selection clipboard -in < {shlex.quote(str(tmp))}"], shell=False)
+            xsel = _which("xsel")
+            if xsel:
+                return await self._run(["bash", "-lc",
+                    f"{xsel} --clipboard --input < {shlex.quote(str(tmp))}"], shell=False)
+            return {"returncode": 127,
+                    "stderr": "Нет xclip/xsel/wl-copy для работы с буфером обмена."}
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    async def get_clipboard(self) -> dict[str, Any]:
+        if self.is_wayland and _which("wl-paste"):
+            return await self._run(["wl-paste", "-n"], shell=False)
+        xclip = _which("xclip")
+        if xclip:
+            return await self._run([xclip, "-selection", "clipboard", "-out"], shell=False)
+        xsel = _which("xsel")
+        if xsel:
+            return await self._run([xsel, "--clipboard", "--output"], shell=False)
+        return {"returncode": 127, "stderr": "Нет xclip/xsel/wl-paste."}
+
+    async def paste_text(self, text: str) -> dict[str, Any]:
+        """Вставить текст: положить в буфер обмена и нажать Ctrl+V."""
+        res = await self.set_clipboard(text)
+        if res.get("returncode") not in (0, None):
+            return res
+        await asyncio.sleep(0.2)
+        return await self.key_press("ctrl+v")
+
+    # --- процессы/питание -------------------------------------------------- #
+    async def kill_process(self, name: str) -> dict[str, Any]:
+        return await self._run(["bash", "-lc",
+                                f"pkill -f {shlex.quote(name)} || killall {shlex.quote(name)}"],
+                               shell=False)
+
+    async def system_power(self, mode: str) -> dict[str, Any]:
+        lock = _which("loginctl")
+        mapping = {
+            "shutdown": "systemctl poweroff || shutdown -h +1",
+            "reboot": "systemctl reboot || shutdown -r +1",
+            "cancel": "shutdown -c",
+            "lock": (f"{lock} lock-session" if lock else
+                     "xdg-screensaver lock || loginctl lock-session"),
+        }
+        cmd = mapping.get(mode)
+        if not cmd:
+            return {"returncode": 1, "stderr": f"Неизвестный режим питания: {mode}"}
+        return await self._run(["bash", "-lc", cmd], shell=False)
+
+
+def make_host_executor() -> HostExecutor:
+    """Подобрать исполнителя под текущую ОС хоста."""
+    if sys.platform == "win32":
+        return WindowsHostExecutor()
+    if sys.platform.startswith("linux"):
+        return LinuxHostExecutor()
+    # macOS и прочее — пока используем Linux-подобный путь (xdotool/команды),
+    # многое совпадает; экзотика деградирует с понятной ошибкой.
+    log.warning("Платформа '%s' официально не поддержана — пробую Linux-бэкенд.", sys.platform)
+    return LinuxHostExecutor()
 
 
 # --------------------------------------------------------------------------- #
@@ -629,7 +999,7 @@ class RpcRouter:
 
     def __init__(self, registry: ApprovalRegistry) -> None:
         self.registry = registry
-        self.host = HostExecutor()
+        self.host = make_host_executor()      # Windows или Linux — по текущей ОС
         self.git = GitAutomation(self.host)
         self.handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "exec": lambda p: self.host.exec_command(p["command"]),
@@ -641,9 +1011,12 @@ class RpcRouter:
             "mouse_move": lambda p: self.host.mouse_move(p["x"], p["y"]),
             "mouse_click": lambda p: self.host.mouse_click(
                 p.get("x"), p.get("y"), p.get("button", "left"), p.get("double", False)),
+            "drag": lambda p: self.host.drag(
+                p["x"], p["y"], p["x2"], p["y2"], p.get("button", "left")),
             "type_text": lambda p: self.host.type_text(p.get("text", "")),
             "key_press": lambda p: self.host.key_press(p.get("keys", "")),
-            "scroll": lambda p: self.host.scroll(p.get("amount", -3)),
+            "scroll": lambda p: self.host.scroll(
+                p.get("amount", -3), p.get("direction", "down")),
             "set_clipboard": lambda p: self.host.set_clipboard(p.get("text", "")),
             "paste_text": lambda p: self.host.paste_text(p.get("text", "")),
             "send_keys": lambda p: self.host.send_keys(p.get("keys", "")),
@@ -795,6 +1168,7 @@ class RpcBridgeServer:
     async def serve(self) -> None:
         log.info("=" * 60)
         log.info("JARVIS-OS · RPC-мост хоста запущен")
+        log.info("Платформа:    %s (%s)", self.router.host.platform, sys.platform)
         log.info("Адрес:        ws://%s:%s (только localhost)", self.host, self.port)
         log.info("Токен:        %s", TOKEN_PATH)
         log.info("Git-ветка:    %s (пуш в main: %s)",
