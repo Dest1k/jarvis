@@ -148,7 +148,14 @@ class HostBridgeClient:
         while True:
             try:
                 self._token = self._token or self._read_token()
-                async with websockets.connect(RPC_BRIDGE_URL, max_size=16 * 1024 * 1024) as ws:
+                # max_size большой: скриншоты 4K в base64 легко перешагивают 16 МБ
+                # и рвут соединение (1009 message too big) — это и есть «мост
+                # отваливается». ping_timeout щедрый: одиночная медленная команда
+                # не должна ронять keep-alive.
+                async with websockets.connect(
+                    RPC_BRIDGE_URL, max_size=64 * 1024 * 1024,
+                    ping_interval=20, ping_timeout=60, close_timeout=10,
+                ) as ws:
                     await ws.send(json.dumps({"type": "auth", "token": self._token,
                                               "role": "orchestrator"}))
                     auth = json.loads(await ws.recv())
@@ -165,12 +172,28 @@ class HostBridgeClient:
             except Exception as exc:  # noqa: BLE001
                 self._connected.clear()
                 self._ws = None
+                # ВАЖНО: разбудить все висящие вызовы немедленно — иначе текущий
+                # tool «зависнет» на полный timeout (200 с), хотя мост уже отвалился.
+                self._fail_pending(exc)
                 log.warning("RPC-мост недоступен (%s). Переподключение через %d с.", exc, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
+    def _fail_pending(self, exc: Exception) -> None:
+        """Завершить все ожидающие RPC-вызовы ошибкой (при разрыве соединения)."""
+        pending, self._pending = self._pending, {}
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_result({"ok": False,
+                                "error": f"RPC-мост разорвал соединение: {exc}"})
+
     async def _on_message(self, raw: str) -> None:
-        msg = json.loads(raw)
+        # Одно битое сообщение НЕ должно ронять весь recv-цикл (и соединение).
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("RPC-мост прислал нечитаемое сообщение — пропускаю.")
+            return
         mtype = msg.get("type")
         if mtype == "rpc_result":
             fut = self._pending.pop(msg.get("id", ""), None)
@@ -183,15 +206,20 @@ class HostBridgeClient:
     async def call(self, action: str, payload: dict[str, Any],
                    timeout: int = 200) -> dict[str, Any]:
         """Выполнить RPC-вызов на хосте и дождаться результата."""
-        if not self._connected.is_set() or self._ws is None:
+        ws = self._ws
+        if not self._connected.is_set() or ws is None:
             return {"ok": False, "error": "RPC-мост хоста не подключён."}
         req_id = f"rpc-{time.time_ns()}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
-        await self._ws.send(json.dumps(
-            {"type": "rpc", "id": req_id, "action": action, "payload": payload},
-            ensure_ascii=False,
-        ))
+        try:
+            await ws.send(json.dumps(
+                {"type": "rpc", "id": req_id, "action": action, "payload": payload},
+                ensure_ascii=False,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            self._pending.pop(req_id, None)
+            return {"ok": False, "error": f"Не удалось отправить запрос мосту: {exc}"}
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:

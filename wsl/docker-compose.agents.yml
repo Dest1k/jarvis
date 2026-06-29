@@ -65,16 +65,24 @@ services:
     # FP16-модель (например Gemma) задаёт JARVIS_QWEN_QUANT_ARGS="" (пусто) —
     # тогда vLLM определит квантование сам/работает в fp16. Пустое значение
     # допустимо за счёт ${VAR-default} (без двоеточия): default только если UNSET.
+    # ОПТИМИЗАЦИИ:
+    #  --enable-prefix-caching: переиспользует KV одинаковых префиксов (наш
+    #    системный промпт диспетчера повторяется на каждом шаге ReAct → ускорение).
+    #  --disable-log-requests: убирает построчный лог каждого запроса (меньше CPU/IO).
+    #  enforce-eager: по умолчанию ВКЛ (стабильный старт на Blackwell sm_120, меньше
+    #    VRAM). Для ~10-20% ускорения декодинга включите CUDA-графы, задав в .env
+    #    JARVIS_QWEN_ENFORCE_EAGER= (пусто). Профиль gemma12-tars7 имеет запас VRAM.
     command: >
       --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder-14b}
       --served-model-name qwen-coder
       --dtype ${JARVIS_QWEN_DTYPE:-half}
       ${JARVIS_QWEN_QUANT_ARGS---quantization awq_marlin}
-      --enforce-eager
+      ${JARVIS_QWEN_ENFORCE_EAGER---enforce-eager}
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
       --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
       --enable-prefix-caching
+      --disable-log-requests
       --max-num-seqs 8
       --host 0.0.0.0
       --port 8001
@@ -110,15 +118,21 @@ services:
     # Модель/квантование/тип/контекст/KV — через env, чтобы профиль мог поднять
     # UI-TARS до старшей версии (1.5-7B в AWQ/GPTQ). Пустой JARVIS_UITARS_QUANT_ARGS
     # (по умолчанию) → vLLM сам определит квантование из конфига модели.
+    # ОПТИМИЗАЦИИ (важно для GUI-цикла TARS): --enable-prefix-caching сильно
+    # ускоряет повторные шаги — системный промпт UI-TARS на каждом шаге один и
+    # тот же, кэш KV переиспользуется (платим только за новый скриншот). CUDA-графы
+    # тоже переключаются через JARVIS_UITARS_ENFORCE_EAGER= (пусто) при запасе VRAM.
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
       --dtype ${JARVIS_UITARS_DTYPE:-half}
       ${JARVIS_UITARS_QUANT_ARGS-}
-      --enforce-eager
+      ${JARVIS_UITARS_ENFORCE_EAGER---enforce-eager}
       --max-model-len ${JARVIS_UITARS_MAX_LEN:-8192}
       --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.75}
       --kv-cache-dtype ${JARVIS_UITARS_KV_DTYPE:-auto}
+      --enable-prefix-caching
+      --disable-log-requests
       --max-num-seqs 4
       --host 0.0.0.0
       --port 8002
@@ -227,7 +241,7 @@ services:
       - JARVIS_QWEN_MODEL_NAME=qwen-coder
       - JARVIS_UITARS_MODEL_NAME=ui-tars
       - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
-      - JARVIS_UITARS_MAX_LEN=8192
+      - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-8192}
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
       # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).

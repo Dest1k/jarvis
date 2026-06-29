@@ -15,6 +15,7 @@ OpenAI-совместимому API vLLM устойчивы к смене вер
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, AsyncIterator, Optional
@@ -77,6 +78,31 @@ def messages_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Переиспользуемый HTTP-клиент (пул соединений + keep-alive)
+# --------------------------------------------------------------------------- #
+# Раньше КАЖДЫЙ вызов поднимал новый httpx.AsyncClient → новое TCP-соединение на
+# каждый запрос к vLLM. За один ход агент дёргает модель много раз (планировщик
+# N шагов + UI-TARS до 14 шагов за GUI-подзадачу), поэтому переиспользование
+# клиента с keep-alive заметно срезает накладные расходы. Клиент кэшируется НА
+# КОНКРЕТНЫЙ event loop (в backend он один; в тестах — пересоздаётся при смене
+# петли), чтобы не словить «Event loop is closed».
+_client: Optional[httpx.AsyncClient] = None
+_client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if _client is None or _client.is_closed or _client_loop is not loop:
+        limits = httpx.Limits(max_connections=64, max_keepalive_connections=32,
+                              keepalive_expiry=30.0)
+        _client = httpx.AsyncClient(limits=limits,
+                                    timeout=httpx.Timeout(180.0, connect=10.0))
+        _client_loop = loop
+    return _client
+
+
+# --------------------------------------------------------------------------- #
 # Вызовы к vLLM
 # --------------------------------------------------------------------------- #
 async def chat(
@@ -99,11 +125,12 @@ async def chat(
     }
     if stop:
         body["stop"] = stop
-    async with httpx.AsyncClient(timeout=timeout) as cli:
-        r = await cli.post(f"{base_url}/chat/completions", json=body)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]["content"] or ""
+    cli = _get_client()
+    r = await cli.post(f"{base_url}/chat/completions", json=body,
+                       timeout=httpx.Timeout(timeout, connect=10.0))
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"]["content"] or ""
 
 
 async def chat_stream(
@@ -126,22 +153,26 @@ async def chat_stream(
         "max_tokens": max_tokens,
         "stream": True,
     }
-    async with httpx.AsyncClient(timeout=timeout) as cli:
-        async with cli.stream("POST", f"{base_url}/chat/completions", json=body) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                payload = line[6:]
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                    delta = chunk["choices"][0]["delta"].get("content", "")
-                    if delta:
-                        yield delta
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
+    # read-таймаут — между чанками (а не на весь ответ): генерация может быть
+    # долгой, но «зависшее» соединение не должно висеть вечно.
+    to = httpx.Timeout(timeout if timeout else 300.0, connect=10.0)
+    cli = _get_client()
+    async with cli.stream("POST", f"{base_url}/chat/completions",
+                          json=body, timeout=to) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+                delta = chunk["choices"][0]["delta"].get("content", "")
+                if delta:
+                    yield delta
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
 
 
 # --------------------------------------------------------------------------- #

@@ -279,6 +279,24 @@ def _to_sendkeys(keys: str) -> str:
     return prefix + _SENDKEYS_SPECIAL.get(last, last)
 
 
+# Интерактивные команды, которые «держат окно» и НЕ возвращают управление —
+# через exec/powershell они блокируют поток до самого таймаута (выглядит как
+# зависание). Их надо запускать как ПРИЛОЖЕНИЕ (open_app, через start), а не ждать.
+_INTERACTIVE_HINT = (
+    "Команда интерактивная (держит окно и не возвращает вывод) — через exec она "
+    "только зависнет. Чтобы ОТКРЫТЬ видимое окно консоли с командой, используй "
+    "open_app, напр. command='powershell -NoExit -Command \"Get-Process\"' или "
+    "command='cmd /k \"dir\"'. Чтобы получить ВЫВОД в чат — убери -NoExit/-k и "
+    "вызови exec/powershell обычной командой (напр. 'Get-Process | Out-String')."
+)
+
+
+def _looks_interactive(command: str) -> bool:
+    low = f" {command.strip().lower()} "
+    return any(tok in low for tok in (" -noexit", " /k ", " pause ", " read-host")) \
+        or low.rstrip().endswith("/k")
+
+
 # --------------------------------------------------------------------------- #
 # Исполнители нативных хуков ОС — кросс-платформенно (Windows + Linux)
 #
@@ -475,11 +493,15 @@ class WindowsHostExecutor(HostExecutor):
 
     async def exec_command(self, command: str) -> dict[str, Any]:
         """Выполнить произвольную команду cmd.exe."""
+        if _looks_interactive(command):
+            return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
         log.info("Выполняю команду хоста: %s", command)
         return await self._run(command, shell=True)
 
     async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
         """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики)."""
+        if _looks_interactive(command):
+            return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
         log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
         return await self._run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -698,8 +720,6 @@ def _to_xdotool_key(keys: str) -> str:
 def _sendkeys_to_xdotool(keys: str) -> str:
     """Грубо перевести .NET SendKeys ('^s','%{F4}','{ENTER}') → клавиши xdotool."""
     s = str(keys)
-    s = s.replace("^", "ctrl+").replace("%", "alt+").replace("+", "shift+") \
-        if False else s  # placeholder, реальный разбор ниже
     mods = ""
     i = 0
     combo: list[str] = []
@@ -860,10 +880,15 @@ class LinuxHostExecutor(HostExecutor):
         return await self._xdo("key", "--clearmodifiers", _to_xdotool_key(keys))
 
     async def send_keys(self, keys: str) -> dict[str, Any]:
-        """Принять и .NET-SendKeys ('^s'), и обычный вид ('ctrl+s')."""
-        seq = _sendkeys_to_xdotool(keys)
+        """Принять и .NET-SendKeys ('^s','{ENTER}'), и обычный вид ('ctrl+s')."""
+        # Если есть спецсимволы SendKeys — разбираем как SendKeys; иначе это
+        # обычная комбинация ('ctrl+s'/'enter') — переводим напрямую.
+        if any(c in keys for c in "^%{}"):
+            seq = _sendkeys_to_xdotool(keys)
+        else:
+            seq = _to_xdotool_key(keys)
         # seq может содержать несколько комбо через пробел — шлём по очереди.
-        last = {"returncode": 0, "stdout": ""}
+        last: dict[str, Any] = {"returncode": 0, "stdout": ""}
         for combo in seq.split():
             last = await self._xdo("key", "--clearmodifiers", combo)
         return last
@@ -1177,8 +1202,8 @@ class RpcBridgeServer:
         log.info("=" * 60)
         async with websockets.serve(
             self.handler, self.host, self.port,
-            max_size=16 * 1024 * 1024,   # до 16 МБ (скриншоты/кадры)
-            ping_interval=20, ping_timeout=20,
+            max_size=64 * 1024 * 1024,   # до 64 МБ: скриншоты 4K в base64 > 16 МБ
+            ping_interval=20, ping_timeout=60, close_timeout=10,
         ):
             await asyncio.Future()  # работать бесконечно
 

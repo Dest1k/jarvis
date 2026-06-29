@@ -238,6 +238,52 @@ async def test_key_translation():
     return "перевод клавиш (xdotool + SendKeys)"
 
 
+async def test_interactive_guard():
+    """exec/powershell интерактивных команд НЕ должны зависать — быстрый отказ."""
+    import windows_rpc_bridge as wb
+    assert wb._looks_interactive("powershell -NoExit -Command Get-Process")
+    assert wb._looks_interactive("cmd /k dir")
+    assert wb._looks_interactive("something ; pause")
+    assert not wb._looks_interactive("Get-Process | Out-String")
+    assert not wb._looks_interactive("dir")
+    win = wb.WindowsHostExecutor()
+    res = await win.exec_command("powershell -NoExit -Command Get-Process")
+    assert res["returncode"] == 1 and "интерактив" in res["stderr"].lower(), res
+    res = await win.powershell("cmd /k dir")
+    assert res["returncode"] == 1, res
+    return "защита от зависания на интерактивных командах (-NoExit/-k)"
+
+
+async def test_linux_send_keys_routing():
+    """send_keys на Linux принимает и 'ctrl+s', и SendKeys '^s'."""
+    import windows_rpc_bridge as wb
+    wb.shutil.which = lambda n: "/usr/bin/" + n
+    ex = wb.LinuxHostExecutor()
+    captured = []
+
+    async def fake_run(cmd, shell=False, timeout=120, hidden=False):
+        captured.append(cmd)
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    ex._run = fake_run
+    await ex.send_keys("ctrl+s")            # обычный вид
+    assert captured[-1][-1] == "ctrl+s", captured[-1]
+    await ex.send_keys("^s")                # SendKeys
+    assert captured[-1][-1] == "ctrl+s", captured[-1]
+    await ex.send_keys("{ENTER}")           # SendKeys спец-клавиша
+    assert captured[-1][-1] == "Return", captured[-1]
+    return "Linux send_keys: 'ctrl+s' и '^s'/'{ENTER}'"
+
+
+async def test_llm_client_reuse():
+    """Один и тот же httpx-клиент переиспользуется в пределах event loop."""
+    a = llm._get_client()
+    b = llm._get_client()
+    assert a is b, "клиент должен переиспользоваться (пул соединений)"
+    assert not a.is_closed
+    return "переиспользование httpx-клиента (keep-alive пул)"
+
+
 # --------------------------------------------------------------------------- #
 # Pytest-обёртки (чтобы работал и `pytest`, и прямой запуск)
 # --------------------------------------------------------------------------- #
@@ -245,6 +291,7 @@ _TESTS = [
     test_simple_answer, test_tool_call_calculator, test_gui_subagent_streams_steps,
     test_cli_to_gui_fallback_hint, test_parse_uitars_actions,
     test_linux_bridge_commands, test_key_translation,
+    test_interactive_guard, test_linux_send_keys_routing, test_llm_client_reuse,
 ]
 
 
