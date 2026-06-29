@@ -1,0 +1,20 @@
+# constraints.txt — «замок» на ядро ASGI-стека при установке MCP.
+#
+# Зачем: `pip install mcp …` ставится ОТДЕЛЬНОЙ командой после requirements.txt
+# и, разрешая зависимости только своего дерева, спокойно ОБНОВЛЯЕТ starlette до
+# свежей версии (≥0.47), оставляя уже установленный FastAPI 0.115.6 на месте.
+# А FastAPI 0.115.6 при инициализации передаёт в starlette.Router(on_startup=…),
+# которого в новых starlette уже нет → контейнер падает на старте:
+#   TypeError: Router.__init__() got an unexpected keyword argument 'on_startup'
+#
+# Передаём этот файл как `pip install -c constraints.txt …` — pip обязан удержать
+# перечисленные версии. Если новый MCP реально потребует несовместимый starlette,
+# pip честно сообщит о конфликте, MCP не установится (его слой опционален), но
+# ЯДРО останется рабочим. Без extras — у constraints-файлов их нельзя.
+fastapi==0.115.6
+starlette==0.41.3
+uvicorn==0.34.0
+httpx==0.28.1
+websockets==14.1
+pydantic==2.10.4
+python-multipart==0.0.20
