@@ -60,11 +60,16 @@ services:
     # --enforce-eager: пропустить torch.compile/CUDA-graph capture → старт с
     # ~10+ мин до ~1-2 мин, меньше VRAM, обход возможных проблем компиляции под
     # Blackwell (sm_120). Цена — инференс на ~10-15% медленнее.
+    # Квантование/тип данных — через env, чтобы можно было заменить «мозг»
+    # (диспетчер) на другую модель из Пульта: AWQ-модель оставляет дефолт,
+    # FP16-модель (например Gemma) задаёт JARVIS_QWEN_QUANT_ARGS="" (пусто) —
+    # тогда vLLM определит квантование сам/работает в fp16. Пустое значение
+    # допустимо за счёт ${VAR-default} (без двоеточия): default только если UNSET.
     command: >
       --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder-14b}
       --served-model-name qwen-coder
-      --quantization awq_marlin
-      --dtype half
+      --dtype ${JARVIS_QWEN_DTYPE:-half}
+      ${JARVIS_QWEN_QUANT_ARGS---quantization awq_marlin}
       --enforce-eager
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}

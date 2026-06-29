@@ -9,6 +9,34 @@ import { useCallback, useEffect, useState } from "react";
 
 const API = "/api/core/api/control";
 
+interface BrainPreset {
+  label: string; repo: string; name: string;
+  quant: string; dtype: string; gpu_util: string; max_len: string; note?: string;
+}
+
+// Пресеты быстрой замены «мозга»-диспетчера. Профили VRAM ориентировочные —
+// при OOM снизьте util/max-len в полях ниже или в редакторе .env.
+const BRAIN_PRESETS: BrainPreset[] = [
+  { label: "Qwen2.5-Coder-14B · AWQ (текущий)",
+    repo: "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ", name: "qwen-coder-14b",
+    quant: "awq_marlin", dtype: "half", gpu_util: "0.45", max_len: "16384" },
+  { label: "Qwen2.5-Coder-32B · AWQ (умнее, тяжелее)",
+    repo: "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ", name: "qwen-coder-32b",
+    quant: "awq_marlin", dtype: "half", gpu_util: "0.60", max_len: "16384",
+    note: "~17–18 ГБ. Рядом с UI-TARS+аудио — впритык; при OOM снизьте util до 0.55 / max-len до 12288." },
+  { label: "Gemma-2-9B-it · FP16 (лёгкая, gated)",
+    repo: "google/gemma-2-9b-it", name: "gemma-2-9b",
+    quant: "none", dtype: "bfloat16", gpu_util: "0.62", max_len: "8192",
+    note: "Gated-модель: нужен HF-токен в hf_token.txt. Контекст 8k. Без AWQ (fp16)." },
+  { label: "Своя модель…",
+    repo: "", name: "", quant: "awq_marlin", dtype: "half", gpu_util: "0.45", max_len: "16384",
+    note: "Вставьте HF-repo и подберите квантование/тип/util под вашу VRAM (32 ГБ — резерв ~9 ГБ под UI-TARS+аудио+рабочий стол)." },
+];
+
+const fieldStyle: React.CSSProperties = {
+  display: "flex", flexDirection: "column", gap: 3, fontSize: 12, color: "var(--muted)",
+};
+
 interface Overview {
   services: string;
   gpu: string;
@@ -34,6 +62,7 @@ export default function ControlPanel() {
   const [cfg, setCfg] = useState("");
   const [dlRepo, setDlRepo] = useState("");
   const [lmsModel, setLmsModel] = useState("");
+  const [brain, setBrain] = useState<BrainPreset>(BRAIN_PRESETS[0]);
 
   const refresh = useCallback(async () => {
     try {
@@ -86,6 +115,36 @@ export default function ControlPanel() {
     await postJson(`${API}/model`, { action: "set", service, model_path });
     setBusy("");
     refresh();
+  };
+
+  // --- Быстрая замена «мозга»-диспетчера (qwen) ---
+  const downloadBrain = async () => {
+    if (!brain.repo.trim()) { alert("Укажите HF-repo модели."); return; }
+    setBusy("brain-dl");
+    await postJson(`${API}/model`, {
+      action: "download", repo: brain.repo.trim(),
+      name: brain.name.trim() || undefined,
+    });
+    setBusy("");
+    alert("Загрузка модели запущена на хосте (отдельное окно с прогрессом). " +
+      "Дождитесь завершения, затем нажмите «Применить как диспетчер».");
+  };
+
+  const applyBrain = async () => {
+    const name = brain.name.trim() || brain.repo.trim().split("/").pop() || "";
+    if (!name) { alert("Укажите имя папки модели или HF-repo."); return; }
+    if (!confirm(`Заменить диспетчер на /models/${name} (${brain.quant}, ${brain.dtype}, ` +
+      `util ${brain.gpu_util}, max-len ${brain.max_len})? Сервис будет пересоздан.`)) return;
+    setBusy("brain-apply");
+    await postJson(`${API}/model`, {
+      action: "set", service: "qwen", model_path: `/models/${name}`,
+      quantization: brain.quant, dtype: brain.dtype,
+      gpu_util: brain.gpu_util, max_len: brain.max_len,
+    });
+    setBusy("");
+    alert("Применено. Диспетчер пересоздаётся с новой моделью — следите за логами " +
+      "в «Мониторной» (сервис Qwen). Первый старт может занять несколько минут.");
+    setTimeout(refresh, 2000);
   };
 
   const lms = async (action: string, model?: string) => {
@@ -205,6 +264,64 @@ export default function ControlPanel() {
                  style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: "#05080d",
                           border: "1px solid var(--border)", color: "var(--text)" }} />
           <button className="btn" onClick={downloadModel} disabled={!!busy}>⬇ Скачать</button>
+        </div>
+      </div>
+
+      {/* Быстрая замена мозга-диспетчера */}
+      <div className="panel">
+        <strong style={{ display: "block", marginBottom: 8 }}>
+          🧠 Мозг-диспетчер — быстрая замена модели (Qwen → другая)
+        </strong>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <select className="btn" style={{ minWidth: 300 }} value={brain.label}
+                  onChange={(e) => {
+                    const p = BRAIN_PRESETS.find((x) => x.label === e.target.value);
+                    if (p) setBrain({ ...p });
+                  }}>
+            {BRAIN_PRESETS.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+          </select>
+        </div>
+        {brain.note && (
+          <p style={{ fontSize: 12, color: "var(--muted)", margin: "6px 0 0" }}>ℹ {brain.note}</p>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+                      gap: 8, marginTop: 10 }}>
+          <label style={fieldStyle}>HF-repo
+            <input value={brain.repo} onChange={(e) => setBrain({ ...brain, repo: e.target.value })}
+                   placeholder="org/model" />
+          </label>
+          <label style={fieldStyle}>Имя папки
+            <input value={brain.name} onChange={(e) => setBrain({ ...brain, name: e.target.value })}
+                   placeholder="в data/models" />
+          </label>
+          <label style={fieldStyle}>Квантование
+            <select value={brain.quant} onChange={(e) => setBrain({ ...brain, quant: e.target.value })}>
+              <option value="awq_marlin">awq_marlin</option>
+              <option value="awq">awq</option>
+              <option value="gptq">gptq</option>
+              <option value="none">none (fp16)</option>
+            </select>
+          </label>
+          <label style={fieldStyle}>dtype
+            <select value={brain.dtype} onChange={(e) => setBrain({ ...brain, dtype: e.target.value })}>
+              <option value="half">half (fp16)</option>
+              <option value="bfloat16">bfloat16</option>
+              <option value="auto">auto</option>
+            </select>
+          </label>
+          <label style={fieldStyle}>gpu util
+            <input value={brain.gpu_util} onChange={(e) => setBrain({ ...brain, gpu_util: e.target.value })} />
+          </label>
+          <label style={fieldStyle}>max-len
+            <input value={brain.max_len} onChange={(e) => setBrain({ ...brain, max_len: e.target.value })} />
+          </label>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn" disabled={!!busy} onClick={downloadBrain}>⬇ 1. Скачать модель</button>
+          <button className="btn primary" disabled={!!busy} onClick={applyBrain}>✅ 2. Применить как диспетчер</button>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+            Сначала «Скачать» (идёт в отдельном окне на хосте) → дождаться → затем «Применить».
+          </span>
         </div>
       </div>
 

@@ -309,6 +309,18 @@ async def _host_exec(command: str) -> dict[str, Any]:
             "out": (r.get("stdout") or "") + (r.get("stderr") or "")}
 
 
+async def _update_env_vars(updates: dict[str, str]) -> None:
+    """Атомарно записать набор переменных в wsl/.env (через RPC-мост)."""
+    cfg = await bridge.call("read_file", {"path": ENV_FILE})
+    text = (cfg.get("result", {}) or {}).get("stdout", "")
+    keys = set(updates)
+    lines = [l for l in text.splitlines()
+             if not any(l.startswith(k + "=") for k in keys)]
+    for k, v in updates.items():
+        lines.append(f"{k}={v}")
+    await bridge.call("write_file", {"path": ENV_FILE, "content": "\n".join(lines) + "\n"})
+
+
 @app.get("/api/control/overview")
 async def control_overview() -> JSONResponse:
     """Сводка для пульта: сервисы, GPU/VRAM, локальные модели, LM Studio, конфиг."""
@@ -402,12 +414,21 @@ async def control_model(payload: dict[str, Any]) -> JSONResponse:
         if not env_key or not path:
             return JSONResponse({"ok": False, "error": "Нужны service и model_path."},
                                 status_code=400)
-        # Обновляем .env и пересоздаём сервис
-        cfg = await bridge.call("read_file", {"path": ENV_FILE})
-        text = (cfg.get("result", {}) or {}).get("stdout", "")
-        lines = [l for l in text.splitlines() if not l.startswith(env_key + "=")]
-        lines.append(f"{env_key}={path}")
-        await bridge.call("write_file", {"path": ENV_FILE, "content": "\n".join(lines) + "\n"})
+        updates: dict[str, str] = {env_key: path}
+        # Для диспетчера (qwen) можно заменить «мозг» на другую модель, задав
+        # квантование/тип/VRAM-профиль (иначе fp16-модель не запустится с AWQ).
+        if svc == "qwen":
+            if "quantization" in payload:
+                q = str(payload.get("quantization") or "").strip().lower()
+                updates["JARVIS_QWEN_QUANT_ARGS"] = (
+                    "" if q in ("", "none", "fp16", "auto") else f"--quantization {q}")
+            if payload.get("dtype"):
+                updates["JARVIS_QWEN_DTYPE"] = str(payload["dtype"]).strip()
+            if payload.get("gpu_util"):
+                updates["JARVIS_QWEN_GPU_UTIL"] = str(payload["gpu_util"]).strip()
+            if payload.get("max_len"):
+                updates["JARVIS_QWEN_MAX_LEN"] = str(payload["max_len"]).strip()
+        await _update_env_vars(updates)
         res = await _host_exec(
             f'docker compose -f {COMPOSE} --env-file {ENV_FILE} up -d --force-recreate '
             f'--no-deps {svc_to_compose(svc)}')
