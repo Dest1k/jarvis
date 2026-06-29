@@ -46,7 +46,11 @@ MAX_STEPS = int(__import__("os").environ.get("JARVIS_AGENT_MAX_STEPS", "8"))
 # Синглтоны памяти/инструментов (живут на всё время работы backend)
 # --------------------------------------------------------------------------- #
 _longterm = LongTermMemory()
-_conversations = ConversationManager(_longterm)
+# Порог авто-сжатия контекста — доля входного бюджета модели (масштабируется с
+# контекстным окном). При наборе «критической массы» оперативная история
+# автоматически сжимается в сводку (см. ConversationManager.maybe_summarize).
+_SOFT_BUDGET = max(2500, int(llm.AGENT_INPUT_BUDGET * 0.5))
+_conversations = ConversationManager(_longterm, soft_budget_tokens=_SOFT_BUDGET)
 _registry = ToolRegistry()
 
 
