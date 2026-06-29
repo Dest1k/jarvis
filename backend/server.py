@@ -298,7 +298,16 @@ CONTAINERS = {
 }
 COMPOSE = "wsl/docker-compose.agents.yml"
 ENV_FILE = "wsl/.env"
+PROFILES_FILE = "wsl/profiles.json"
 LMSTUDIO_HOST = os.environ.get("JARVIS_LMSTUDIO_HOST", "http://host.docker.internal:1234")
+# Тома и контейнеры, которые чистильщик НИКОГДА не трогает.
+PROTECTED_PREFIX = "jarvis"
+
+
+def _safe_token(s: str) -> bool:
+    """Допустимое имя docker-объекта/папки (без shell-метасимволов и traversal)."""
+    return bool(s) and ".." not in s and all(
+        c.isalnum() or c in "-_.:" for c in s)
 
 
 async def _host_exec(command: str) -> dict[str, Any]:
@@ -469,6 +478,135 @@ async def control_lmstudio(payload: dict[str, Any]) -> JSONResponse:
     else:
         return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
     return JSONResponse(res)
+
+
+# --------------------------------------------------------------------------- #
+# ПРОФИЛИ СИСТЕМЫ (диспетчер + GUI одним пресетом) — wsl/profiles.json
+# --------------------------------------------------------------------------- #
+async def _read_profiles() -> dict[str, Any]:
+    res = await bridge.call("read_file", {"path": PROFILES_FILE})
+    text = (res.get("result", {}) or {}).get("stdout", "")
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            data.pop("_comment", None)
+            return data
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {}
+
+
+@app.get("/api/control/profiles")
+async def control_profiles() -> JSONResponse:
+    """Список профилей + текущий .env (чтобы UI определил активный)."""
+    profiles = await _read_profiles()
+    cfg = await bridge.call("read_file", {"path": ENV_FILE})
+    return JSONResponse({"profiles": profiles,
+                         "env": (cfg.get("result", {}) or {}).get("stdout", "")})
+
+
+@app.post("/api/control/profile")
+async def control_profile(payload: dict[str, Any]) -> JSONResponse:
+    """Профиль системы: download (скачать обе модели) | apply (применить + пересоздать)."""
+    action = payload.get("action", "")
+    pid = payload.get("profile", "")
+    prof = (await _read_profiles()).get(pid)
+    if not prof:
+        return JSONResponse({"ok": False, "error": "Профиль не найден."}, status_code=400)
+    disp, gui = prof.get("dispatcher", {}), prof.get("gui", {})
+
+    if action == "download":
+        started = []
+        for part in (disp, gui):
+            repo, name = part.get("repo", ""), part.get("name", "")
+            if repo and _safe_token(name):
+                await _host_exec(
+                    f'start "hf-{name}" python hf_downloader.py {repo} --dest data\\models\\{name}')
+                started.append(f"{repo} → data/models/{name}")
+        return JSONResponse({"ok": True, "started": True, "downloads": started})
+
+    if action == "apply":
+        env = {**disp.get("env", {}), **gui.get("env", {})}
+        await _update_env_vars(env)
+        base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
+        # Пересоздание обоих сервисов с загрузкой весов — долгое → в отдельном окне.
+        await _host_exec(
+            f'start "jarvis-profile" cmd /c {base} up -d --force-recreate --no-deps '
+            f'vllm-qwen-coder vllm-ui-tars')
+        return JSONResponse({"ok": True, "applied": pid, "started": True})
+
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
+# --------------------------------------------------------------------------- #
+# СИСТЕМНЫЙ ЧИСТИЛЬЩИК — поиск и удаление мусора Docker / неиспользуемых моделей
+# Защита: НИКОГДА не трогает объекты с префиксом 'jarvis' и тома весов.
+# --------------------------------------------------------------------------- #
+@app.post("/api/control/cleanup")
+async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
+    """check — найти мусор; clean — удалить выбранное."""
+    action = payload.get("action", "")
+
+    if action == "check":
+        df = await _host_exec("docker system df")
+        dangling = await _host_exec(
+            'docker images -f dangling=true --format "{{.ID}}|{{.Size}}"')
+        cache = await _host_exec("docker builder du")
+        stopped = await _host_exec(
+            'docker ps -a --filter status=exited --format "{{.Names}}|{{.Image}}|{{.Status}}"')
+        vols = await _host_exec('docker volume ls -f dangling=true --format "{{.Name}}"')
+        models_out = await _host_exec("cmd /c dir /b data\\models")
+        env_text = (await bridge.call("read_file", {"path": ENV_FILE})
+                    ).get("result", {}).get("stdout", "")
+
+        model_dirs = [m.strip() for m in models_out["out"].splitlines() if m.strip()]
+        referenced = [d for d in model_dirs if d in env_text]
+        # анонимные тома и остановленные контейнеры — без jarvis-объектов
+        anon_volumes = [v.strip() for v in vols["out"].splitlines()
+                        if v.strip() and not v.strip().startswith(PROTECTED_PREFIX)]
+        stopped_ctrs = [s.strip() for s in stopped["out"].splitlines()
+                        if s.strip() and not s.strip().startswith(PROTECTED_PREFIX)]
+        dangling_imgs = [d.strip() for d in dangling["out"].splitlines() if d.strip()]
+        return JSONResponse({
+            "ok": True,
+            "df": df["out"].strip(),
+            "build_cache": cache["out"].strip(),
+            "dangling_images": dangling_imgs,
+            "stopped_containers": stopped_ctrs,
+            "anon_volumes": anon_volumes,
+            "model_dirs": model_dirs,
+            "referenced_models": referenced,
+            "unused_models": [d for d in model_dirs if d not in referenced],
+        })
+
+    if action == "clean":
+        cats = payload.get("categories", []) or []
+        volumes = payload.get("volumes", []) or []
+        containers = payload.get("containers", []) or []
+        models = payload.get("models", []) or []
+        log_lines: list[str] = []
+
+        async def _run(label: str, cmd: str) -> None:
+            r = await _host_exec(cmd)
+            log_lines.append(f"$ {label}\n{r['out'].strip()}")
+
+        if "dangling_images" in cats:
+            await _run("docker image prune -f", "docker image prune -f")
+        if "build_cache" in cats:
+            await _run("docker builder prune -f", "docker builder prune -f")
+        for v in volumes:
+            if _safe_token(v) and not v.startswith(PROTECTED_PREFIX):
+                await _run(f"volume rm {v}", f"docker volume rm {v}")
+        for c in containers:
+            if _safe_token(c) and not c.startswith(PROTECTED_PREFIX):
+                await _run(f"rm {c}", f"docker rm {c}")
+        for m in models:
+            # rmdir деструктивен → пройдёт HITL-гейт моста (доп. подтверждение).
+            if _safe_token(m):
+                await _run(f"rmdir models/{m}", f"cmd /c rmdir /s /q data\\models\\{m}")
+        return JSONResponse({"ok": True, "log": "\n\n".join(log_lines) or "Нечего удалять."})
+
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 
 
 # --------------------------------------------------------------------------- #

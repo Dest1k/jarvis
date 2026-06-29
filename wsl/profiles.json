@@ -1,0 +1,61 @@
+{
+  "_comment": "Профили системы JARVIS-OS (диспетчер + GUI-контроллер) для RTX 5090 (32 ГБ). Применяются кнопкой в Пульте или python jarvis.py --profile <id>. VRAM-расчёт — в docs/vram_matrix.md. Served-model-name остаётся qwen-coder/ui-tars в любом профиле, поэтому код агента менять не нужно.",
+  "qwen-classic": {
+    "label": "Классика: Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B",
+    "vram": "Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0 = ~22.8 ГБ; резерв ~9.2 ГБ.",
+    "note": "Стабильный профиль по умолчанию. Кодер-модель — иногда отказы на не-кодовых задачах.",
+    "dispatcher": {
+      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+      "name": "qwen-coder-14b",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/qwen-coder-14b",
+        "JARVIS_QWEN_QUANT_ARGS": "--quantization awq_marlin",
+        "JARVIS_QWEN_DTYPE": "half",
+        "JARVIS_QWEN_GPU_UTIL": "0.45",
+        "JARVIS_QWEN_MAX_LEN": "16384",
+        "JARVIS_QWEN_KV_DTYPE": "auto"
+      }
+    },
+    "gui": {
+      "repo": "bytedance-research/UI-TARS-2B-SFT",
+      "name": "ui-tars",
+      "env": {
+        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
+        "JARVIS_UITARS_QUANT_ARGS": "",
+        "JARVIS_UITARS_DTYPE": "half",
+        "JARVIS_UITARS_GPU_UTIL": "0.20",
+        "JARVIS_UITARS_MAX_LEN": "8192",
+        "JARVIS_UITARS_KV_DTYPE": "auto"
+      }
+    }
+  },
+  "gemma4-tars15": {
+    "label": "Умный: Gemma-4-31B (NVFP4) + UI-TARS-1.5-7B (AWQ)",
+    "vram": "Gemma-4-31B NVFP4 ~19.2 + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 = ~27.6 ГБ; резерв ~4.4 ГБ. KV-кэш обоих в fp8.",
+    "note": "Заметно умнее и «послушнее» (instruct, не кодер). NVFP4 — родной для Blackwell 4-битный float (качество ~bf16). KV-кэш fp8. Требует vLLM 0.17+ (cu128). Резерв VRAM тоньше — не держите тяжёлые GPU-приложения.",
+    "dispatcher": {
+      "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
+      "name": "gemma4-31b-nvfp4",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-nvfp4",
+        "JARVIS_QWEN_QUANT_ARGS": "",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.60",
+        "JARVIS_QWEN_MAX_LEN": "16384",
+        "JARVIS_QWEN_KV_DTYPE": "fp8"
+      }
+    },
+    "gui": {
+      "repo": "flin775/UI-TARS-1.5-7B-AWQ",
+      "name": "ui-tars-1.5-7b-awq",
+      "env": {
+        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars-1.5-7b-awq",
+        "JARVIS_UITARS_QUANT_ARGS": "",
+        "JARVIS_UITARS_DTYPE": "half",
+        "JARVIS_UITARS_GPU_UTIL": "0.20",
+        "JARVIS_UITARS_MAX_LEN": "8192",
+        "JARVIS_UITARS_KV_DTYPE": "fp8"
+      }
+    }
+  }
+}

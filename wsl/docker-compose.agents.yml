@@ -73,6 +73,7 @@ services:
       --enforce-eager
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
+      --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
       --enable-prefix-caching
       --max-num-seqs 8
       --host 0.0.0.0
@@ -106,13 +107,18 @@ services:
     # (json.loads), а в строке compose оно ломается при разбиении аргументов.
     # Дефолт (1 изображение на запрос) и так соответствует работе UI-TARS
     # (один скриншот на шаг).
+    # Модель/квантование/тип/контекст/KV — через env, чтобы профиль мог поднять
+    # UI-TARS до старшей версии (1.5-7B в AWQ/GPTQ). Пустой JARVIS_UITARS_QUANT_ARGS
+    # (по умолчанию) → vLLM сам определит квантование из конфига модели.
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
-      --dtype half
+      --dtype ${JARVIS_UITARS_DTYPE:-half}
+      ${JARVIS_UITARS_QUANT_ARGS-}
       --enforce-eager
-      --max-model-len 8192
+      --max-model-len ${JARVIS_UITARS_MAX_LEN:-8192}
       --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.20}
+      --kv-cache-dtype ${JARVIS_UITARS_KV_DTYPE:-auto}
       --max-num-seqs 4
       --host 0.0.0.0
       --port 8002

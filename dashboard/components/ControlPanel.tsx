@@ -67,6 +67,12 @@ export default function ControlPanel() {
   const [dlRepo, setDlRepo] = useState("");
   const [lmsModel, setLmsModel] = useState("");
   const [brain, setBrain] = useState<BrainPreset>(BRAIN_PRESETS[0]);
+  const [profiles, setProfiles] = useState<Record<string, any>>({});
+  const [profileSel, setProfileSel] = useState("");
+  const [cleanup, setCleanup] = useState<any | null>(null);
+  const [cleanSel, setCleanSel] = useState<{
+    cats: string[]; volumes: string[]; containers: string[]; models: string[];
+  }>({ cats: [], volumes: [], containers: [], models: [] });
 
   const refresh = useCallback(async () => {
     try {
@@ -149,6 +155,65 @@ export default function ControlPanel() {
     alert("Применено. Диспетчер пересоздаётся с новой моделью — следите за логами " +
       "в «Мониторной» (сервис Qwen). Первый старт может занять несколько минут.");
     setTimeout(refresh, 2000);
+  };
+
+  // --- Профили системы (диспетчер + GUI одним пресетом) ---
+  const loadProfiles = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/profiles`, { cache: "no-store" });
+      const d = await r.json();
+      setProfiles(d.profiles || {});
+      if (!profileSel && d.profiles) setProfileSel(Object.keys(d.profiles)[0] || "");
+    } catch { /* пусто */ }
+  }, [profileSel]);
+  useEffect(() => { loadProfiles(); }, [loadProfiles]);
+
+  const downloadProfile = async () => {
+    if (!profileSel) return;
+    setBusy("prof-dl");
+    await postJson(`${API}/profile`, { action: "download", profile: profileSel });
+    setBusy("");
+    alert("Загрузка моделей профиля запущена (окна с прогрессом на хосте). " +
+      "Дождитесь завершения, затем нажмите «Применить профиль».");
+  };
+  const applyProfile = async () => {
+    if (!profileSel) return;
+    if (!confirm(`Применить профиль «${profiles[profileSel]?.label || profileSel}»? ` +
+      `Сервисы диспетчера и UI-TARS будут пересозданы с новыми моделями.`)) return;
+    setBusy("prof-apply");
+    await postJson(`${API}/profile`, { action: "apply", profile: profileSel });
+    setBusy("");
+    alert("Профиль применяется. Модели прогреваются 1–3 мин — следите в «Мониторной».");
+    setTimeout(refresh, 2500);
+  };
+
+  // --- Системный чистильщик ---
+  const tog = (arr: string[], v: string) =>
+    arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
+  const cleanupCheck = async () => {
+    setBusy("clean-check");
+    setCleanup(null);
+    setCleanSel({ cats: [], volumes: [], containers: [], models: [] });
+    const r = await fetch(`${API}/cleanup`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "check" }),
+    });
+    setCleanup(await r.json());
+    setBusy("");
+  };
+  const cleanupClean = async () => {
+    const total = cleanSel.cats.length + cleanSel.volumes.length +
+      cleanSel.containers.length + cleanSel.models.length;
+    if (total === 0) { alert("Ничего не выбрано."); return; }
+    if (!confirm(`Удалить выбранное (${total} поз.)? Действие необратимо.`)) return;
+    setBusy("clean-do");
+    const d = await postJson(`${API}/cleanup`, {
+      action: "clean", categories: cleanSel.cats, volumes: cleanSel.volumes,
+      containers: cleanSel.containers, models: cleanSel.models,
+    });
+    setBusy("");
+    alert("Результат:\n" + String(d.log || "").slice(0, 2000));
+    cleanupCheck();
   };
 
   const lms = async (action: string, model?: string) => {
@@ -271,10 +336,42 @@ export default function ControlPanel() {
         </div>
       </div>
 
+      {/* Профиль системы: диспетчер + GUI одним кликом */}
+      <div className="panel">
+        <strong style={{ display: "block", marginBottom: 8 }}>
+          🎛️ Профиль системы (диспетчер + GUI одним кликом)
+        </strong>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <select className="btn" style={{ minWidth: 320 }} value={profileSel}
+                  onChange={(e) => setProfileSel(e.target.value)}>
+            {Object.entries(profiles).map(([id, p]) => (
+              <option key={id} value={id}>{(p as any).label || id}</option>
+            ))}
+          </select>
+          <button className="btn" disabled={!!busy || !profileSel} onClick={downloadProfile}>
+            ⬇ Скачать модели профиля
+          </button>
+          <button className="btn primary" disabled={!!busy || !profileSel} onClick={applyProfile}>
+            ✅ Применить профиль
+          </button>
+        </div>
+        {profileSel && profiles[profileSel] && (
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+            <div>VRAM: {(profiles[profileSel] as any).vram}</div>
+            {(profiles[profileSel] as any).note &&
+              <div style={{ marginTop: 4 }}>ℹ {(profiles[profileSel] as any).note}</div>}
+          </div>
+        )}
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
+          Классика (Qwen+TARS-2B) ↔ умный (Gemma-4-31B NVFP4 + UI-TARS-1.5-7B AWQ, KV-кэш fp8).
+          Из терминала: <code>python jarvis.py up --profile gemma4-tars15</code>.
+        </p>
+      </div>
+
       {/* Быстрая замена мозга-диспетчера */}
       <div className="panel">
         <strong style={{ display: "block", marginBottom: 8 }}>
-          🧠 Мозг-диспетчер — быстрая замена модели (Qwen → другая)
+          🧠 Мозг-диспетчер — точечная замена только диспетчера (Qwen → другая)
         </strong>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <select className="btn" style={{ minWidth: 300 }} value={brain.label}
@@ -346,6 +443,79 @@ export default function ControlPanel() {
             (для управления нужен CLI <code>lms</code> на хосте)
           </span>
         </div>
+      </div>
+
+      {/* Системный чистильщик */}
+      <div className="panel">
+        <strong style={{ display: "block", marginBottom: 8 }}>
+          🧹 Системный чистильщик (Docker-мусор / неиспользуемые модели)
+        </strong>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn" disabled={!!busy} onClick={cleanupCheck}>🔍 Проверить</button>
+          <button className="btn danger" disabled={!!busy || !cleanup} onClick={cleanupClean}>
+            🗑 Удалить выбранное
+          </button>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+            Объекты с префиксом «jarvis» (контейнеры и тома весов) защищены и не удаляются.
+          </span>
+        </div>
+        {cleanup && (
+          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+            <pre className="log-stream" style={{ height: "16vh" }}>
+              {cleanup.df}
+              {cleanup.build_cache ? `\n\n[build cache]\n${cleanup.build_cache}` : ""}
+            </pre>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              <label><input type="checkbox" checked={cleanSel.cats.includes("dangling_images")}
+                onChange={() => setCleanSel((s) => ({ ...s, cats: tog(s.cats, "dangling_images") }))} />{" "}
+                Висячие образы: {cleanup.dangling_images?.length || 0}</label>
+              <label><input type="checkbox" checked={cleanSel.cats.includes("build_cache")}
+                onChange={() => setCleanSel((s) => ({ ...s, cats: tog(s.cats, "build_cache") }))} />{" "}
+                Кэш сборки</label>
+            </div>
+            {cleanup.anon_volumes?.length > 0 && (
+              <div>
+                <strong style={{ fontSize: 13 }}>Анонимные тома ({cleanup.anon_volumes.length}):</strong>
+                {cleanup.anon_volumes.map((v: string) => (
+                  <label key={v} style={{ display: "block", fontSize: 12 }}>
+                    <input type="checkbox" checked={cleanSel.volumes.includes(v)}
+                      onChange={() => setCleanSel((s) => ({ ...s, volumes: tog(s.volumes, v) }))} /> {v}
+                  </label>
+                ))}
+              </div>
+            )}
+            {cleanup.stopped_containers?.length > 0 && (
+              <div>
+                <strong style={{ fontSize: 13 }}>Остановленные контейнеры ({cleanup.stopped_containers.length}):</strong>
+                {cleanup.stopped_containers.map((c: string) => {
+                  const name = c.split("|")[0];
+                  return (
+                    <label key={c} style={{ display: "block", fontSize: 12 }}>
+                      <input type="checkbox" checked={cleanSel.containers.includes(name)}
+                        onChange={() => setCleanSel((s) => ({ ...s, containers: tog(s.containers, name) }))} /> {c}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {cleanup.model_dirs?.length > 0 && (
+              <div>
+                <strong style={{ fontSize: 13 }}>Локальные модели (data/models):</strong>
+                {cleanup.model_dirs.map((m: string) => {
+                  const used = cleanup.referenced_models?.includes(m);
+                  return (
+                    <label key={m} style={{ display: "block", fontSize: 12,
+                                             color: used ? "var(--warn)" : "var(--text)" }}>
+                      <input type="checkbox" checked={cleanSel.models.includes(m)}
+                        onChange={() => setCleanSel((s) => ({ ...s, models: tog(s.models, m) }))} />{" "}
+                      {m} {used ? "⚠ используется текущим профилем" : "(не используется)"}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Конфигурация */}
