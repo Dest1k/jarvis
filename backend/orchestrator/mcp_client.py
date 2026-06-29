@@ -29,7 +29,11 @@ from typing import Any, Callable
 log = logging.getLogger("jarvis.mcp")
 
 MCP_CONFIG_PATH = os.environ.get("JARVIS_MCP_CONFIG", "/app/mcp_servers.json")
-MCP_MAX_TOOLS = int(os.environ.get("JARVIS_MCP_MAX_TOOLS", "48"))
+# Потолок числа MCP-инструментов, вливаемых в реестр (защита промпта диспетчера).
+# При полном наборе включённых серверов их ~65 — держим запас (96), чтобы ничего
+# не отбрасывалось молча. Если локальная модель «тонет» в инструментах — снижайте
+# (или выключайте серверы в mcp_servers.json).
+MCP_MAX_TOOLS = int(os.environ.get("JARVIS_MCP_MAX_TOOLS", "96"))
 MCP_CALL_TIMEOUT = int(os.environ.get("JARVIS_MCP_CALL_TIMEOUT", "120"))
 
 RegisterFn = Callable[[str, str, dict[str, Any], str], None]
