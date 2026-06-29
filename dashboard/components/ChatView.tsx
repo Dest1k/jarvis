@@ -26,6 +26,7 @@ const ACTORS: Record<string, { icon: string; name: string }> = {
   web: { icon: "🌐", name: "Веб" },
   memory: { icon: "💾", name: "Память" },
   local: { icon: "⚡", name: "Локально" },
+  mcp: { icon: "🧩", name: "MCP" },
 };
 const actorInfo = (a?: string) => ACTORS[a || ""] || { icon: "•", name: a || "" };
 

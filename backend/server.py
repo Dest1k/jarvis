@@ -219,8 +219,23 @@ bridge = HostBridgeClient()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("Старт ядра JARVIS-OS. Подключаюсь к подсистемам…")
     bridge_task = asyncio.create_task(bridge.run_forever())
+    # MCP-серверы поднимаем в фоне (не блокируя старт ядра): инструменты появятся
+    # в реестре агента по мере подключения серверов.
+    async def _mcp_init() -> None:
+        try:
+            from orchestrator.agent import start_mcp
+            await start_mcp()
+        except Exception:  # noqa: BLE001
+            log.exception("MCP init failed (работаю без MCP)")
+    mcp_task = asyncio.create_task(_mcp_init())
     yield
     bridge_task.cancel()
+    mcp_task.cancel()
+    try:
+        from orchestrator.agent import stop_mcp
+        await stop_mcp()
+    except Exception:  # noqa: BLE001
+        pass
     log.info("Остановка ядра JARVIS-OS.")
 
 
@@ -787,6 +802,13 @@ async def agent_memory_action(payload: dict[str, Any]) -> JSONResponse:
         item = agent.save_memory(text, tags=tags)
         return JSONResponse({"ok": True, "item": item})
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
+@app.get("/api/agent/mcp")
+async def agent_mcp() -> JSONResponse:
+    """Статус MCP-серверов и список их инструментов (для дашборда)."""
+    from orchestrator import agent
+    return JSONResponse(agent.mcp_status())
 
 
 # --------------------------------------------------------------------------- #

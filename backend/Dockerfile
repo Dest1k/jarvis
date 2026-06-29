@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
-# Dockerfile — backend-ядро JARVIS-OS (FastAPI server.py + LangGraph-оркестратор)
+# Dockerfile — backend-ядро JARVIS-OS (FastAPI server.py + агент-оркестратор + MCP)
 FROM python:3.11-slim
 
 # Системные утилиты: docker-cli (управление sandbox), ffmpeg (захват десктопа),
-# xdotool (проброс ввода), Xvfb + fluxbox (виртуальный десктоп), curl (healthcheck).
+# xdotool (проброс ввода), Xvfb + fluxbox (виртуальный десктоп), curl (healthcheck),
+# nodejs/npm — для TS-based MCP-серверов (вендорятся офлайн ниже).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ffmpeg xdotool docker.io \
         xvfb fluxbox x11-utils \
+        nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,7 +28,20 @@ COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# MCP (ОФФЛАЙН-вендоринг): SDK + python-серверы (fetch/time/git/sqlite) и
+# TS-серверы глобально через npm (filesystem/memory/sequential-thinking).
+# Сбой установки НЕ ломает образ — агент деградирует и работает без MCP.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install mcp mcp-server-fetch mcp-server-time mcp-server-git mcp-server-sqlite \
+    || echo "[warn] MCP python-серверы не установились — агент будет без них"
+RUN npm install -g --no-fund --no-audit \
+        @modelcontextprotocol/server-filesystem \
+        @modelcontextprotocol/server-memory \
+        @modelcontextprotocol/server-sequential-thinking \
+    || echo "[warn] MCP npm-серверы не установились"
+
 COPY server.py ./
+COPY mcp_servers.json ./
 COPY orchestrator ./orchestrator
 COPY entrypoint.sh ./
 # Страховка от CRLF: если entrypoint.sh пришёл с Windows-переводами строк

@@ -70,6 +70,7 @@ export default function ControlPanel() {
   const [profiles, setProfiles] = useState<Record<string, any>>({});
   const [profileSel, setProfileSel] = useState("");
   const [cleanup, setCleanup] = useState<any | null>(null);
+  const [mcp, setMcp] = useState<any | null>(null);
   const [cleanSel, setCleanSel] = useState<{
     cats: string[]; volumes: string[]; containers: string[]; models: string[];
   }>({ cats: [], volumes: [], containers: [], models: [] });
@@ -83,6 +84,10 @@ export default function ControlPanel() {
     } catch {
       setOv(null);
     }
+    try {
+      const m = await fetch("/api/core/api/agent/mcp", { cache: "no-store" });
+      setMcp(await m.json());
+    } catch { setMcp(null); }
   }, []);
 
   useEffect(() => {
@@ -518,6 +523,41 @@ export default function ControlPanel() {
             )}
           </div>
         )}
+      </div>
+
+      {/* MCP-серверы */}
+      <div className="panel">
+        <strong style={{ display: "block", marginBottom: 8 }}>
+          🧩 MCP-серверы (подключаемые инструменты, офлайн)
+        </strong>
+        <p style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 8px" }}>
+          Инструментов от MCP всего: <b>{mcp?.tool_count ?? 0}</b>. Включение/выключение
+          серверов — в <code>backend/mcp_servers.json</code> (затем рестарт backend).
+        </p>
+        <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+          <tbody>
+            {mcp && Object.entries(mcp.servers || {}).map(([name, info]) => {
+              const i: any = info;
+              return (
+                <tr key={name} style={{ borderTop: "1px solid var(--border)" }}>
+                  <td style={{ padding: "6px 4px" }}>
+                    <span className={`status-dot ${i.ok ? "ok" : (i.error === "disabled" ? "warn" : "err")}`} />
+                    {name}
+                  </td>
+                  <td style={{ color: "var(--muted)" }}>
+                    {i.ok ? `${(i.tools || []).length} инстр.: ${(i.tools || []).join(", ")}`
+                          : (i.error === "disabled" ? "выключен" : (i.error || "—"))}
+                  </td>
+                </tr>
+              );
+            })}
+            {(!mcp || Object.keys(mcp.servers || {}).length === 0) && (
+              <tr><td style={{ color: "var(--muted)" }}>
+                Нет данных (нужен backend с установленным пакетом mcp).
+              </td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       {/* Конфигурация */}

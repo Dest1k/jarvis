@@ -1,0 +1,41 @@
+{
+  "_comment": "MCP-серверы JARVIS-OS. Все вендорятся ОФФЛАЙН в backend-образ (см. backend/Dockerfile) — в рантайме сеть не нужна. enabled=true → агент получает их инструменты под именами mcp_<server>_<tool>. По умолчанию включён компактный безопасный набор (чтобы не раздувать промпт диспетчера); остальные настроены, но выключены — включайте по мере надобности. Хостовые операции (файлы/процессы Windows) делает RPC-мост; MCP добавляет переносимые инструменты-возможности.",
+
+  "mcpServers": {
+    "fetch": {
+      "command": "python", "args": ["-m", "mcp_server_fetch"],
+      "enabled": true,
+      "_desc": "Скачивание веб-страниц с конвертацией в markdown."
+    },
+    "time": {
+      "command": "python", "args": ["-m", "mcp_server_time"],
+      "enabled": true,
+      "_desc": "Текущее время и конвертация часовых поясов."
+    },
+    "filesystem": {
+      "command": "mcp-server-filesystem", "args": ["/data"],
+      "enabled": false,
+      "_desc": "Файловые операции внутри /data (том контейнера). Выключен по умолчанию: много инструментов раздувают промпт, а файлы Windows-хоста делает RPC-мост."
+    },
+    "sqlite": {
+      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/memory/jarvis.db"],
+      "enabled": false,
+      "_desc": "SQLite: запросы/схема/insight к локальной БД."
+    },
+    "git": {
+      "command": "python", "args": ["-m", "mcp_server_git", "--repository", "/data/memory"],
+      "enabled": false,
+      "_desc": "Git-операции над репозиторием."
+    },
+    "memory": {
+      "command": "mcp-server-memory", "args": [],
+      "enabled": false,
+      "_desc": "Граф знаний (knowledge graph) как долговременная память."
+    },
+    "sequentialthinking": {
+      "command": "mcp-server-sequential-thinking", "args": [],
+      "enabled": false,
+      "_desc": "Структурированное пошаговое рассуждение."
+    }
+  }
+}

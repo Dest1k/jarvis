@@ -36,7 +36,7 @@ from typing import Any, AsyncIterator, Optional
 
 from . import llm
 from .memory import ConversationManager, LongTermMemory
-from .tools import ToolContext, ToolRegistry
+from .tools import Tool, ToolContext, ToolRegistry
 
 log = logging.getLogger("jarvis.agent")
 
@@ -68,7 +68,51 @@ _TOOL_ACTOR = {
 
 
 def _actor_for(tool: str) -> str:
+    if tool.startswith("mcp_"):
+        return "mcp"
     return _TOOL_ACTOR.get(tool, "host")
+
+
+# --------------------------------------------------------------------------- #
+# MCP-слой: подключаемые серверы инструментов (см. mcp_client.py)
+# --------------------------------------------------------------------------- #
+def _register_mcp_tool(qual: str, description: str, schema: dict[str, Any],
+                       server: str) -> None:
+    """Зарегистрировать инструмент MCP-сервера в общий реестр агента."""
+    params: dict[str, str] = {}
+    for k, v in (schema or {}).get("properties", {}).items():
+        params[k] = str(v.get("description") or v.get("type") or "")[:80]
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+        from . import mcp_client
+        return await mcp_client.mcp_manager.call(qual, args)
+
+    _registry.add(Tool(qual, f"[MCP:{server}] {description}".strip()[:280], params, handler))
+
+
+async def start_mcp() -> None:
+    """Поднять локальные MCP-серверы и влить их инструменты в реестр."""
+    try:
+        from . import mcp_client
+        await mcp_client.mcp_manager.start(_register_mcp_tool)
+    except Exception:  # noqa: BLE001
+        log.exception("MCP не инициализирован (продолжаю без него)")
+
+
+async def stop_mcp() -> None:
+    try:
+        from . import mcp_client
+        await mcp_client.mcp_manager.stop()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def mcp_status() -> dict[str, Any]:
+    try:
+        from . import mcp_client
+        return mcp_client.mcp_manager.status()
+    except Exception:  # noqa: BLE001
+        return {"servers": {}, "tool_count": 0, "tools": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -86,7 +130,9 @@ def _planner_system() -> str:
         "«я всего лишь ИИ» — если есть подходящий инструмент, ВЫЗОВИ его и доведи "
         "задачу до конца.\n\n"
         "Доступные инструменты:\n"
-        f"{_registry.specs()}\n\n"
+        f"{_registry.specs()}\n"
+        "(Инструменты с префиксом mcp_ — внешние подключаемые MCP-серверы; "
+        "вызывай их по описанию, как обычные инструменты.)\n\n"
         "ПРАВИЛА:\n"
         "• Отвечай СТРОГО одним JSON-объектом, без текста вокруг.\n"
         "• Чтобы вызвать инструмент: "

@@ -230,6 +230,8 @@ services:
       - JARVIS_UITARS_MAX_LEN=8192
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
+      # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).
+      - JARVIS_MCP_CONFIG=/app/mcp_servers.json
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
