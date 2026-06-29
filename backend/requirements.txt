@@ -1,5 +1,9 @@
 # Зависимости backend-ядра JARVIS-OS (server.py + агентский оркестратор)
 fastapi==0.115.6
+# starlette ПИНУЕМ ЯВНО: FastAPI 0.115.6 зовёт Router(on_startup=…), которого нет
+# в starlette ≥0.46 → краш ядра на старте. Явный пин фиксирует совместимую версию
+# и заодно форсит пересборку этого слоя при обычном --build (а не только --no-cache).
+starlette==0.41.3
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 websockets==14.1
