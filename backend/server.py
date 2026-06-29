@@ -461,6 +461,10 @@ async def control_stack(payload: dict[str, Any]) -> JSONResponse:
     if action in ("down", "restart"):
         res = await _host_exec(f"{base} {action}")
         return JSONResponse(res)
+    if action == "freevram":
+        # Освободить видеопамять: остановить все GPU-контейнеры JARVIS.
+        res = await _host_exec(f"{base} stop vllm-qwen-coder vllm-ui-tars audio-layer")
+        return JSONResponse(res)
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 
 
@@ -529,10 +533,17 @@ async def control_profile(payload: dict[str, Any]) -> JSONResponse:
         env = {**disp.get("env", {}), **gui.get("env", {})}
         await _update_env_vars(env)
         base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
-        # Пересоздание обоих сервисов с загрузкой весов — долгое → в отдельном окне.
-        await _host_exec(
-            f'start "jarvis-profile" cmd /c {base} up -d --force-recreate --no-deps '
-            f'vllm-qwen-coder vllm-ui-tars')
+        # Стоп GPU-сервисов (освободить VRAM) → ПОСЛЕДОВАТЕЛЬНЫЙ старт: диспетчер
+        # с --wait (дождаться полной загрузки!) → затем UI-TARS → аудио/ядро.
+        # Это обязательно: второй vLLM-инстанс должен профилировать память уже
+        # после первого, иначе оба не помещаются (кумулятивный util).
+        seq = (
+            f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+            f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
+            f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars & '
+            f'{base} up -d audio-layer backend sandbox'
+        )
+        await _host_exec(f'start "jarvis-profile" cmd /c "{seq}"')
         return JSONResponse({"ok": True, "applied": pid, "started": True})
 
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)

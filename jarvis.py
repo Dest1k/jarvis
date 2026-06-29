@@ -228,6 +228,40 @@ def apply_profile(profile_id: str) -> bool:
     return True
 
 
+def _compose(*args: str) -> int:
+    return run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), *args])
+
+
+def free_vram() -> None:
+    """Остановить GPU-контейнеры JARVIS — освободить видеопамять перед стартом."""
+    info("Освобождаю VRAM: останавливаю vLLM и аудио…")
+    _compose("stop", "vllm-qwen-coder", "vllm-ui-tars", "audio-layer")
+
+
+def up_stack_sequential() -> None:
+    """
+    Поднять стек ПОСЛЕДОВАТЕЛЬНО: второй vLLM-инстанс должен профилировать память
+    ПОСЛЕ полной загрузки первого, иначе оба не помещаются (см. кумулятивный util
+    UI-TARS в profiles.json/.env). --wait ждёт healthcheck каждого vLLM.
+    """
+    info("vLLM #1 (диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
+    _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
+             "--no-deps", "vllm-qwen-coder")
+    info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
+    _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
+             "--no-deps", "vllm-ui-tars")
+    info("Аудио, ядро, sandbox…")
+    _compose("up", "-d", "--remove-orphans")
+
+
+def cmd_freevram() -> int:
+    """Принудительно освободить VRAM, занятую JARVIS (остановить GPU-контейнеры)."""
+    free_vram()
+    info("VRAM JARVIS освобождена. Память десктопа (браузер и пр.) освободите сами: "
+         "закройте лишние вкладки/окна или отключите аппаратное ускорение в браузере.")
+    return 0
+
+
 def cmd_up(profile: str | None = None) -> int:
     if not ENV_FILE.exists():
         info("Не найден wsl/.env — похоже, система ещё не установлена.")
@@ -247,9 +281,8 @@ def cmd_up(profile: str | None = None) -> int:
 
     sync_models()  # веса (по активному профилю) копируются в ext4-том
 
-    info("Поднимаю контейнерный стек (docker compose up -d)…")
-    run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE),
-         "up", "-d", "--remove-orphans"])
+    free_vram()            # освободить VRAM от прежних инстансов
+    up_stack_sequential()  # последовательный старт: vLLM#1 → vLLM#2 → аудио/ядро
 
     cmd_dashboard()
 
@@ -295,7 +328,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="JARVIS-OS — единая точка запуска.")
     p.add_argument("command", nargs="?", default="up",
                    choices=["up", "install", "stop", "status", "dashboard", "bridge",
-                            "profiles"])
+                            "profiles", "freevram"])
     p.add_argument("--profile", default=None,
                    help="Профиль системы (диспетчер+GUI) перед запуском, см. "
                         "`jarvis.py profiles`. Напр.: --profile gemma4-tars15")
@@ -309,6 +342,8 @@ def main() -> int:
         return cmd_install(extra)
     if args.command == "profiles":
         return cmd_profiles()
+    if args.command == "freevram":
+        return cmd_freevram()
     if args.command == "up":
         return cmd_up(profile=args.profile)
     if args.command == "stop":

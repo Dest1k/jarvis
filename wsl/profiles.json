@@ -23,16 +23,16 @@
         "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
         "JARVIS_UITARS_QUANT_ARGS": "",
         "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.20",
+        "JARVIS_UITARS_GPU_UTIL": "0.75",
         "JARVIS_UITARS_MAX_LEN": "8192",
         "JARVIS_UITARS_KV_DTYPE": "auto"
       }
     }
   },
   "gemma4-tars15": {
-    "label": "Умный: Gemma-4-26B-A4B MoE (NVFP4, 4B активных) + UI-TARS-1.5-7B (AWQ)",
-    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ весов (MoE, активно 4B → быстро) + KV fp8 ~2 + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 ≈ 27 ГБ; резерв ~5 ГБ. KV-кэш обоих fp8.",
-    "note": "MoE 26B-A4B (всего 26B, активно 4B/токен → быстрый инференс) в NVFP4 (родной 4-бит float для Blackwell, качество ~bf16). Рекомендуется вместо dense-31B: репо 31B NVFP4 ~30 ГБ и НЕ влезает рядом с UI-TARS. vLLM 0.17+ (cu128). Резерв тоньше классики — не держите тяжёлые GPU-приложения. Ещё легче: Gemma-4-12B (~8-10 ГБ).",
+    "label": "Умный: Gemma-4-26B-A4B MoE (NVFP4, 4B активных) + UI-TARS-2B",
+    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (MoE, активно 4B → быстро, util 0.62) + UI-TARS-2B ~5 (util 0.90 — КУМУЛЯТИВНЫЙ потолок!) + аудио 2 ≈ 27.4 ГБ; резерв ~4.6. KV обоих fp8.",
+    "note": "MoE 26B-A4B в NVFP4 (родной 4-бит float Blackwell, качество ~bf16). Вместо dense-31B: репо 31B NVFP4 ~30 ГБ и НЕ влезает. UI-TARS — лёгкий 2B (старший 7B рядом с 16.5-ГБ Gemma не помещается → для 7B берите профиль gemma12-tars7). ВАЖНО: util UI-TARS высокий (0.90) — это кумулятивный потолок vLLM на всю карту, не доля. Старт последовательный с освобождением VRAM. Если не стартует — освободите VRAM (закройте вкладки браузера) или возьмите gemma12-tars7.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -40,8 +40,37 @@
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.60",
-        "JARVIS_QWEN_MAX_LEN": "16384",
+        "JARVIS_QWEN_GPU_UTIL": "0.62",
+        "JARVIS_QWEN_MAX_LEN": "12288",
+        "JARVIS_QWEN_KV_DTYPE": "fp8"
+      }
+    },
+    "gui": {
+      "repo": "bytedance-research/UI-TARS-2B-SFT",
+      "name": "ui-tars",
+      "env": {
+        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
+        "JARVIS_UITARS_QUANT_ARGS": "",
+        "JARVIS_UITARS_DTYPE": "half",
+        "JARVIS_UITARS_GPU_UTIL": "0.90",
+        "JARVIS_UITARS_MAX_LEN": "4096",
+        "JARVIS_UITARS_KV_DTYPE": "fp8"
+      }
+    }
+  },
+  "gemma12-tars7": {
+    "label": "Запасной (просторный): Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ, взрослый)",
+    "vram": "Gemma-4-12B NVFP4 ~7.7 ГБ + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 ≈ 18-20 ГБ; резерв ~12 ГБ. Запускается даже при занятом видеопамятью десктопе.",
+    "note": "Если A4B+2B не стартует из-за нехватки VRAM — берите этот: Gemma-4-12B (encoder-free multimodal, ~7.7 ГБ NVFP4) оставляет место взрослому UI-TARS-1.5-7B. Огромный запас. dispatcher util 0.34, UI-TARS util 0.55 (кумулятивно: второй инстанс должен покрыть и первый).",
+    "dispatcher": {
+      "repo": "coolthor/gemma-4-12B-it-NVFP4A16",
+      "name": "gemma4-12b-nvfp4",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-12b-nvfp4",
+        "JARVIS_QWEN_QUANT_ARGS": "",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.35",
+        "JARVIS_QWEN_MAX_LEN": "12288",
         "JARVIS_QWEN_KV_DTYPE": "fp8"
       }
     },
@@ -52,7 +81,7 @@
         "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars-1.5-7b-awq",
         "JARVIS_UITARS_QUANT_ARGS": "",
         "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.20",
+        "JARVIS_UITARS_GPU_UTIL": "0.72",
         "JARVIS_UITARS_MAX_LEN": "8192",
         "JARVIS_UITARS_KV_DTYPE": "fp8"
       }

@@ -259,6 +259,8 @@ export default function ControlPanel() {
         <button className="btn primary" disabled={!!busy} onClick={() => stack("up")}>▶ Поднять всё</button>
         <button className="btn danger" disabled={!!busy} onClick={() => stack("down")}>⏹ Остановить всё</button>
         <button className="btn" disabled={!!busy} onClick={() => stack("restart")}>↻ Рестарт всех</button>
+        <button className="btn" disabled={!!busy} onClick={() => stack("freevram")}
+                title="Остановить vLLM и аудио — освободить видеопамять">🧹 Освободить VRAM</button>
         <button className="btn" disabled={!!busy} onClick={() => stack("build")}>🔨 Пересобрать образы</button>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>
           «Поднять»/«Пересобрать» — в отдельном окне на хосте.

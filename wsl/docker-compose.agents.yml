@@ -117,7 +117,7 @@ services:
       ${JARVIS_UITARS_QUANT_ARGS-}
       --enforce-eager
       --max-model-len ${JARVIS_UITARS_MAX_LEN:-8192}
-      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.20}
+      --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.75}
       --kv-cache-dtype ${JARVIS_UITARS_KV_DTYPE:-auto}
       --max-num-seqs 4
       --host 0.0.0.0
