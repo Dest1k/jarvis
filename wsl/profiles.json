@@ -30,14 +30,14 @@
     }
   },
   "gemma4-tars15": {
-    "label": "Умный: Gemma-4-31B (NVFP4) + UI-TARS-1.5-7B (AWQ)",
-    "vram": "Gemma-4-31B NVFP4 ~19.2 + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 = ~27.6 ГБ; резерв ~4.4 ГБ. KV-кэш обоих в fp8.",
-    "note": "Заметно умнее и «послушнее» (instruct, не кодер). NVFP4 — родной для Blackwell 4-битный float (качество ~bf16). KV-кэш fp8. Требует vLLM 0.17+ (cu128). Резерв VRAM тоньше — не держите тяжёлые GPU-приложения.",
+    "label": "Умный: Gemma-4-26B-A4B MoE (NVFP4, 4B активных) + UI-TARS-1.5-7B (AWQ)",
+    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ весов (MoE, активно 4B → быстро) + KV fp8 ~2 + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 ≈ 27 ГБ; резерв ~5 ГБ. KV-кэш обоих fp8.",
+    "note": "MoE 26B-A4B (всего 26B, активно 4B/токен → быстрый инференс) в NVFP4 (родной 4-бит float для Blackwell, качество ~bf16). Рекомендуется вместо dense-31B: репо 31B NVFP4 ~30 ГБ и НЕ влезает рядом с UI-TARS. vLLM 0.17+ (cu128). Резерв тоньше классики — не держите тяжёлые GPU-приложения. Ещё легче: Gemma-4-12B (~8-10 ГБ).",
     "dispatcher": {
-      "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
-      "name": "gemma4-31b-nvfp4",
+      "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
+      "name": "gemma4-26b-a4b-nvfp4",
       "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-nvfp4",
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.60",
