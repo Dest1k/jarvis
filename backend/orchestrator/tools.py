@@ -254,20 +254,25 @@ async def tool_gui(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     screen_h = int(result.get("screen_h", 1080))
 
     system = (
-        "Ты — UI-TARS, визуальный контроллер Windows. По скриншоту и цели верни "
-        "СТРОГО один JSON-объект следующего шага и ничего больше:\n"
-        '{"action":"click|double_click|right_click|type|key|scroll|done|fail",'
-        '"x":<0-1000>,"y":<0-1000>,"text":"...","key":"...","amount":<int>,'
-        '"reason":"кратко"}\n'
-        "Координаты x,y — НОРМИРОВАННЫЕ 0..1000 относительно ширины/высоты экрана. "
-        "Для 'type' заполни text; для 'key' — key (например 'enter','ctrl+s'); "
-        "для 'scroll' — amount (отрицательное = вниз). action='done' когда цель "
-        "достигнута, 'fail' — если невозможно."
+        "You are UI-TARS, a GUI agent controlling a Windows computer via screenshots.\n"
+        "Given a screenshot and a task, output your NEXT SINGLE action.\n\n"
+        "## Action Space (coordinates are NORMALIZED 0-1000)\n"
+        "click(start_box='(x,y)')\n"
+        "left_double(start_box='(x,y)')\n"
+        "right_single(start_box='(x,y)')\n"
+        "hotkey(key='ctrl s')        # space-separated keys\n"
+        "type(content='text to type')\n"
+        "scroll(start_box='(x,y)', direction='down')   # or up\n"
+        "wait()\n"
+        "finished(content='done')    # when the task is complete\n\n"
+        "Output EXACTLY two lines:\n"
+        "Thought: <very brief reasoning>\n"
+        "Action: <one action from the space above>"
     )
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": [
-            {"type": "text", "text": f"Цель: {goal}"},
+            {"type": "text", "text": f"## Task\n{goal}"},
             {"type": "image_url",
              "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
         ]},
@@ -278,51 +283,88 @@ async def tool_gui(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "content": f"UI-TARS недоступен: {exc}"}
 
-    act = llm.extract_json(raw) or _parse_uitars_native(raw)
+    act = _parse_uitars_action(raw)
     if not act:
         return {"ok": False, "content": f"UI-TARS вернул неразборчивый ответ: {raw[:300]}"}
+    kind = act["kind"]
 
-    action = str(act.get("action", "")).lower()
-    if action in ("done", "fail"):
-        return {"ok": action == "done",
-                "content": f"UI-TARS: {action} — {act.get('reason', '')}"}
+    if kind in ("finished", "done", "complete"):
+        return {"ok": True, "content": f"UI-TARS: цель достигнута. {act.get('content', '')}"}
+    if kind == "wait":
+        return {"ok": True, "content": "UI-TARS: ожидание (экран ещё меняется)."}
+    if kind in ("fail", "impossible"):
+        return {"ok": False, "content": f"UI-TARS: не удалось — {act.get('content', '')}"}
 
-    # нормированные → пиксели
-    px = int(float(act.get("x", 0)) / 1000.0 * screen_w)
-    py = int(float(act.get("y", 0)) / 1000.0 * screen_h)
+    # координаты: нормированные 0-1000 → пиксели (или уже пиксели, если > 1000)
+    def _px(v: int, dim: int) -> int:
+        return int(v) if int(v) > 1000 else int(int(v) / 1000.0 * dim)
 
-    if action in ("click", "double_click", "right_click"):
-        button = "right" if action == "right_click" else "left"
+    if kind in ("click", "left_single", "left_double", "right_single",
+                "double_click", "right_click"):
+        button = "right" if "right" in kind else "left"
+        double = "double" in kind
         res = await ctx.bridge.call("mouse_click", {
-            "x": px, "y": py, "button": button,
-            "double": action == "double_click"})
-    elif action == "type":
-        res = await ctx.bridge.call("type_text", {"text": act.get("text", "")})
-    elif action == "key":
-        res = await ctx.bridge.call("key_press", {"keys": act.get("key", "")})
-    elif action == "scroll":
-        res = await ctx.bridge.call("scroll", {"amount": int(act.get("amount", -3))})
+            "x": _px(act.get("x", 0), screen_w), "y": _px(act.get("y", 0), screen_h),
+            "button": button, "double": double})
+    elif kind == "type":
+        res = await ctx.bridge.call("type_text", {"text": act.get("content", "")})
+    elif kind == "hotkey":
+        res = await ctx.bridge.call("key_press",
+                                    {"keys": str(act.get("key", "")).replace(" ", "+")})
+    elif kind == "scroll":
+        amount = -3 if act.get("direction", "down") == "down" else 3
+        if "x" in act:  # навести курсор перед прокруткой
+            await ctx.bridge.call("mouse_move",
+                                  {"x": _px(act["x"], screen_w), "y": _px(act["y"], screen_h)})
+        res = await ctx.bridge.call("scroll", {"amount": amount})
+    elif kind in ("drag",):
+        # упрощённо: клик в стартовой точке (полноценный drag не реализуем здесь)
+        res = await ctx.bridge.call("mouse_click",
+                                    {"x": _px(act.get("x", 0), screen_w),
+                                     "y": _px(act.get("y", 0), screen_h)})
     else:
-        return {"ok": False, "content": f"Неизвестное GUI-действие: {action}"}
+        return {"ok": False, "content": f"Неизвестное GUI-действие UI-TARS: {kind}"}
 
     ok = bool(res.get("ok"))
     return {"ok": ok,
-            "content": f"Выполнено GUI-действие '{action}' "
-                       f"({act.get('reason', '')}). "
-                       f"{'' if ok else 'Мост: ' + str(res.get('error'))}"}
+            "content": f"GUI-действие '{kind}' выполнено."
+                       if ok else f"GUI-действие '{kind}' не выполнено: {res.get('error')}"}
 
 
-def _parse_uitars_native(text: str) -> Optional[dict[str, Any]]:
-    """Запасной разбор «родного» формата UI-TARS: click(start_box='(x,y)') и т.п."""
-    m = re.search(r"(\w+)\s*\(\s*start_box\s*=\s*'?\(?(\d+)\s*,\s*(\d+)", text)
-    if m:
-        kind = m.group(1).lower()
-        x, y = int(m.group(2)), int(m.group(3))
-        # UI-TARS обычно нормирует в 0..1000 — оставляем как есть
-        return {"action": "click" if "click" in kind else kind, "x": x, "y": y}
-    if "finished" in text.lower() or "done" in text.lower():
-        return {"action": "done", "reason": text[:120]}
-    return None
+def _parse_uitars_action(text: str) -> Optional[dict[str, Any]]:
+    """Разобрать действие UI-TARS из строки 'Action: click(start_box='(x,y)')'."""
+    if not text:
+        return None
+    m = re.search(r"Action\s*:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    seg = (m.group(1) if m else text).strip()
+    call = re.search(r"([A-Za-z_]+)\s*\((.*)\)", seg, re.DOTALL)
+    low = seg.lower()
+    if not call:
+        if any(w in low for w in ("finish", "done", "complete")):
+            return {"kind": "finished", "content": seg[:160]}
+        if "wait" in low:
+            return {"kind": "wait"}
+        if any(w in low for w in ("fail", "impossible", "cannot")):
+            return {"kind": "fail", "content": seg[:160]}
+        return None
+    out: dict[str, Any] = {"kind": call.group(1).lower()}
+    arg = call.group(2)
+    sb = re.search(r"start_box\s*=\s*['\"]?\(?\s*(\d+)\s*,\s*(\d+)", arg)
+    if sb:
+        out["x"], out["y"] = int(sb.group(1)), int(sb.group(2))
+    eb = re.search(r"end_box\s*=\s*['\"]?\(?\s*(\d+)\s*,\s*(\d+)", arg)
+    if eb:
+        out["x2"], out["y2"] = int(eb.group(1)), int(eb.group(2))
+    cont = re.search(r"content\s*=\s*'([^']*)'|content\s*=\s*\"([^\"]*)\"", arg)
+    if cont:
+        out["content"] = cont.group(1) if cont.group(1) is not None else cont.group(2)
+    key = re.search(r"key\s*=\s*'([^']*)'|key\s*=\s*\"([^\"]*)\"", arg)
+    if key:
+        out["key"] = key.group(1) if key.group(1) is not None else key.group(2)
+    direction = re.search(r"direction\s*=\s*['\"]?(\w+)", arg)
+    if direction:
+        out["direction"] = direction.group(1).lower()
+    return out
 
 
 # --- 4. Веб: скачать и извлечь текст --------------------------------------- #

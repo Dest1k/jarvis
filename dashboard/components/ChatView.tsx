@@ -17,8 +17,20 @@ const API = "/api/core/api/agent";
 const LS_TABS = "jarvis_tabs";
 const LS_CHATS = "jarvis_chats";
 
+// Кто сейчас работает над задачей (для визуализации «какая модель трудится»).
+const ACTORS: Record<string, { icon: string; name: string }> = {
+  dispatcher: { icon: "🧠", name: "Диспетчер" },
+  "ui-tars": { icon: "👁️", name: "UI-TARS" },
+  sandbox: { icon: "📦", name: "Sandbox" },
+  host: { icon: "🪟", name: "Хост" },
+  web: { icon: "🌐", name: "Веб" },
+  memory: { icon: "💾", name: "Память" },
+  local: { icon: "⚡", name: "Локально" },
+};
+const actorInfo = (a?: string) => ACTORS[a || ""] || { icon: "•", name: a || "" };
+
 type StepKind = "thought" | "tool_call" | "tool_result";
-interface Step { kind: StepKind; text: string; tool?: string; ok?: boolean }
+interface Step { kind: StepKind; text: string; tool?: string; ok?: boolean; actor?: string }
 interface ChatMessage {
   id: string; role: "user" | "assistant"; text: string;
   replyTo?: string; steps: Step[]; streaming?: boolean; error?: boolean;
@@ -56,6 +68,7 @@ export default function ChatView() {
   const [mem, setMem] = useState<MemoryOverview | null>(null);
   const [micError, setMicError] = useState("");
   const [workingSessions, setWorkingSessions] = useState<string[]>([]);
+  const [actorBySession, setActorBySession] = useState<Record<string, string>>({});
 
   const chatRef = useRef<JarvisSocket | null>(null);
   const audioRef = useRef<JarvisSocket | null>(null);
@@ -112,17 +125,20 @@ export default function ChatView() {
       onJson: (msg: JarvisMessage) => {
         const id = String(msg.id ?? "");
         const session = sessionOf(id);
+        if (msg.actor) setActorBySession((p) => ({ ...p, [session]: String(msg.actor) }));
+        const stepActor = String(msg.actor ?? "");
+        const clearActor = () => setActorBySession((p) => ({ ...p, [session]: "" }));
         switch (msg.type) {
           case "thought":
-            upsert(session, id, (m) => m.steps.push({ kind: "thought", text: String(msg.text ?? "") }));
+            upsert(session, id, (m) => m.steps.push({ kind: "thought", text: String(msg.text ?? ""), actor: stepActor }));
             break;
           case "tool_call":
             upsert(session, id, (m) => m.steps.push({
-              kind: "tool_call", tool: String(msg.tool ?? ""), text: JSON.stringify(msg.args ?? {}) }));
+              kind: "tool_call", tool: String(msg.tool ?? ""), actor: stepActor, text: JSON.stringify(msg.args ?? {}) }));
             break;
           case "tool_result":
             upsert(session, id, (m) => m.steps.push({
-              kind: "tool_result", tool: String(msg.tool ?? ""), ok: Boolean(msg.ok), text: String(msg.summary ?? "") }));
+              kind: "tool_result", tool: String(msg.tool ?? ""), actor: stepActor, ok: Boolean(msg.ok), text: String(msg.summary ?? "") }));
             break;
           case "assistant_start":
             upsert(session, id, (m) => { m.streaming = true; });
@@ -132,17 +148,17 @@ export default function ChatView() {
             break;
           case "assistant_done":
             upsert(session, id, (m) => { m.streaming = false; m.text = String(msg.content ?? m.text); });
-            setWorking(session, false);
+            setWorking(session, false); clearActor();
             if (speakRef.current && session === activeRef.current && msg.content)
               audioRef.current?.sendJson({ type: "speak", text: String(msg.content) });
             break;
           case "error":
             upsert(session, id, (m) => { m.streaming = false; m.error = true; m.text += `\n⚠ ${String(msg.error ?? "")}`; });
-            setWorking(session, false);
+            setWorking(session, false); clearActor();
             break;
           case "cancelled":
             upsert(session, id, (m) => { m.streaming = false; m.text += (m.text ? "\n" : "") + "⏹ Остановлено."; });
-            setWorking(session, false);
+            setWorking(session, false); clearActor();
             break;
           case "memory":
             setChats((p) => ({ ...p, [session]: [...(p[session] || []),
@@ -283,15 +299,22 @@ export default function ChatView() {
   useEffect(() => { if (memOpen) loadMem(); }, [memOpen, loadMem]);
 
   const activeWorking = workingSessions.includes(active);
+  const activeActor = actorBySession[active] || "";
 
   return (
     <div className="chat-wrap">
       <div className="chat-head panel">
         <span className={`status-dot ${conn === "open" ? "ok" : "warn"}`} />
         <strong>JARVIS</strong>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>
-          голос, код, веб, управление ПК · память авто-сжимается
-        </span>
+        {activeWorking && activeActor ? (
+          <span className={`actor-badge actor-${activeActor}`}>
+            <span className="actor-spin" /> Работает: {actorInfo(activeActor).icon} {actorInfo(activeActor).name}
+          </span>
+        ) : (
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+            голос, код, веб, управление ПК · память авто-сжимается
+          </span>
+        )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button className={`btn ${speak ? "primary" : ""}`} onClick={() => setSpeak((v) => !v)}
                   title="Озвучивать ответы (TTS)">🔊</button>
@@ -377,7 +400,10 @@ function MessageBubble({ m }: { m: ChatMessage }) {
               <div className="steps-body">
                 {m.steps.map((s, i) => (
                   <div key={i} className={`step ${s.kind}`}>
-                    {s.kind === "thought" && <span>💭 {s.text}</span>}
+                    <span className="step-actor" title={actorInfo(s.actor).name}>
+                      {actorInfo(s.actor).icon}
+                    </span>{" "}
+                    {s.kind === "thought" && <span>{s.text}</span>}
                     {s.kind === "tool_call" && <span>🔧 <code>{s.tool}</code> {s.text}</span>}
                     {s.kind === "tool_result" && <span>{s.ok ? "✅" : "⚠️"} <code>{s.tool}</code>: {s.text}</span>}
                   </div>

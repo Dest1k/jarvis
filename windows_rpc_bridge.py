@@ -249,6 +249,28 @@ def _png_size(data: bytes) -> tuple[int, int]:
     return 0, 0
 
 
+# Спец-клавиши и модификаторы → синтаксис .NET SendKeys.
+_SENDKEYS_SPECIAL = {
+    "enter": "{ENTER}", "return": "{ENTER}", "tab": "{TAB}", "esc": "{ESC}",
+    "escape": "{ESC}", "backspace": "{BACKSPACE}", "bksp": "{BACKSPACE}",
+    "delete": "{DELETE}", "del": "{DELETE}", "up": "{UP}", "down": "{DOWN}",
+    "left": "{LEFT}", "right": "{RIGHT}", "home": "{HOME}", "end": "{END}",
+    "pgup": "{PGUP}", "pgdn": "{PGDN}", "space": " ", "f1": "{F1}", "f2": "{F2}",
+    "f3": "{F3}", "f4": "{F4}", "f5": "{F5}", "f12": "{F12}",
+}
+_SENDKEYS_MOD = {"ctrl": "^", "control": "^", "alt": "%", "shift": "+"}
+
+
+def _to_sendkeys(keys: str) -> str:
+    """'enter' → '{ENTER}'; 'ctrl+s' → '^s'; 'ctrl+shift+n' → '^+n'."""
+    parts = [p.strip().lower() for p in str(keys).replace("+", " ").split() if p.strip()]
+    if not parts:
+        return ""
+    *mods, last = parts
+    prefix = "".join(_SENDKEYS_MOD.get(m, "") for m in mods)
+    return prefix + _SENDKEYS_SPECIAL.get(last, last)
+
+
 # --------------------------------------------------------------------------- #
 # Исполнители нативных хуков ОС Windows
 # --------------------------------------------------------------------------- #
@@ -496,58 +518,42 @@ class HostExecutor:
         return res
 
     # --- Нативный ввод (мышь/клавиатура) для UI-TARS-управления хостом ----- #
-    @staticmethod
-    def _pyautogui():
-        try:
-            import pyautogui
-            pyautogui.FAILSAFE = False
-            return pyautogui
-        except Exception:  # noqa: BLE001
-            return None
-
-    async def _input_exec(self, fn) -> dict[str, Any]:
-        """Выполнить синхронный pyautogui-вызов в пуле потоков."""
-        pg = self._pyautogui()
-        if pg is None:
-            return {"returncode": 1,
-                    "stderr": "pyautogui не установлен (pip install pyautogui)."}
-        loop = asyncio.get_running_loop()
-
-        def _b() -> dict[str, Any]:
-            try:
-                fn(pg)
-                return {"returncode": 0, "stdout": "ok"}
-            except Exception as exc:  # noqa: BLE001
-                return {"returncode": 1, "stderr": str(exc)}
-
-        return await loop.run_in_executor(None, _b)
+    # Реализовано на PowerShell + user32 (SetCursorPos / mouse_event) и SendKeys,
+    # БЕЗ pyautogui — работает на любом Windows «из коробки».
+    _MOUSE_SIG = (
+        "$t=Add-Type -Name JMouse -Namespace JW -PassThru -MemberDefinition '"
+        "[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int x,int y);"
+        "[DllImport(\"user32.dll\")]public static extern void mouse_event"
+        "(uint f,uint dx,uint dy,uint d,int e);"
+        "';"
+    )
 
     async def mouse_move(self, x: int, y: int) -> dict[str, Any]:
-        return await self._input_exec(lambda pg: pg.moveTo(int(x), int(y)))
+        ps = self._MOUSE_SIG + f"$t::SetCursorPos({int(x)},{int(y)})"
+        return await self.powershell(ps, hidden=True)
 
     async def mouse_click(self, x: Optional[int] = None, y: Optional[int] = None,
                           button: str = "left", double: bool = False) -> dict[str, Any]:
-        def _do(pg):
-            kw = {"button": button}
-            if x is not None and y is not None:
-                kw.update(x=int(x), y=int(y))
-            (pg.doubleClick if double else pg.click)(**kw)
-        return await self._input_exec(_do)
-
-    async def type_text(self, text: str) -> dict[str, Any]:
-        return await self._input_exec(lambda pg: pg.typewrite(str(text), interval=0.01))
-
-    async def key_press(self, keys: str) -> dict[str, Any]:
-        # 'ctrl+s' → hotkey('ctrl','s'); 'enter' → press('enter')
-        parts = [k.strip() for k in str(keys).replace("+", " ").split() if k.strip()]
-        if not parts:
-            return {"returncode": 1, "stderr": "Не заданы клавиши."}
-        if len(parts) == 1:
-            return await self._input_exec(lambda pg: pg.press(parts[0]))
-        return await self._input_exec(lambda pg: pg.hotkey(*parts))
+        ps = self._MOUSE_SIG
+        if x is not None and y is not None:
+            ps += f"$t::SetCursorPos({int(x)},{int(y)});Start-Sleep -Milliseconds 80;"
+        down, up = (0x0008, 0x0010) if button == "right" else (0x0002, 0x0004)
+        one = f"$t::mouse_event({down},0,0,0,0);$t::mouse_event({up},0,0,0,0);"
+        ps += one + (("Start-Sleep -Milliseconds 60;" + one) if double else "")
+        return await self.powershell(ps, hidden=True)
 
     async def scroll(self, amount: int = -3) -> dict[str, Any]:
-        return await self._input_exec(lambda pg: pg.scroll(int(amount) * 120))
+        delta = (int(amount) * 120) & 0xFFFFFFFF   # 120 на «щелчок»; минус = вниз
+        ps = self._MOUSE_SIG + f"$t::mouse_event(0x0800,0,0,[uint32]{delta},0)"
+        return await self.powershell(ps, hidden=True)
+
+    async def type_text(self, text: str) -> dict[str, Any]:
+        """Ввести текст — надёжно через буфер обмена (юникод), а не посимвольно."""
+        return await self.paste_text(text)
+
+    async def key_press(self, keys: str) -> dict[str, Any]:
+        """Клавиши вида 'enter'/'ctrl+s' → синтаксис SendKeys ('{ENTER}'/'^s')."""
+        return await self.send_keys(_to_sendkeys(keys))
 
     async def kill_process(self, name: str) -> dict[str, Any]:
         """Завершить процесс по имени (деструктивно → проходит через HITL)."""

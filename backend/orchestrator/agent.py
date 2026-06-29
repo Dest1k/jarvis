@@ -54,6 +54,23 @@ _conversations = ConversationManager(_longterm, soft_budget_tokens=_SOFT_BUDGET)
 _registry = ToolRegistry()
 
 
+# Какая «модель/подсистема» отрабатывает инструмент — для визуализации в чате
+# (кто сейчас работает: диспетчер-мозг, UI-TARS-зрение, sandbox, хост, веб…).
+_TOOL_ACTOR = {
+    "gui": "ui-tars",
+    "run_code": "sandbox",
+    "windows": "host", "open_url": "host", "list_dir": "host", "system_info": "host",
+    "web_fetch": "web", "web_search": "web", "weather": "web", "wikipedia": "web",
+    "http_request": "web", "exchange_rate": "web", "define": "web",
+    "memory_save": "memory", "memory_search": "memory", "list_memory": "memory",
+    "calculator": "local", "now": "local",
+}
+
+
+def _actor_for(tool: str) -> str:
+    return _TOOL_ACTOR.get(tool, "host")
+
+
 # --------------------------------------------------------------------------- #
 # Системные промпты
 # --------------------------------------------------------------------------- #
@@ -99,10 +116,19 @@ def _planner_system() -> str:
         "• «Проанализируй проект/папку X» — list_dir(path), затем windows.read_file по "
         "ключевым файлам, потом сделай вывод по содержимому.\n"
         "• «Узнай/скажи погоду» — инструмент weather (город), НЕ web_search; перескажи словами.\n"
-        "• «Посчитай X» — calculator; «посчитай в калькуляторе» — open_app calc + calculator.\n"
-        "• Сохранить как файл / открыть в редакторе кода: windows.write_file(path,content), "
-        "затем open_app command='code \"<путь>\"'. Запустить/проверить код — run_code (sandbox).\n"
-        "• Управляющие клавиши — windows.send_keys ('^s','{ENTER}'). Системное — windows.exec/powershell."
+        "• ВЗАИМОДЕЙСТВИЕ С ОТКРЫТОЙ ПРОГРАММОЙ (нажать кнопки, кликнуть пункт меню, "
+        "выбрать элемент) — инструмент gui (UI-TARS видит экран и кликает мышью). "
+        "Вызывай gui повторно по шагам (каждый раз свежий скриншот) до результата.\n"
+        "• Клавиши в активном окне — windows.send_keys (синтаксис SendKeys). "
+        "Например калькулятор принимает клавиатуру: open_app calc, затем "
+        "send_keys keys='4*4=' → покажет 16. (Можно и просто посчитать инструментом "
+        "calculator и назвать ответ.)\n"
+        "• «Напиши код в VS Code» НАДЁЖНО: 1) windows.write_file (path, content) — "
+        "создать файл; 2) windows.open_app command='code \"<путь>\"' — открыть его в "
+        "редакторе (текст уже внутри). Печатать в уже открытый редактор: "
+        "send_keys '^n' (новый файл) → paste_text (вставить код).\n"
+        "• Запустить/проверить код по-настоящему — run_code (sandbox).\n"
+        "• Системное — windows.exec / windows.powershell."
     )
 
 
@@ -213,7 +239,7 @@ async def run_chat(session_id: str, user_text: str,
             action = str(plan.get("action", "answer")).strip()
             thought = str(plan.get("thought", "")).strip()
             if thought:
-                yield {"type": "thought", "text": thought}
+                yield {"type": "thought", "text": thought, "actor": "dispatcher"}
 
             if action in ("answer", "final", "respond", "done", ""):
                 break
@@ -237,27 +263,29 @@ async def run_chat(session_id: str, user_text: str,
             # лимит шагов MAX_STEPS и собственный статус done/fail.
             call_key = action + "::" + json.dumps(args, ensure_ascii=False, sort_keys=True)
             if action != "gui" and call_key in seen_calls:
-                yield {"type": "thought",
+                yield {"type": "thought", "actor": "dispatcher",
                        "text": "Этот шаг уже выполнен ранее — перехожу к ответу."}
                 break
             seen_calls.add(call_key)
 
-            yield {"type": "tool_call", "tool": action, "args": args}
+            actor = _actor_for(action)
+            yield {"type": "tool_call", "tool": action, "args": args, "actor": actor}
             result = await _registry.run(action, args, ctx)
             observation = result.get("content", "")
-            yield {"type": "tool_result", "tool": action,
+            yield {"type": "tool_result", "tool": action, "actor": actor,
                    "ok": bool(result.get("ok")), "summary": observation[:600]}
             scratch.append({"action": action, "args": args, "observation": observation})
         else:
             # исчерпан лимит шагов — переходим к ответу с тем, что есть
-            yield {"type": "thought",
+            yield {"type": "thought", "actor": "dispatcher",
                    "text": f"Достигнут лимит шагов ({MAX_STEPS}), формирую ответ."}
     except Exception as exc:  # noqa: BLE001
         log.exception("Сбой фазы планирования")
-        yield {"type": "thought", "text": f"Ошибка планирования: {exc}. Отвечаю напрямую."}
+        yield {"type": "thought", "actor": "dispatcher",
+               "text": f"Ошибка планирования: {exc}. Отвечаю напрямую."}
 
     # --- ФАЗА 2: потоковый ответ ---
-    yield {"type": "assistant_start"}
+    yield {"type": "assistant_start", "actor": "dispatcher"}
     final_text = ""
     try:
         messages = await _answer_messages(session_id, scratch)
