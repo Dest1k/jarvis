@@ -88,6 +88,12 @@ curl -s http://localhost:8003/health && echo "  Audio OK"
 
 Профили в [`wsl/profiles.json`](../wsl/profiles.json). Применение — кнопкой в
 Пульте (**🎛️ Профиль системы**) или `python jarvis.py up --profile <id>`.
+
+> `up --profile <id>` делает всё одной командой: пишет vLLM-параметры в `wsl/.env`,
+> **автоматически докачивает модели профиля** (`hf_downloader.py`, идемпотентно;
+> gated-модели вроде Gemma требуют токен в `hf_token.txt`), синхронизирует веса в
+> ext4-том (динамически по профилю) и поднимает стек.
+
 Served-model-name остаётся `qwen-coder`/`ui-tars` в любом профиле — код агента
 менять не нужно. Числа ниже — **ориентировочные**.
 

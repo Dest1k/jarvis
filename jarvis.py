@@ -107,36 +107,78 @@ def cmd_dashboard() -> int:
     return 0
 
 
-def _data_dir_from_env() -> str:
-    """Прочитать JARVIS_DATA_DIR из wsl/.env (для синхронизации весов в том)."""
+def _env_value(key: str) -> str:
+    """Прочитать значение переменной из wsl/.env."""
     try:
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            if line.startswith("JARVIS_DATA_DIR="):
+            if line.startswith(key + "="):
                 return line.split("=", 1)[1].strip()
     except Exception:  # noqa: BLE001
         pass
     return ""
 
 
-def sync_models() -> None:
-    """Скопировать веса из host-папки (9P) в ext4-том jarvis-models (как в bootstrap)."""
+def _data_dir_from_env() -> str:
+    """JARVIS_DATA_DIR из wsl/.env (для синхронизации весов в том)."""
+    return _env_value("JARVIS_DATA_DIR")
+
+
+def _current_model_dirs() -> list[str]:
+    """Имена папок моделей текущего .env (диспетчер + GUI) — что синхронизировать."""
+    names: set[str] = set()
+    for key, default in (("JARVIS_QWEN_MODEL_PATH", "qwen-coder-14b"),
+                         ("JARVIS_UITARS_MODEL_PATH", "ui-tars")):
+        val = _env_value(key) or f"/models/{default}"
+        name = val.rstrip("/").split("/")[-1]
+        if name:
+            names.add(name)
+    return sorted(names)
+
+
+def sync_models(names: list[str] | None = None) -> None:
+    """
+    Скопировать веса из host-папки (9P) в ext4-том jarvis-models.
+
+    Каталоги берутся ДИНАМИЧЕСКИ из активного профиля/.env (а не зашиты), чтобы
+    работали любые модели (Gemma, UI-TARS-1.5 и т.д.), а не только дефолтные.
+    """
     data = _data_dir_from_env()
     if not data:
         return
+    names = names or _current_model_dirs()
+    if not names:
+        return
     src = f"{data}/models"
-    info("Синхронизация весов в ext4-том (нужно для стабильной загрузки vLLM)…")
-    # Те же каталоги, что в bootstrap (MODEL_LOCAL_DIRS): qwen-coder-14b, ui-tars.
-    # При смене модели (маркер .jarvis_repo разный) — чистим устаревшие шарды в томе.
-    inner = ('for n in qwen-coder-14b ui-tars; do '
-             'if [ -d "/src/$n" ]; then '
-             'sm=$(cat "/src/$n/.jarvis_repo" 2>/dev/null || echo ""); '
-             'dm=$(cat "/dest/$n/.jarvis_repo" 2>/dev/null || echo ""); '
-             'if [ "$sm" != "$dm" ] && [ -d "/dest/$n" ]; then '
-             'echo "  $n изменилась — пересоздаю"; rm -rf "/dest/$n"; fi; '
-             'echo "  $n"; cp -ru "/src/$n" /dest/; fi; done; '
-             'echo SYNC_DONE')
+    info(f"Синхронизация весов в ext4-том: {', '.join(names)} …")
+    namelist = " ".join(n for n in names if n.replace("-", "").replace("_", "").replace(".", "").isalnum())
+    inner = (f'for n in {namelist}; do '
+             'if [ -d "/src/$n" ]; then echo "  $n"; cp -ru "/src/$n" /dest/; '
+             'else echo "  [нет в data/models] $n"; fi; done; echo SYNC_DONE')
     subprocess.run(["docker", "run", "--rm", "-v", "jarvis-models:/dest",
                     "-v", f"{src}:/src:ro", "alpine", "sh", "-c", inner])
+
+
+def download_profile_models(profile_id: str) -> None:
+    """
+    Докачать модели профиля (диспетчер + GUI) через hf_downloader.py.
+
+    Идемпотентно: hf_downloader пропускает уже скачанное (проверка sha256, докачка
+    по Range). Для gated-моделей (Gemma) нужен токен в hf_token.txt.
+    """
+    prof = _load_profiles().get(profile_id)
+    if not prof:
+        return
+    data = _data_dir_from_env()
+    base = f"{data}/models" if data else "data/models"
+    for part in ("dispatcher", "gui"):
+        p = prof.get(part, {})
+        repo, name = p.get("repo", ""), p.get("name", "")
+        if not repo or not name:
+            continue
+        dest = f"{base}/{name}"
+        info(f"Модель профиля: {repo} → {dest}")
+        info("(уже скачанное не качается заново; gated-модели требуют hf_token.txt)")
+        run([sys.executable, "hf_downloader.py", repo, "--dest", dest], cwd=ROOT)
 
 
 def _load_profiles() -> dict:
@@ -181,8 +223,8 @@ def apply_profile(profile_id: str) -> bool:
         lines.append(f"{k}={v}")
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     info(f"Применён профиль '{profile_id}': {prof.get('label', '')}")
-    info("ВНИМАНИЕ: модели профиля должны быть скачаны в data/models "
-         "(Пульт → «Скачать модели профиля», либо hf_downloader.py).")
+    info("Параметры vLLM записаны в wsl/.env; модели профиля скачаются "
+         "автоматически на следующем шаге (gated-модели требуют hf_token.txt).")
     return True
 
 
@@ -192,13 +234,18 @@ def cmd_up(profile: str | None = None) -> int:
         info("Запустите установку: python jarvis.py install")
         return 1
     if profile:
-        apply_profile(profile)
+        if not apply_profile(profile):
+            return 1
     ensure_pydeps()
+    if profile:
+        # Автоскачивание моделей профиля (идемпотентно) ПЕРЕД подъёмом стека.
+        info("Скачиваю/проверяю модели профиля (может занять время при первом разе)…")
+        download_profile_models(profile)
     os.environ.setdefault("DOCKER_BUILDKIT", "1")
 
     cmd_bridge()
 
-    sync_models()  # веса должны быть в ext4-томе, иначе vLLM упадёт на 9P
+    sync_models()  # веса (по активному профилю) копируются в ext4-том
 
     info("Поднимаю контейнерный стек (docker compose up -d)…")
     run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE),
