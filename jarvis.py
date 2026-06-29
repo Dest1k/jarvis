@@ -250,8 +250,14 @@ def up_stack_sequential() -> None:
     info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
     _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
              "--no-deps", "vllm-ui-tars")
-    info("Аудио, ядро, sandbox…")
-    _compose("up", "-d", "--remove-orphans")
+    info("Аудио, ядро, sandbox… (--build: подхватываю свежий код после git pull)")
+    # --build обязателен: код ядра (orchestrator/) и mcp_servers.json ЗАШИТЫ в
+    # образ jarvis/backend (не монтируются томом), поэтому после `git pull` без
+    # пересборки контейнер крутил бы старый код. Слои с зависимостями кешируются
+    # (BuildKit), так что при неизменных requirements пересборка быстрая —
+    # переигрываются только COPY-слои. vLLM-сервисы собственного образа не имеют
+    # (image:), их --build не трогает.
+    _compose("up", "-d", "--build", "--remove-orphans")
 
 
 def cmd_freevram() -> int:

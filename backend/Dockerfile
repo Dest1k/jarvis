@@ -29,15 +29,25 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 # MCP (ОФФЛАЙН-вендоринг): SDK + python-серверы (fetch/time/git/sqlite) и
-# TS-серверы глобально через npm (filesystem/memory/sequential-thinking).
-# Сбой установки НЕ ломает образ — агент деградирует и работает без MCP.
+# TS-серверы глобально через npm (filesystem/memory/sequential-thinking/
+# everything/playwright). Набор 1-в-1 совпадает с mcp_servers.json — все
+# серверы зашиты в образ, в рантайме сеть для них не нужна (включаются флагом
+# enabled). Сбой установки НЕ ломает образ — агент деградирует и работает без MCP.
+#
+# ВАЖНО: ставим с `-c constraints.txt`, иначе pip обновит starlette под mcp и
+# уронит уже установленный FastAPI 0.115.6 (Router.__init__ on_startup). Замок
+# держит ядро ASGI-стека неизменным; несовместимый MCP просто не встанет.
+COPY constraints.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install mcp mcp-server-fetch mcp-server-time mcp-server-git mcp-server-sqlite \
+    pip install -c constraints.txt \
+        mcp mcp-server-fetch mcp-server-time mcp-server-git mcp-server-sqlite \
     || echo "[warn] MCP python-серверы не установились — агент будет без них"
 RUN npm install -g --no-fund --no-audit \
         @modelcontextprotocol/server-filesystem \
         @modelcontextprotocol/server-memory \
         @modelcontextprotocol/server-sequential-thinking \
+        @modelcontextprotocol/server-everything \
+        @playwright/mcp \
     || echo "[warn] MCP npm-серверы не установились"
 
 COPY server.py ./
