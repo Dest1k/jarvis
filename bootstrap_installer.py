@@ -1070,6 +1070,29 @@ def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model:
     # Docker Desktop принимает Windows-путь с прямыми слэшами
     home_host = str(JARVIS_HOME).replace("\\", "/")
     data_host = _docker_path(data_dir)
+    # Зрение/GUI и вкл/выкл отдельного UI-TARS. По умолчанию — классика (UI-TARS
+    # как отдельный модуль зрения). Если установку явно запускают в СОЛО-режиме
+    # (JARVIS_ENABLE_UITARS=0 — единый мультимодальный мозг видит экран сам),
+    # сразу пишем согласованные ключи: сервис UI-TARS выключен (COMPOSE_PROFILES
+    # пуст), а «зрение» маршрутизируется на диспетчер. Обычно соло включают
+    # профилем gemma4-solo уже после установки. См. wsl/profiles.json.
+    uitars_on = os.environ.get("JARVIS_ENABLE_UITARS", "1") != "0"
+    if uitars_on:
+        vision_env = (
+            "JARVIS_ENABLE_UITARS=1\n"
+            "COMPOSE_PROFILES=uitars\n"
+            "JARVIS_VISION_URL=http://vllm-ui-tars:8002/v1\n"
+            "JARVIS_VISION_MODEL=ui-tars\n"
+            "JARVIS_GUI_ACTOR=ui-tars"
+        )
+    else:
+        vision_env = (
+            "JARVIS_ENABLE_UITARS=0\n"
+            "COMPOSE_PROFILES=\n"
+            "JARVIS_VISION_URL=http://vllm-qwen-coder:8001/v1\n"
+            "JARVIS_VISION_MODEL=qwen-coder\n"
+            "JARVIS_GUI_ACTOR=dispatcher"
+        )
     env = textwrap.dedent(f"""\
         # Сгенерировано bootstrap_installer.py — переменные для docker compose
         JARVIS_QWEN_MODEL={qwen_model}
@@ -1077,6 +1100,8 @@ def write_compose_env(profile: DeploymentProfile, qwen_model: str, uitars_model:
         JARVIS_QWEN_GPU_UTIL={profile.qwen_gpu_util}
         JARVIS_QWEN_MAX_LEN={profile.qwen_max_model_len}
         JARVIS_UITARS_GPU_UTIL={profile.uitars_gpu_util}
+        # Маршрутизация зрения/GUI и вкл/выкл отдельного UI-TARS (см. ниже).
+        {vision_env}
         JARVIS_HOME_HOST={home_host}
         # Тяжёлые данные (веса моделей, кэш HF, sandbox) живут на целевом диске:
         JARVIS_DATA_DIR={data_host}

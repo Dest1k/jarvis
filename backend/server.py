@@ -548,18 +548,30 @@ async def control_profile(payload: dict[str, Any]) -> JSONResponse:
         env = {**disp.get("env", {}), **gui.get("env", {})}
         await _update_env_vars(env)
         base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
-        # Стоп GPU-сервисов (освободить VRAM) → ПОСЛЕДОВАТЕЛЬНЫЙ старт: диспетчер
-        # с --wait (дождаться полной загрузки!) → затем UI-TARS → аудио/ядро.
-        # Это обязательно: второй vLLM-инстанс должен профилировать память уже
-        # после первого, иначе оба не помещаются (кумулятивный util).
-        seq = (
-            f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
-            f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
-            f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars & '
-            f'{base} up -d audio-layer backend sandbox'
-        )
+        # СОЛО-режим (единый мозг Gemma-4) определяется флагом профиля или
+        # JARVIS_ENABLE_UITARS=0: отдельный UI-TARS не нужен и не поднимается.
+        solo = bool(prof.get("solo")) or env.get("JARVIS_ENABLE_UITARS") == "0"
+        if solo:
+            # Один vLLM-инстанс. Стоп прежних GPU-сервисов (в т.ч. UI-TARS —
+            # освободить VRAM) → старт мозга с --wait → аудио/ядро/sandbox.
+            seq = (
+                f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+                f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
+                f'{base} up -d --build audio-layer backend sandbox'
+            )
+        else:
+            # Стоп GPU-сервисов (освободить VRAM) → ПОСЛЕДОВАТЕЛЬНЫЙ старт: диспетчер
+            # с --wait (дождаться полной загрузки!) → затем UI-TARS → аудио/ядро.
+            # Это обязательно: второй vLLM-инстанс должен профилировать память уже
+            # после первого, иначе оба не помещаются (кумулятивный util).
+            seq = (
+                f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+                f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
+                f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars & '
+                f'{base} up -d audio-layer backend sandbox'
+            )
         await _host_exec(f'start "jarvis-profile" cmd /c "{seq}"')
-        return JSONResponse({"ok": True, "applied": pid, "started": True})
+        return JSONResponse({"ok": True, "applied": pid, "started": True, "solo": solo})
 
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 

@@ -98,6 +98,13 @@ services:
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
+    # UI-TARS — ОПЦИОНАЛЬНЫЙ модуль зрения, вынесен в compose-profile "uitars".
+    # Он стартует только когда профиль включён (COMPOSE_PROFILES=uitars в wsl/.env
+    # — его проставляют классические системные профили) ЛИБО когда сервис назван
+    # явно в команде (последовательный старт это делает). В СОЛО-режиме Gemma-4
+    # (gemma4-solo) COMPOSE_PROFILES пуст → этот сервис не поднимается, а GUI
+    # видит сам мозг-диспетчер. Сервис остаётся в файле и виден в Пульте.
+    profiles: ["uitars"]
     # Лёгкий UI-TARS-2B вместо 7B: 2B (~4.2 ГБ FP16) комфортно живёт рядом с
     # Qwen-14B, тогда как 7B-FP16 (~16 ГБ) не помещался втроём с аудио в 32 ГБ.
     # Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует этот сервис).
@@ -164,9 +171,9 @@ services:
       - jarvis-hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
-    depends_on:
-      vllm-ui-tars:
-        condition: service_started
+    # Аудио НЕ зависит от UI-TARS (тот опционален и может быть выключен в
+    # СОЛО-режиме). Порядок старта vLLM-инстансов обеспечивает лаунчер
+    # (jarvis.py / применение профиля), а не depends_on.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s
@@ -228,6 +235,15 @@ services:
       - JARVIS_UITARS_MODEL_NAME=ui-tars
       - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
       - JARVIS_UITARS_MAX_LEN=8192
+      # Маршрутизация «зрения»/GUI-контроля (инструмент gui). По умолчанию —
+      # отдельный UI-TARS (обратная совместимость). СОЛО-профиль Gemma-4
+      # переопределяет это на сам диспетчер (Gemma видит экран сама):
+      #   JARVIS_VISION_URL=http://vllm-qwen-coder:8001/v1, JARVIS_VISION_MODEL=qwen-coder.
+      - JARVIS_VISION_URL=${JARVIS_VISION_URL:-http://vllm-ui-tars:8002/v1}
+      - JARVIS_VISION_MODEL=${JARVIS_VISION_MODEL:-ui-tars}
+      # Кто «работает» над GUI-шагом для визуализации в чате: dispatcher (соло) | ui-tars.
+      - JARVIS_GUI_ACTOR=${JARVIS_GUI_ACTOR:-ui-tars}
+      - JARVIS_ENABLE_UITARS=${JARVIS_ENABLE_UITARS:-1}
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
       # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).

@@ -370,8 +370,10 @@ export default function ControlPanel() {
           </div>
         )}
         <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
-          Классика (Qwen+TARS-2B) ↔ умный (Gemma-4-31B NVFP4 + UI-TARS-1.5-7B AWQ, KV-кэш fp8).
-          Из терминала: <code>python jarvis.py up --profile gemma4-tars15</code>.
+          <b>СОЛО (рекомендуется)</b> — единый мозг Gemma-4-26B-A4B: он же планирует,
+          кодит и САМ видит экран (UI-TARS выключен, но виден здесь). Классика
+          (Qwen+UI-TARS) и раздельные Gemma+UI-TARS — для отдельного модуля зрения.
+          Из терминала: <code>python jarvis.py up --profile gemma4-solo</code>.
         </p>
       </div>
 

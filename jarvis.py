@@ -123,11 +123,22 @@ def _data_dir_from_env() -> str:
     return _env_value("JARVIS_DATA_DIR")
 
 
+def _uitars_enabled() -> bool:
+    """Включён ли отдельный UI-TARS. В СОЛО-режиме Gemma-4 он выключен
+    (JARVIS_ENABLE_UITARS=0): зрение/GUI обслуживает сам мозг-диспетчер."""
+    return _env_value("JARVIS_ENABLE_UITARS") != "0"
+
+
 def _current_model_dirs() -> list[str]:
-    """Имена папок моделей текущего .env (диспетчер + GUI) — что синхронизировать."""
+    """Имена папок моделей текущего .env (диспетчер [+ GUI]) — что синхронизировать.
+
+    В СОЛО-режиме отдельной GUI-модели нет, поэтому UI-TARS из синка исключается.
+    """
     names: set[str] = set()
-    for key, default in (("JARVIS_QWEN_MODEL_PATH", "qwen-coder-14b"),
-                         ("JARVIS_UITARS_MODEL_PATH", "ui-tars")):
+    keys = [("JARVIS_QWEN_MODEL_PATH", "qwen-coder-14b")]
+    if _uitars_enabled():
+        keys.append(("JARVIS_UITARS_MODEL_PATH", "ui-tars"))
+    for key, default in keys:
         val = _env_value(key) or f"/models/{default}"
         name = val.rstrip("/").split("/")[-1]
         if name:
@@ -240,16 +251,26 @@ def free_vram() -> None:
 
 def up_stack_sequential() -> None:
     """
-    Поднять стек ПОСЛЕДОВАТЕЛЬНО: второй vLLM-инстанс должен профилировать память
+    Поднять стек ПОСЛЕДОВАТЕЛЬНО.
+
+    СОЛО-режим (gemma4-solo): один vLLM-инстанс — единый мозг Gemma-4, который сам
+    видит экран; UI-TARS выключен (JARVIS_ENABLE_UITARS=0) и не поднимается.
+
+    Раздельные профили (с UI-TARS): второй vLLM-инстанс должен профилировать память
     ПОСЛЕ полной загрузки первого, иначе оба не помещаются (см. кумулятивный util
     UI-TARS в profiles.json/.env). --wait ждёт healthcheck каждого vLLM.
     """
-    info("vLLM #1 (диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
+    info("vLLM #1 (мозг-диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
     _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
              "--no-deps", "vllm-qwen-coder")
-    info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
-    _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
-             "--no-deps", "vllm-ui-tars")
+    if _uitars_enabled():
+        info("vLLM #2 (UI-TARS, отдельное зрение) — поднимаю и ЖДУ готовности…")
+        _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
+                 "--no-deps", "vllm-ui-tars")
+    else:
+        info("СОЛО-режим: отдельный UI-TARS не нужен — зрение/GUI ведёт сам мозг. "
+             "Останавливаю UI-TARS, если был запущен…")
+        _compose("stop", "vllm-ui-tars")
     info("Аудио, ядро, sandbox… (--build: подхватываю свежий код после git pull)")
     # --build обязателен: код ядра (orchestrator/) и mcp_servers.json ЗАШИТЫ в
     # образ jarvis/backend (не монтируются томом), поэтому после `git pull` без
@@ -257,7 +278,9 @@ def up_stack_sequential() -> None:
     # (BuildKit), так что при неизменных requirements пересборка быстрая —
     # переигрываются только COPY-слои. vLLM-сервисы собственного образа не имеют
     # (image:), их --build не трогает.
-    _compose("up", "-d", "--build", "--remove-orphans")
+    # Сервисы перечислены явно (без --remove-orphans), чтобы не тронуть уже
+    # поднятые vLLM-инстансы и сервис UI-TARS под compose-профилем.
+    _compose("up", "-d", "--build", "audio-layer", "backend", "sandbox")
 
 
 def cmd_freevram() -> int:
@@ -304,6 +327,9 @@ def cmd_up(profile: str | None = None) -> int:
 
     info("=" * 60)
     info("Готово. Пульт управления: http://localhost:3000  (вкладка «Пульт»)")
+    if not _uitars_enabled():
+        info("Режим: СОЛО — единый мозг Gemma-4 (планирует, кодит и САМ видит "
+             "экран). Отдельный UI-TARS выключен.")
     info("vLLM-модели прогреваются 1-2 мин — следите за статусом в дашборде.")
     info("Остановить всё: python jarvis.py stop")
     info("=" * 60)
@@ -336,8 +362,9 @@ def main() -> int:
                    choices=["up", "install", "stop", "status", "dashboard", "bridge",
                             "profiles", "freevram"])
     p.add_argument("--profile", default=None,
-                   help="Профиль системы (диспетчер+GUI) перед запуском, см. "
-                        "`jarvis.py profiles`. Напр.: --profile gemma4-tars15")
+                   help="Профиль системы (мозг [+ зрение]) перед запуском, см. "
+                        "`jarvis.py profiles`. Соло-режим (единый мозг Gemma-4): "
+                        "--profile gemma4-solo")
     args, extra = p.parse_known_args()
 
     info("=" * 60)
