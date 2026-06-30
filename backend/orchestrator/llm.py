@@ -114,8 +114,15 @@ async def chat(
     max_tokens: int = 1024,
     timeout: float = 180.0,
     stop: Optional[list[str]] = None,
+    extra_body: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Неблокирующий НЕ-стриминговый чат-комплишен. Возвращает текст ответа."""
+    """
+    Неблокирующий НЕ-стриминговый чат-комплишен. Возвращает текст ответа.
+
+    extra_body — доп. поля для vLLM (он принимает их как расширения OpenAI-API):
+    repetition_penalty, top_k, min_p и т.п. Используется для UI-TARS, чтобы
+    гасить вырождение генерации («assistant assistant assistant…»).
+    """
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -125,6 +132,8 @@ async def chat(
     }
     if stop:
         body["stop"] = stop
+    if extra_body:
+        body.update(extra_body)
     cli = _get_client()
     r = await cli.post(f"{base_url}/chat/completions", json=body,
                        timeout=httpx.Timeout(timeout, connect=10.0))

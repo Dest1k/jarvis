@@ -25,7 +25,8 @@
         "JARVIS_UITARS_DTYPE": "half",
         "JARVIS_UITARS_GPU_UTIL": "0.75",
         "JARVIS_UITARS_MAX_LEN": "8192",
-        "JARVIS_UITARS_KV_DTYPE": "auto"
+        "JARVIS_UITARS_KV_DTYPE": "auto",
+        "JARVIS_UITARS_COORD_MODE": "normalized"
       }
     }
   },
@@ -54,7 +55,8 @@
         "JARVIS_UITARS_DTYPE": "half",
         "JARVIS_UITARS_GPU_UTIL": "0.90",
         "JARVIS_UITARS_MAX_LEN": "4096",
-        "JARVIS_UITARS_KV_DTYPE": "fp8"
+        "JARVIS_UITARS_KV_DTYPE": "fp8",
+        "JARVIS_UITARS_COORD_MODE": "normalized"
       }
     }
   },
@@ -83,7 +85,8 @@
         "JARVIS_UITARS_DTYPE": "half",
         "JARVIS_UITARS_GPU_UTIL": "0.72",
         "JARVIS_UITARS_MAX_LEN": "8192",
-        "JARVIS_UITARS_KV_DTYPE": "fp8"
+        "JARVIS_UITARS_KV_DTYPE": "fp8",
+        "JARVIS_UITARS_COORD_MODE": "absolute"
       }
     }
   }

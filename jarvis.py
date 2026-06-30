@@ -394,16 +394,80 @@ def cmd_install(extra: list[str]) -> int:
     return run([sys.executable, "install_agent.py", *extra], cwd=ROOT)
 
 
+HELP_TEXT = r"""
+============================================================
+  JARVIS-OS — локальный мультиагентный ассистент (Windows/Linux)
+  Мозг-диспетчер (Gemma/Qwen) + GUI-актуатор UI-TARS («TARS») + MCP + память
+============================================================
+
+КОМАНДЫ:
+  python jarvis.py up [--profile <id>]   Поднять ВСЁ: Docker → RPC-мост → стек
+                                          (vLLM ×2 + аудио + ядро + sandbox) →
+                                          дашборд → браузер. Без аргументов = up.
+  python jarvis.py stop                   Остановить контейнерный стек.
+  python jarvis.py status                 Статус контейнеров, моста, дашборда.
+  python jarvis.py profiles               Список профилей (мозг + GUI).
+  python jarvis.py dashboard              Только дашборд (Next.js, :3000).
+  python jarvis.py bridge                 Только RPC-мост хоста (:8765).
+  python jarvis.py freevram               Остановить vLLM/аудио — освободить VRAM.
+  python jarvis.py install                Полная первичная установка.
+  python jarvis.py help                   Этот экран.
+
+ПРОФИЛИ (мозг + GUI одним пресетом, см. `profiles`):
+  gemma12-tars7   ★ рекомендованный: Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ).
+  gemma4-tars15   Gemma-4-26B-A4B MoE (NVFP4) + UI-TARS-2B.
+  qwen-classic    Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B.
+
+ТИПИЧНЫЙ СЦЕНАРИЙ:
+  1) git pull origin main          # подтянуть свежий код (канон. ветка — main)
+  2) python jarvis.py up --profile gemma12-tars7
+  3) Открыть http://localhost:3000 → вкладка «Чат».
+
+ПОЛЕЗНОЕ:
+  • Сменить мозг/профиль на лету — вкладка «Пульт» в дашборде.
+  • «Мониторная» — живые логи всех контейнеров (туда смотреть при проблемах).
+  • Чистильщик (вкладка «Пульт») находит дубли моделей в ext4-томе и кэш HF.
+  • Порты: ядро :8000, vLLM :8001/:8002, аудио :8003, мост :8765, дашборд :3000.
+
+ДИАГНОСТИКА:
+  • «Docker не отвечает» — `up` сам поднимет Docker Desktop; либо запусти его и
+    дождись «Engine running».
+  • «RPC-мост: нет» — закрой окно «JARVIS RPC» и запусти `python jarvis.py up`
+    (или `python jarvis.py bridge`).
+  • vLLM падает на старте — глянь «Мониторную»; частая причина — мало VRAM
+    (возьми профиль gemma12-tars7) или неверный флаг.
+  • Окружение/модели — файл wsl/.env (редактор есть в «Пульте»).
+============================================================
+"""
+
+
+def cmd_help() -> int:
+    print(HELP_TEXT)
+    return 0
+
+
 def main() -> int:
     _utf8_console()
-    p = argparse.ArgumentParser(description="JARVIS-OS — единая точка запуска.")
+    p = argparse.ArgumentParser(
+        prog="jarvis.py",
+        description="JARVIS-OS — единая точка запуска (Windows/Linux). "
+                    "Без команды = `up`. Полная справка: `python jarvis.py help`.",
+        epilog="Примеры:\n"
+               "  python jarvis.py up --profile gemma12-tars7\n"
+               "  python jarvis.py status\n"
+               "  python jarvis.py help",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="up",
                    choices=["up", "install", "stop", "status", "dashboard", "bridge",
-                            "profiles", "freevram"])
+                            "profiles", "freevram", "help"],
+                   help="up|stop|status|profiles|dashboard|bridge|freevram|install|help")
     p.add_argument("--profile", default=None,
                    help="Профиль системы (диспетчер+GUI) перед запуском, см. "
-                        "`jarvis.py profiles`. Напр.: --profile gemma4-tars15")
+                        "`jarvis.py profiles`. Напр.: --profile gemma12-tars7")
     args, extra = p.parse_known_args()
+
+    if args.command == "help":
+        return cmd_help()
 
     info("=" * 60)
     info(f"JARVIS-OS · единый лаунчер · команда: {args.command}")

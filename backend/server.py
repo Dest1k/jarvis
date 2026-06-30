@@ -599,8 +599,31 @@ async def control_profile(payload: dict[str, Any]) -> JSONResponse:
 
 # --------------------------------------------------------------------------- #
 # СИСТЕМНЫЙ ЧИСТИЛЬЩИК — поиск и удаление мусора Docker / неиспользуемых моделей
-# Защита: НИКОГДА не трогает объекты с префиксом 'jarvis' и тома весов.
+# Защита: НИКОГДА не трогает объекты с префиксом 'jarvis' (контейнеры), но тома
+# весов (jarvis-models/jarvis-hf) ВНУТРИ умеет чистить по выбору пользователя —
+# именно там копятся дубликаты моделей (sync копирует data/models → ext4-том),
+# поэтому папка проекта и раздувается.
 # --------------------------------------------------------------------------- #
+def _env_var(env_text: str, key: str) -> str:
+    for line in (env_text or "").splitlines():
+        if line.strip().startswith(key + "="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+async def _du_mb(mount_arg: str) -> dict[str, int]:
+    """Размеры подпапок (МБ) внутри docker-маунта: имя → МБ (через alpine du)."""
+    r = await _host_exec(
+        f'docker run --rm {mount_arg} alpine sh -c '
+        f'"du -sm /m/* 2>/dev/null | sort -rn"')
+    out: dict[str, int] = {}
+    for line in (r.get("out") or "").splitlines():
+        mt = re.match(r"\s*(\d+)\s+\S*?/([^/\s]+)\s*$", line)
+        if mt:
+            out[mt.group(2)] = int(mt.group(1))
+    return out
+
+
 @app.post("/api/control/cleanup")
 async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
     """check — найти мусор; clean — удалить выбранное."""
@@ -614,13 +637,33 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
         stopped = await _host_exec(
             'docker ps -a --filter status=exited --format "{{.Names}}|{{.Image}}|{{.Status}}"')
         vols = await _host_exec('docker volume ls -f dangling=true --format "{{.Name}}"')
-        models_out = await _host_exec("cmd /c dir /b data\\models")
         env_text = (await bridge.call("read_file", {"path": ENV_FILE})
                     ).get("result", {}).get("stdout", "")
+        data_dir = _env_var(env_text, "JARVIS_DATA_DIR") or "../data"
 
-        model_dirs = [m.strip() for m in models_out["out"].splitlines() if m.strip()]
-        referenced = [d for d in model_dirs if d in env_text]
-        # анонимные тома и остановленные контейнеры — без jarvis-объектов
+        # Размеры: модели-источники (data/models на диске) И их КОПИИ в ext4-томе
+        # jarvis-models (главный источник дублей), плюс кэш HF (jarvis-hf).
+        data_sizes = await _du_mb(f'-v "{data_dir}/models:/m:ro"')
+        vol_sizes = await _du_mb('-v jarvis-models:/m:ro')
+        hf = await _host_exec(
+            'docker run --rm -v jarvis-hf:/m:ro alpine sh -c '
+            '"du -sm /m 2>/dev/null | tail -1"')
+        hf_mb = 0
+        hfm = re.match(r"\s*(\d+)", hf.get("out") or "")
+        if hfm:
+            hf_mb = int(hfm.group(1))
+
+        def _referenced(name: str) -> bool:
+            return name in env_text
+
+        model_dirs = sorted(data_sizes) or [
+            m.strip() for m in (await _host_exec("cmd /c dir /b data\\models"))["out"].splitlines()
+            if m.strip()]
+        referenced = [d for d in model_dirs if _referenced(d)]
+        # дубли/мусор в ext4-томе: модели, которых нет в активном .env
+        vol_models = [{"name": n, "mb": mb, "referenced": _referenced(n)}
+                      for n, mb in sorted(vol_sizes.items(), key=lambda x: -x[1])]
+
         anon_volumes = [v.strip() for v in vols["out"].splitlines()
                         if v.strip() and not v.strip().startswith(PROTECTED_PREFIX)]
         stopped_ctrs = [s.strip() for s in stopped["out"].splitlines()
@@ -634,15 +677,19 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
             "stopped_containers": stopped_ctrs,
             "anon_volumes": anon_volumes,
             "model_dirs": model_dirs,
+            "model_sizes_mb": data_sizes,        # data/models: имя → МБ
             "referenced_models": referenced,
-            "unused_models": [d for d in model_dirs if d not in referenced],
+            "unused_models": [d for d in model_dirs if not _referenced(d)],
+            "vol_models": vol_models,            # КОПИИ в ext4-томе (дубли!) с МБ
+            "hf_cache_mb": hf_mb,                # кэш HF (Whisper/Kokoro)
         })
 
     if action == "clean":
         cats = payload.get("categories", []) or []
         volumes = payload.get("volumes", []) or []
         containers = payload.get("containers", []) or []
-        models = payload.get("models", []) or []
+        models = payload.get("models", []) or []       # из data/models (диск)
+        vol_models = payload.get("vol_models", []) or []  # из ext4-тома jarvis-models
         log_lines: list[str] = []
 
         async def _run(label: str, cmd: str) -> None:
@@ -653,6 +700,9 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
             await _run("docker image prune -f", "docker image prune -f")
         if "build_cache" in cats:
             await _run("docker builder prune -f", "docker builder prune -f")
+        if "hf_cache" in cats:
+            await _run("очистка кэша HF",
+                       'docker run --rm -v jarvis-hf:/m alpine sh -c "rm -rf /m/*"')
         for v in volumes:
             if _safe_token(v) and not v.startswith(PROTECTED_PREFIX):
                 await _run(f"volume rm {v}", f"docker volume rm {v}")
@@ -663,6 +713,11 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
             # rmdir деструктивен → пройдёт HITL-гейт моста (доп. подтверждение).
             if _safe_token(m):
                 await _run(f"rmdir models/{m}", f"cmd /c rmdir /s /q data\\models\\{m}")
+        for m in vol_models:
+            # удаление КОПИИ модели из ext4-тома (главный источник дублей)
+            if _safe_token(m):
+                await _run(f"том jarvis-models: rm {m}",
+                           f'docker run --rm -v jarvis-models:/m alpine rm -rf "/m/{m}"')
         return JSONResponse({"ok": True, "log": "\n\n".join(log_lines) or "Нечего удалять."})
 
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)

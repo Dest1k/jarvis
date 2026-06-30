@@ -50,6 +50,11 @@ interface Overview {
   bridge_connected: boolean;
 }
 
+function fmtMb(mb: number): string {
+  if (!mb) return "0 МБ";
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${mb} МБ`;
+}
+
 async function postJson(url: string, body: unknown) {
   const r = await fetch(url, {
     method: "POST",
@@ -72,8 +77,9 @@ export default function ControlPanel() {
   const [cleanup, setCleanup] = useState<any | null>(null);
   const [mcp, setMcp] = useState<any | null>(null);
   const [cleanSel, setCleanSel] = useState<{
-    cats: string[]; volumes: string[]; containers: string[]; models: string[];
-  }>({ cats: [], volumes: [], containers: [], models: [] });
+    cats: string[]; volumes: string[]; containers: string[];
+    models: string[]; volModels: string[];
+  }>({ cats: [], volumes: [], containers: [], models: [], volModels: [] });
 
   const refresh = useCallback(async () => {
     try {
@@ -198,7 +204,7 @@ export default function ControlPanel() {
   const cleanupCheck = async () => {
     setBusy("clean-check");
     setCleanup(null);
-    setCleanSel({ cats: [], volumes: [], containers: [], models: [] });
+    setCleanSel({ cats: [], volumes: [], containers: [], models: [], volModels: [] });
     const r = await fetch(`${API}/cleanup`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "check" }),
@@ -208,13 +214,14 @@ export default function ControlPanel() {
   };
   const cleanupClean = async () => {
     const total = cleanSel.cats.length + cleanSel.volumes.length +
-      cleanSel.containers.length + cleanSel.models.length;
+      cleanSel.containers.length + cleanSel.models.length + cleanSel.volModels.length;
     if (total === 0) { alert("Ничего не выбрано."); return; }
     if (!confirm(`Удалить выбранное (${total} поз.)? Действие необратимо.`)) return;
     setBusy("clean-do");
     const d = await postJson(`${API}/cleanup`, {
       action: "clean", categories: cleanSel.cats, volumes: cleanSel.volumes,
       containers: cleanSel.containers, models: cleanSel.models,
+      vol_models: cleanSel.volModels,
     });
     setBusy("");
     alert("Результат:\n" + String(d.log || "").slice(0, 2000));
@@ -507,19 +514,49 @@ export default function ControlPanel() {
             )}
             {cleanup.model_dirs?.length > 0 && (
               <div>
-                <strong style={{ fontSize: 13 }}>Локальные модели (data/models):</strong>
+                <strong style={{ fontSize: 13 }}>Локальные модели — источники (data/models):</strong>
                 {cleanup.model_dirs.map((m: string) => {
                   const used = cleanup.referenced_models?.includes(m);
+                  const sz = cleanup.model_sizes_mb?.[m];
                   return (
                     <label key={m} style={{ display: "block", fontSize: 12,
                                              color: used ? "var(--warn)" : "var(--text)" }}>
                       <input type="checkbox" checked={cleanSel.models.includes(m)}
                         onChange={() => setCleanSel((s) => ({ ...s, models: tog(s.models, m) }))} />{" "}
-                      {m} {used ? "⚠ используется текущим профилем" : "(не используется)"}
+                      {m} {sz ? `· ${fmtMb(sz)}` : ""}{" "}
+                      {used ? "⚠ используется текущим профилем" : "(не используется)"}
                     </label>
                   );
                 })}
               </div>
+            )}
+            {cleanup.vol_models?.length > 0 && (
+              <div>
+                <strong style={{ fontSize: 13 }}>
+                  Копии моделей в ext4-томе jarvis-models (главный источник дублей):
+                </strong>
+                <p style={{ fontSize: 11, color: "var(--muted)", margin: "2px 0 4px" }}>
+                  Сюда sync копирует веса для vLLM. Неиспользуемые копии можно смело
+                  удалить — при необходимости пересоздадутся из data/models.
+                </p>
+                {cleanup.vol_models.map((vm: { name: string; mb: number; referenced: boolean }) => (
+                  <label key={vm.name} style={{ display: "block", fontSize: 12,
+                            color: vm.referenced ? "var(--warn)" : "var(--text)" }}>
+                    <input type="checkbox" checked={cleanSel.volModels.includes(vm.name)}
+                      onChange={() => setCleanSel((s) => ({ ...s, volModels: tog(s.volModels, vm.name) }))} />{" "}
+                    {vm.name} · {fmtMb(vm.mb)}{" "}
+                    {vm.referenced ? "⚠ активна сейчас" : "(дубль/не используется)"}
+                  </label>
+                ))}
+              </div>
+            )}
+            {cleanup.hf_cache_mb > 0 && (
+              <label style={{ display: "block", fontSize: 12 }}>
+                <input type="checkbox" checked={cleanSel.cats.includes("hf_cache")}
+                  onChange={() => setCleanSel((s) => ({ ...s, cats: tog(s.cats, "hf_cache") }))} />{" "}
+                Кэш HuggingFace (Whisper/Kokoro) · {fmtMb(cleanup.hf_cache_mb)} — удаление
+                заставит аудио-слой докачать веса при следующем старте
+              </label>
             )}
           </div>
         )}

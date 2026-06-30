@@ -239,6 +239,9 @@ services:
       - JARVIS_UITARS_MODEL_NAME=ui-tars
       - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
       - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-8192}
+      # Система координат UI-TARS: 2B-SFT=normalized (0-1000), 1.5-7B/2.0=absolute.
+      # Задаётся профилем (см. profiles.json); auto — эвристика по величине.
+      - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
       # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).

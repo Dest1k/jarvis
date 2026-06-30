@@ -617,25 +617,35 @@ class WindowsHostExecutor(HostExecutor):
         runtime_dir = JARVIS_HOME / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         out = out_path or str(runtime_dir / f"shot_{int(time.time())}.jpg")
-        # JPEG вместо PNG: скриншот 4K в PNG ~10-20 МБ — по WebSocket это грузит
-        # мост, копит паузы json.loads и сериализации и РВЁТ keep-alive (мост
-        # «отваливается» во время GUI-цикла). JPEG ~1-2 МБ при том же качестве для
-        # распознавания UI. Размеры экрана печатаем строкой 'DIM W H' — из JPEG их
-        # не прочитать, а они нужны для маппинга координат UI-TARS.
+        # JPEG + УЖАТИЕ до ~1 Мпикс (бюджет процессора Qwen-VL): 4K PNG ~10-20 МБ
+        # грузил мост и РВАЛ keep-alive («мост отваливается» в GUI-цикле). Ужатая
+        # JPEG ~150-400 КБ. Внутри бюджета процессор НЕ ресайзит картинку повторно,
+        # поэтому UI-TARS выдаёт координаты ровно в размерах присланного кадра.
+        # Печатаем 'DIM <экран W H> IMG <кадр W H>': первое — для итогового клика по
+        # экрану, второе — база для абсолютных координат модели.
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
             "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
             "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
             "$g=[System.Drawing.Graphics]::FromImage($bmp);"
             "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
-            "Write-Output ('DIM ' + $b.Width + ' ' + $b.Height);"
-            f"$bmp.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Jpeg);"
+            "$sw=$b.Width;$sh=$b.Height;"
+            "$scale=[Math]::Min(1.0,[Math]::Min(1280.0/[Math]::Max($sw,$sh),"
+            "[Math]::Sqrt(1000000.0/($sw*$sh))));"
+            "if($scale -lt 1.0){$iw=[int]($sw*$scale);$ih=[int]($sh*$scale);"
+            "$img=New-Object System.Drawing.Bitmap $bmp,$iw,$ih}"
+            "else{$img=$bmp;$iw=$sw;$ih=$sh};"
+            "Write-Output ('DIM ' + $sw + ' ' + $sh + ' IMG ' + $iw + ' ' + $ih);"
+            f"$img.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Jpeg);"
         )
         res = await self.powershell(ps)
         res["path"] = out
-        m = re.search(r"DIM\s+(\d+)\s+(\d+)", res.get("stdout", "") or "")
+        stdout = res.get("stdout", "") or ""
+        m = re.search(r"DIM\s+(\d+)\s+(\d+)(?:\s+IMG\s+(\d+)\s+(\d+))?", stdout)
         if m:
             res["screen_w"], res["screen_h"] = int(m.group(1)), int(m.group(2))
+            if m.group(3):
+                res["img_w"], res["img_h"] = int(m.group(3)), int(m.group(4))
         if return_b64:
             try:
                 data = Path(out).read_bytes()

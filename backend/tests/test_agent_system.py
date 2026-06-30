@@ -65,7 +65,8 @@ def install_fake_llm(planner_script, uitars_script=None, answer="Готово.")
     uitars = list(uitars_script or [])
 
     async def fake_chat(messages, *, base_url=llm.QWEN_URL, model=llm.QWEN_MODEL,
-                        temperature=0.2, max_tokens=1024, timeout=180, stop=None):
+                        temperature=0.2, max_tokens=1024, timeout=180, stop=None,
+                        extra_body=None):
         if base_url == llm.UITARS_URL:
             return uitars.pop(0) if uitars else "Thought: done\nAction: finished(content='ok')"
         sys_txt = messages[0].get("content", "") if messages else ""
@@ -176,7 +177,19 @@ async def test_parse_uitars_actions():
     assert a["kind"] == "finished", a
     a = p("Thought: ok\nAction: click(point='(700,800)')")  # формат UI-TARS-1.5
     assert a["x"] == 700 and a["y"] == 800, a
-    return "разбор действий UI-TARS (5 форматов)"
+    # box-токены UI-TARS-1.5/2.0
+    a = p("Action: click(start_box='<|box_start|>(640,360)<|box_end|>')")
+    assert a["x"] == 640 and a["y"] == 360, a
+    # ведущий мусор '<' (как в реальном логе) — всё равно парсим
+    a = p("Thought: жму\nAction: < click(start_box='(11,22)')")
+    assert a and a["kind"] == "click" and a["x"] == 11, a
+    # координаты через пробел без запятой
+    a = p("Action: click(start_box='(120 240)')")
+    assert a["x"] == 120 and a["y"] == 240, a
+    # чистый мусор (вырождение) → None, не падаем
+    assert p("assistant assistant assistant assistant") is None
+    assert p("") is None
+    return "разбор действий UI-TARS (форматы + box-токены + мусор)"
 
 
 # --------------------------------------------------------------------------- #
