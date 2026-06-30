@@ -68,7 +68,6 @@ services:
     # ОПТИМИЗАЦИИ:
     #  --enable-prefix-caching: переиспользует KV одинаковых префиксов (наш
     #    системный промпт диспетчера повторяется на каждом шаге ReAct → ускорение).
-    #  --disable-log-requests: убирает построчный лог каждого запроса (меньше CPU/IO).
     #  enforce-eager: по умолчанию ВКЛ (стабильный старт на Blackwell sm_120, меньше
     #    VRAM). Для ~10-20% ускорения декодинга включите CUDA-графы, задав в .env
     #    JARVIS_QWEN_ENFORCE_EAGER= (пусто). Профиль gemma12-tars7 имеет запас VRAM.
@@ -82,7 +81,6 @@ services:
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
       --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
       --enable-prefix-caching
-      --disable-log-requests
       --max-num-seqs 8
       --host 0.0.0.0
       --port 8001
@@ -132,7 +130,6 @@ services:
       --gpu-memory-utilization ${JARVIS_UITARS_GPU_UTIL:-0.75}
       --kv-cache-dtype ${JARVIS_UITARS_KV_DTYPE:-auto}
       --enable-prefix-caching
-      --disable-log-requests
       --max-num-seqs 4
       --host 0.0.0.0
       --port 8002
