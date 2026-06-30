@@ -302,6 +302,52 @@ class GuiAgent:
             pass
 
 
+_DESCRIBE_SYSTEM = (
+    "You are a precise vision assistant looking at a screenshot of a computer screen. "
+    "Describe what is actually visible: the foreground/active window and its title, "
+    "open applications, taskbar, desktop icons, key buttons/menus and any readable "
+    "text. Be concrete and factual — do NOT guess or invent. "
+    "Answer in RUSSIAN, в 3-7 коротких пунктов."
+)
+
+
+async def describe_screen(bridge: Any, question: str = "") -> dict[str, Any]:
+    """
+    Снять скриншот и ОПИСАТЬ словами, что на экране (через зрение UI-TARS).
+    Это «глаза» оркестратора: позволяет ответить «что на рабочем столе/экране».
+    Возвращает {ok, content}.
+    """
+    if bridge is None:
+        return {"ok": False, "content": "RPC-мост недоступен — не вижу экран."}
+    shot = await bridge.call("screenshot", {"return_b64": True})
+    result = (shot.get("result", {}) or {})
+    img = result.get("image_b64")
+    if not shot.get("ok") or not img:
+        return {"ok": False,
+                "content": f"Не удалось снять скриншот: {shot.get('error', 'нет image_b64')}."}
+    fmt = result.get("image_fmt", "png")
+    q = (question or "").strip()
+    user_text = ("Опиши, что сейчас на экране." if not q
+                 else f"Глядя на экран, ответь: {q}")
+    messages = [
+        {"role": "system", "content": _DESCRIBE_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url",
+             "image_url": {"url": f"data:image/{fmt};base64,{img}"}},
+        ]},
+    ]
+    try:
+        text = await llm.chat(messages, base_url=llm.UITARS_URL, model=llm.UITARS_MODEL,
+                              temperature=0.1, max_tokens=400, timeout=90,
+                              stop=["<|im_end|>", "<|im_start|>"],
+                              extra_body={"repetition_penalty": 1.1})
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "content": f"Зрение недоступно: {exc}"}
+    text = (text or "").strip()
+    return {"ok": bool(text), "content": text or "Экран пуст или описание не получено."}
+
+
 # --------------------------------------------------------------------------- #
 # Разбор ответа UI-TARS — максимально толерантный к версиям и мусору.
 # Поддержка: 'Action: click(start_box='(x,y)')', point='<point>x y</point>',

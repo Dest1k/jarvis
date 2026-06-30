@@ -249,10 +249,16 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
     res = await ctx.bridge.call(action, payload)
     if not res.get("ok"):
-        err = res.get("error", "ошибка")
+        # Настоящая причина неуспеха команды лежит в result.stderr/stdout (ненулевой
+        # код возврата), а res["error"] — только для транспортных/HITL-сбоев. Раньше
+        # код смотрел лишь в error и выдавал бесполезное «ошибка», теряя stderr
+        # (модель не понимала, что не так). Поднимаем реальный вывод.
+        result = res.get("result", {}) or {}
+        out = ((result.get("stderr") or "") + (result.get("stdout") or "")).strip()
+        err = res.get("error") or out or "команда завершилась с ненулевым кодом"
         if res.get("halted"):
             return {"ok": False, "content": f"Операция остановлена HITL-гейтом: {err}"}
-        return {"ok": False, "content": f"Хост вернул ошибку: {err}"}
+        return {"ok": False, "content": _truncate(f"Команда завершилась с ошибкой:\n{err}")}
     result = res.get("result", {}) or {}
     out = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
     if out:
@@ -302,6 +308,17 @@ async def tool_gui(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     return {"ok": bool(result.get("ok")), "content": _truncate(result.get("content", ""))}
 
 
+# --- 3b. «Глаза»: описать, что на экране (скриншот → зрение) ---------------- #
+async def tool_see_screen(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Снять скриншот хоста и ОПИСАТЬ словами, что видно (через зрение UI-TARS)."""
+    if ctx.bridge is None:
+        return {"ok": False, "content": "RPC-мост недоступен — не вижу экран."}
+    from .gui_agent import describe_screen
+    question = str(args.get("question") or args.get("query") or "").strip()
+    res = await describe_screen(ctx.bridge, question)
+    return {"ok": bool(res.get("ok")), "content": _truncate(res.get("content", ""))}
+
+
 # --- 4. Веб: скачать и извлечь текст --------------------------------------- #
 async def tool_web_fetch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """Скачать URL и вернуть извлечённый текст (для парсинга сайтов)."""
@@ -343,48 +360,159 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
-# --- 5. Веб-поиск (DuckDuckGo, без ключей) --------------------------------- #
+# --- 5. Веб-поиск: НЕСКОЛЬКО поисковиков (без ключей), слияние результатов -- #
 async def tool_web_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Поиск в вебе через DuckDuckGo HTML (без API-ключа)."""
+    """
+    Поиск в вебе по НЕСКОЛЬКИМ движкам без API-ключей (DuckDuckGo + Bing + Mojeek),
+    с объединением и дедупликацией результатов. Возвращает несколько наиболее
+    релевантных ссылок (а не только первую), помечая источник.
+    """
     query = str(args.get("query", "")).strip()
     if not query:
         return {"ok": False, "content": "Не задан 'query'."}
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True,
-                                     headers={"User-Agent": HTTP_UA}) as cli:
-            r = await cli.post("https://html.duckduckgo.com/html/",
-                               data={"q": query})
-            r.raise_for_status()
-            results = _parse_ddg(r.text)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "content": f"Ошибка поиска: {exc}"}
-    if not results:
-        return {"ok": True, "content": f"По запросу «{query}» ничего не найдено."}
-    lines = [f"{i+1}. {it['title']}\n   {it['url']}\n   {it['snippet']}"
-             for i, it in enumerate(results[:6])]
-    return {"ok": True, "content": _truncate("Результаты поиска:\n" + "\n".join(lines))}
+        limit = int(args.get("limit") or 8)
+    except (TypeError, ValueError):
+        limit = 8
+
+    engines = (("DuckDuckGo", _search_ddg), ("Bing", _search_bing),
+               ("Mojeek", _search_mojeek))
+    gathered = await asyncio.gather(*[fn(query) for _, fn in engines],
+                                    return_exceptions=True)
+
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    ok_engines: list[str] = []
+    # Чередуем движки (round-robin), чтобы выдача была разнообразной, не из одного.
+    per_engine = []
+    for (name, _), res in zip(engines, gathered):
+        if isinstance(res, list) and res:
+            ok_engines.append(name)
+            per_engine.append((name, res))
+    for rank in range(max((len(r) for _, r in per_engine), default=0)):
+        for name, res in per_engine:
+            if rank < len(res):
+                it = res[rank]
+                key = _norm_url(it.get("url", ""))
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append({**it, "source": name})
+                if len(merged) >= limit:
+                    break
+        if len(merged) >= limit:
+            break
+
+    if not merged:
+        return {"ok": True,
+                "content": f"По запросу «{query}» ничего не найдено "
+                           "(все поисковики недоступны или пусто)."}
+    lines = [f"{i+1}. {it['title']}  [{it['source']}]\n   {it['url']}"
+             + (f"\n   {it['snippet']}" if it.get("snippet") else "")
+             for i, it in enumerate(merged)]
+    head = f"Результаты поиска ({', '.join(ok_engines)}):\n"
+    return {"ok": True, "content": _truncate(head + "\n".join(lines))}
 
 
-def _parse_ddg(html: str) -> list[dict[str, str]]:
+def _norm_url(url: str) -> str:
+    """Нормализация URL для дедупликации (без схемы/www/хвостового слэша)."""
+    u = re.sub(r"^https?://", "", (url or "").strip().lower())
+    u = re.sub(r"^www\.", "", u)
+    return u.rstrip("/")
+
+
+async def _http_get_text(url: str, params: dict[str, Any] | None = None,
+                         data: dict[str, Any] | None = None) -> str:
+    headers = {"User-Agent": HTTP_UA, "Accept-Language": "ru,en;q=0.8"}
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True,
+                                 headers=headers) as cli:
+        if data is not None:
+            r = await cli.post(url, data=data)
+        else:
+            r = await cli.get(url, params=params)
+        r.raise_for_status()
+        return r.text
+
+
+async def _search_ddg(query: str) -> list[dict[str, str]]:
+    try:
+        html = await _http_get_text("https://html.duckduckgo.com/html/",
+                                    data={"q": query})
+    except Exception:  # noqa: BLE001
+        return []
     out: list[dict[str, str]] = []
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
-        for res in soup.select(".result"):
+        for res in soup.select(".result")[:10]:
             a = res.select_one(".result__a")
             sn = res.select_one(".result__snippet")
             if not a:
                 continue
-            out.append({
-                "title": a.get_text(" ", strip=True),
-                "url": a.get("href", ""),
-                "snippet": sn.get_text(" ", strip=True) if sn else "",
-            })
+            out.append({"title": a.get_text(" ", strip=True),
+                        "url": _ddg_unwrap(a.get("href", "")),
+                        "snippet": sn.get_text(" ", strip=True) if sn else ""})
     except Exception:  # noqa: BLE001
-        # грубый фолбэк
         for m in re.finditer(r'result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html):
             out.append({"title": re.sub("<[^>]+>", "", m.group(2)),
-                        "url": m.group(1), "snippet": ""})
+                        "url": _ddg_unwrap(m.group(1)), "snippet": ""})
+    return out
+
+
+def _ddg_unwrap(href: str) -> str:
+    """DuckDuckGo отдаёт ссылки через редирект /l/?uddg=... — разворачиваем."""
+    m = re.search(r"[?&]uddg=([^&]+)", href or "")
+    if m:
+        from urllib.parse import unquote
+        return unquote(m.group(1))
+    return href
+
+
+async def _search_bing(query: str) -> list[dict[str, str]]:
+    try:
+        html = await _http_get_text("https://www.bing.com/search",
+                                    params={"q": query, "setlang": "ru"})
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, str]] = []
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for li in soup.select("li.b_algo")[:10]:
+            a = li.select_one("h2 a")
+            sn = li.select_one(".b_caption p") or li.select_one("p")
+            if not a or not a.get("href"):
+                continue
+            out.append({"title": a.get_text(" ", strip=True),
+                        "url": a.get("href", ""),
+                        "snippet": sn.get_text(" ", strip=True) if sn else ""})
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+async def _search_mojeek(query: str) -> list[dict[str, str]]:
+    try:
+        html = await _http_get_text("https://www.mojeek.com/search",
+                                    params={"q": query})
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, str]] = []
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for res in soup.select("ul.results-standard li, .results li")[:10]:
+            a = res.select_one("a.title") or res.select_one("h2 a") or res.select_one("a")
+            sn = res.select_one("p.s") or res.select_one("p")
+            if not a or not a.get("href"):
+                continue
+            href = a.get("href", "")
+            if href.startswith("/"):
+                continue
+            out.append({"title": a.get_text(" ", strip=True), "url": href,
+                        "snippet": sn.get_text(" ", strip=True) if sn else ""})
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -864,6 +992,14 @@ class ToolRegistry:
             tool_gui,
         ))
         self.add(Tool(
+            "see_screen",
+            "ПОСМОТРЕТЬ на экран: снять скриншот и описать словами, что на нём "
+            "(активное окно, программы, иконки, текст). Используй для «что на "
+            "экране/рабочем столе», «что открыто», «прочитай, что показано».",
+            {"question": "(опц.) конкретный вопрос про экран; пусто = общее описание"},
+            tool_see_screen,
+        ))
+        self.add(Tool(
             "web_fetch",
             "Скачать веб-страницу и вернуть её текст (парсинг/чтение сайта).",
             {"url": "адрес страницы"},
@@ -871,8 +1007,10 @@ class ToolRegistry:
         ))
         self.add(Tool(
             "web_search",
-            "Поиск в интернете. Возвращает заголовки, ссылки и сниппеты.",
-            {"query": "поисковый запрос"},
+            "Поиск в интернете по НЕСКОЛЬКИМ поисковикам сразу (DuckDuckGo + Bing + "
+            "Mojeek) с объединением результатов. Возвращает НЕСКОЛЬКО релевантных "
+            "ссылок с источником и сниппетами — выбирай из них, а не только первую.",
+            {"query": "поисковый запрос", "limit": "(опц.) сколько результатов, по умолч. 8"},
             tool_web_search,
         ))
         self.add(Tool(

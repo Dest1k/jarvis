@@ -616,45 +616,29 @@ class WindowsHostExecutor(HostExecutor):
         """
         runtime_dir = JARVIS_HOME / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.jpg")
-        # JPEG + УЖАТИЕ до ~1 Мпикс (бюджет процессора Qwen-VL): 4K PNG ~10-20 МБ
-        # грузил мост и РВАЛ keep-alive («мост отваливается» в GUI-цикле). Ужатая
-        # JPEG ~150-400 КБ. Внутри бюджета процессор НЕ ресайзит картинку повторно,
-        # поэтому UI-TARS выдаёт координаты ровно в размерах присланного кадра.
-        # Печатаем 'DIM <экран W H> IMG <кадр W H>': первое — для итогового клика по
-        # экрану, второе — база для абсолютных координат модели.
+        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.png")
+        # ПРОСТАЯ и НАДЁЖНАЯ съёмка в PNG (известно рабочая). Размеры экрана берём
+        # из заголовка PNG (_png_size). Qwen2.5-VL (база UI-TARS-1.5) отдаёт
+        # координаты в пикселях ПРИСЛАННОЙ картинки, поэтому нативный PNG + режим
+        # absolute дают точные клики без всякого пересчёта.
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
             "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
             "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
             "$g=[System.Drawing.Graphics]::FromImage($bmp);"
             "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
-            "$sw=$b.Width;$sh=$b.Height;"
-            "$scale=[Math]::Min(1.0,[Math]::Min(1280.0/[Math]::Max($sw,$sh),"
-            "[Math]::Sqrt(1000000.0/($sw*$sh))));"
-            "if($scale -lt 1.0){$iw=[int]($sw*$scale);$ih=[int]($sh*$scale);"
-            "$img=New-Object System.Drawing.Bitmap $bmp,$iw,$ih}"
-            "else{$img=$bmp;$iw=$sw;$ih=$sh};"
-            "Write-Output ('DIM ' + $sw + ' ' + $sh + ' IMG ' + $iw + ' ' + $ih);"
-            f"$img.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Jpeg);"
+            f"$bmp.Save('{out}');"
         )
         res = await self.powershell(ps)
         res["path"] = out
-        stdout = res.get("stdout", "") or ""
-        m = re.search(r"DIM\s+(\d+)\s+(\d+)(?:\s+IMG\s+(\d+)\s+(\d+))?", stdout)
-        if m:
-            res["screen_w"], res["screen_h"] = int(m.group(1)), int(m.group(2))
-            if m.group(3):
-                res["img_w"], res["img_h"] = int(m.group(3)), int(m.group(4))
         if return_b64:
             try:
                 data = Path(out).read_bytes()
                 res["image_b64"] = base64.b64encode(data).decode("ascii")
-                res["image_fmt"] = "jpeg"
-                if "screen_w" not in res:           # фолбэк, если DIM не распарсился
-                    w, h = _png_size(data)
-                    if w and h:
-                        res["screen_w"], res["screen_h"] = w, h
+                res["image_fmt"] = "png"
+                w, h = _png_size(data)
+                if w and h:
+                    res["screen_w"], res["screen_h"] = w, h
             except Exception as exc:  # noqa: BLE001
                 res["screenshot_error"] = str(exc)
         return res

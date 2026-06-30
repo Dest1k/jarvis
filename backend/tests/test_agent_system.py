@@ -313,27 +313,28 @@ async def test_open_app_nonblocking():
     return "open_app не блокирует (детач + DEVNULL, без захвата pipe)"
 
 
-async def test_windows_screenshot_jpeg_dims():
-    """Скриншот: JPEG + размеры экрана читаются из строки 'DIM W H' (не из JPEG)."""
+async def test_windows_screenshot_png_dims():
+    """Скриншот: надёжный PNG + размеры экрана из заголовка PNG + image_b64."""
+    import base64 as _b64
     import os as _os
     import tempfile
     import windows_rpc_bridge as wb
     win = wb.WindowsHostExecutor()
 
     async def fake_ps(cmd, hidden=False):
-        return {"returncode": 0, "stdout": "DIM 3840 2160\n"}
+        return {"returncode": 0, "stdout": ""}
 
     win.powershell = fake_ps
-    tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    tf.write(b"\xff\xd8\xff\xe0jpegdata")
+    tf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tf.write(_b64.b64decode(_PNG_1x1))   # валидный 1x1 PNG
     tf.close()
     try:
         res = await win.screenshot(out_path=tf.name, return_b64=True)
     finally:
         _os.unlink(tf.name)
-    assert res.get("screen_w") == 3840 and res.get("screen_h") == 2160, res
-    assert res.get("image_fmt") == "jpeg" and res.get("image_b64"), res
-    return "Windows screenshot: JPEG + размеры экрана из 'DIM W H'"
+    assert res.get("image_b64") and res.get("image_fmt") == "png", res
+    assert res.get("screen_w") == 1 and res.get("screen_h") == 1, res
+    return "Windows screenshot: PNG + размеры экрана из заголовка + image_b64"
 
 
 async def test_llm_client_reuse():
@@ -345,6 +346,44 @@ async def test_llm_client_reuse():
     return "переиспользование httpx-клиента (keep-alive пул)"
 
 
+async def test_see_screen():
+    """see_screen: снимает скриншот и возвращает текстовое описание экрана."""
+    async def fake_chat(messages, *, base_url=llm.QWEN_URL, **kw):
+        return "На экране: рабочий стол Windows, открыт Chrome, панель задач снизу."
+
+    llm.chat = fake_chat
+    bridge = FakeBridge()
+    res = await gui_agent.describe_screen(bridge, "что на экране")
+    assert res["ok"] and "рабочий стол" in res["content"].lower(), res
+    assert any(c[0] == "screenshot" for c in bridge.calls), bridge.calls
+    return "see_screen: скриншот → текстовое описание экрана"
+
+
+async def test_web_search_merge():
+    """web_search: слияние нескольких движков, дедуп по URL, метка источника."""
+    from orchestrator import tools as T
+
+    async def ddg(q):
+        return [{"title": "A", "url": "https://a.com", "snippet": "a"},
+                {"title": "B", "url": "https://b.com", "snippet": "b"}]
+
+    async def bing(q):
+        return [{"title": "B2", "url": "http://www.b.com/", "snippet": "b2"},
+                {"title": "C", "url": "https://c.com", "snippet": "c"}]
+
+    async def moj(q):
+        return []
+
+    T._search_ddg, T._search_bing, T._search_mojeek = ddg, bing, moj
+    res = await T.tool_web_search({"query": "x"}, T.ToolContext())
+    c = res["content"]
+    assert res["ok"], res
+    assert "a.com" in c and "c.com" in c, c
+    assert c.count("b.com") == 1, c           # дубль b.com схлопнут
+    assert "DuckDuckGo" in c and "Bing" in c, c
+    return "web_search: слияние движков + дедупликация по URL"
+
+
 # --------------------------------------------------------------------------- #
 # Pytest-обёртки (чтобы работал и `pytest`, и прямой запуск)
 # --------------------------------------------------------------------------- #
@@ -353,7 +392,8 @@ _TESTS = [
     test_cli_to_gui_fallback_hint, test_parse_uitars_actions,
     test_linux_bridge_commands, test_key_translation,
     test_interactive_guard, test_linux_send_keys_routing, test_open_app_nonblocking,
-    test_windows_screenshot_jpeg_dims, test_llm_client_reuse,
+    test_windows_screenshot_png_dims, test_llm_client_reuse, test_see_screen,
+    test_web_search_merge,
 ]
 
 
