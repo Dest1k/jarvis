@@ -78,6 +78,60 @@ def ensure_pydeps() -> None:
             run([sys.executable, "-m", "pip", "install", "-q", pkg])
 
 
+def docker_ready() -> bool:
+    """Быстрая проверка, что Docker-демон отвечает."""
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True,
+                           text=True, timeout=25)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_docker(wait_secs: int = 180) -> bool:
+    """
+    Гарантировать, что Docker-демон запущен. Если нет — попытаться запустить
+    Docker Desktop и дождаться готовности. Без этого все docker-команды сыпали
+    «cannot find file …dockerDesktopLinuxEngine» и стек молча не поднимался.
+    """
+    if docker_ready():
+        return True
+    info("Docker не отвечает — пробую запустить Docker Desktop…")
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles%\Docker\Docker\Docker Desktop.exe"),
+        os.path.expandvars(r"%ProgramW6432%\Docker\Docker\Docker Desktop.exe"),
+        os.path.expandvars(r"%LocalAppData%\Docker\Docker Desktop.exe"),
+    ]
+    started = False
+    for exe in candidates:
+        if exe and Path(exe).exists():
+            try:
+                subprocess.Popen([exe], close_fds=True)
+                started = True
+                break
+            except Exception:  # noqa: BLE001
+                continue
+    if not started:
+        try:                       # последняя попытка — по ярлыку в PATH/Start
+            subprocess.Popen('start "" "Docker Desktop"', shell=True)
+            started = True
+        except Exception:  # noqa: BLE001
+            pass
+    if not started:
+        info("Не нашёл Docker Desktop.exe. Запусти Docker Desktop вручную и повтори "
+             "`python jarvis.py up`.")
+        return False
+    info(f"Жду готовности Docker (до {wait_secs} с, первый запуск дольше)…")
+    for _ in range(max(1, wait_secs // 3)):
+        time.sleep(3)
+        if docker_ready():
+            info("Docker готов.")
+            return True
+    info("Docker так и не ответил. Открой Docker Desktop, дождись «Engine running» "
+         "и повтори `python jarvis.py up`.")
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Команды
 # --------------------------------------------------------------------------- #
@@ -285,6 +339,11 @@ def cmd_up(profile: str | None = None) -> int:
 
     cmd_bridge()
 
+    # Docker обязателен для всего стека — поднимаем/ждём ДО операций с контейнерами,
+    # иначе раньше сыпались «cannot find …dockerDesktopLinuxEngine» и стек не вставал.
+    if not ensure_docker():
+        return 1
+
     sync_models()  # веса (по активному профилю) копируются в ext4-том
 
     free_vram()            # освободить VRAM от прежних инстансов
@@ -311,14 +370,20 @@ def cmd_up(profile: str | None = None) -> int:
 
 
 def cmd_stop() -> int:
-    info("Останавливаю контейнерный стек…")
-    run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "down"])
+    if not docker_ready():
+        info("Docker не запущен — контейнерный стек и так остановлен.")
+    else:
+        info("Останавливаю контейнерный стек…")
+        run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "down"])
     info("Окна RPC-моста и дашборда закройте вручную (или Ctrl+C в них).")
     return 0
 
 
 def cmd_status() -> int:
-    run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "ps"])
+    if docker_ready():
+        run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "ps"])
+    else:
+        info("Docker не запущен (запусти Docker Desktop или `python jarvis.py up`).")
     info(f"RPC-мост (8765): {'РАБОТАЕТ' if port_open(8765) else 'нет'}")
     info(f"Дашборд (3000):  {'РАБОТАЕТ' if port_open(3000) else 'нет'}")
     return 0

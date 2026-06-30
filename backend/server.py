@@ -35,6 +35,7 @@ import base64
 import json
 import logging
 import os
+import random
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -175,9 +176,13 @@ class HostBridgeClient:
                 # ВАЖНО: разбудить все висящие вызовы немедленно — иначе текущий
                 # tool «зависнет» на полный timeout (200 с), хотя мост уже отвалился.
                 self._fail_pending(exc)
-                log.warning("RPC-мост недоступен (%s). Переподключение через %d с.", exc, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                # Быстрое переподключение с джиттером (потолок 8 с): транзиентный
+                # разрыв (сеть WSL↔Windows, пропущенный ping) должен восстанавливаться
+                # почти мгновенно, а не «висеть» красным до 30 с.
+                delay = min(backoff, 8) + random.uniform(0, 1.0)
+                log.warning("RPC-мост недоступен (%s). Переподключение через %.1f с.", exc, delay)
+                await asyncio.sleep(delay)
+                backoff = min(backoff * 2, 8)
 
     def _fail_pending(self, exc: Exception) -> None:
         """Завершить все ожидающие RPC-вызовы ошибкой (при разрыве соединения)."""

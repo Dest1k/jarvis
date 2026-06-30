@@ -300,6 +300,29 @@ async def test_open_app_nonblocking():
     return "open_app не блокирует (детач + DEVNULL, без захвата pipe)"
 
 
+async def test_windows_screenshot_jpeg_dims():
+    """Скриншот: JPEG + размеры экрана читаются из строки 'DIM W H' (не из JPEG)."""
+    import os as _os
+    import tempfile
+    import windows_rpc_bridge as wb
+    win = wb.WindowsHostExecutor()
+
+    async def fake_ps(cmd, hidden=False):
+        return {"returncode": 0, "stdout": "DIM 3840 2160\n"}
+
+    win.powershell = fake_ps
+    tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    tf.write(b"\xff\xd8\xff\xe0jpegdata")
+    tf.close()
+    try:
+        res = await win.screenshot(out_path=tf.name, return_b64=True)
+    finally:
+        _os.unlink(tf.name)
+    assert res.get("screen_w") == 3840 and res.get("screen_h") == 2160, res
+    assert res.get("image_fmt") == "jpeg" and res.get("image_b64"), res
+    return "Windows screenshot: JPEG + размеры экрана из 'DIM W H'"
+
+
 async def test_llm_client_reuse():
     """Один и тот же httpx-клиент переиспользуется в пределах event loop."""
     a = llm._get_client()
@@ -317,7 +340,7 @@ _TESTS = [
     test_cli_to_gui_fallback_hint, test_parse_uitars_actions,
     test_linux_bridge_commands, test_key_translation,
     test_interactive_guard, test_linux_send_keys_routing, test_open_app_nonblocking,
-    test_llm_client_reuse,
+    test_windows_screenshot_jpeg_dims, test_llm_client_reuse,
 ]
 
 

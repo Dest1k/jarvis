@@ -107,7 +107,8 @@ class GuiAgent:
                 return {"ok": False, "content": f"GUI: {msg}", "steps": done_steps}
 
             try:
-                raw = await self._ask_uitars(goal, history, shot["image_b64"])
+                raw = await self._ask_uitars(goal, history, shot["image_b64"],
+                                             shot.get("image_fmt", "png"))
             except Exception as exc:  # noqa: BLE001
                 log.warning("UI-TARS недоступен: %s", exc)
                 return {"ok": False, "content": f"UI-TARS недоступен: {exc}",
@@ -172,10 +173,12 @@ class GuiAgent:
         if not shot.get("ok") or not img:
             return {"ok": False, "error": shot.get("error", "нет image_b64 в ответе моста")}
         return {"ok": True, "image_b64": img,
+                "image_fmt": result.get("image_fmt", "png"),
                 "screen_w": int(result.get("screen_w", 1920) or 1920),
                 "screen_h": int(result.get("screen_h", 1080) or 1080)}
 
-    async def _ask_uitars(self, goal: str, history: list[str], img_b64: str) -> str:
+    async def _ask_uitars(self, goal: str, history: list[str], img_b64: str,
+                          img_fmt: str = "png") -> str:
         hist_text = "\n".join(history) if history else "(это первый шаг)"
         user_text = (f"## Task\n{goal}\n\n"
                      f"## Your previous steps\n{hist_text}\n\n"
@@ -185,7 +188,7 @@ class GuiAgent:
             {"role": "user", "content": [
                 {"type": "text", "text": user_text},
                 {"type": "image_url",
-                 "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                 "image_url": {"url": f"data:image/{img_fmt};base64,{img_b64}"}},
             ]},
         ]
         return await llm.chat(messages, base_url=llm.UITARS_URL, model=llm.UITARS_MODEL,

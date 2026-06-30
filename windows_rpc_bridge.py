@@ -616,24 +616,35 @@ class WindowsHostExecutor(HostExecutor):
         """
         runtime_dir = JARVIS_HOME / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.png")
+        out = out_path or str(runtime_dir / f"shot_{int(time.time())}.jpg")
+        # JPEG вместо PNG: скриншот 4K в PNG ~10-20 МБ — по WebSocket это грузит
+        # мост, копит паузы json.loads и сериализации и РВЁТ keep-alive (мост
+        # «отваливается» во время GUI-цикла). JPEG ~1-2 МБ при том же качестве для
+        # распознавания UI. Размеры экрана печатаем строкой 'DIM W H' — из JPEG их
+        # не прочитать, а они нужны для маппинга координат UI-TARS.
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
             "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
             "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
             "$g=[System.Drawing.Graphics]::FromImage($bmp);"
             "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
-            f"$bmp.Save('{out}');"
+            "Write-Output ('DIM ' + $b.Width + ' ' + $b.Height);"
+            f"$bmp.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Jpeg);"
         )
         res = await self.powershell(ps)
         res["path"] = out
+        m = re.search(r"DIM\s+(\d+)\s+(\d+)", res.get("stdout", "") or "")
+        if m:
+            res["screen_w"], res["screen_h"] = int(m.group(1)), int(m.group(2))
         if return_b64:
             try:
                 data = Path(out).read_bytes()
                 res["image_b64"] = base64.b64encode(data).decode("ascii")
-                w, h = _png_size(data)
-                if w and h:
-                    res["screen_w"], res["screen_h"] = w, h
+                res["image_fmt"] = "jpeg"
+                if "screen_w" not in res:           # фолбэк, если DIM не распарсился
+                    w, h = _png_size(data)
+                    if w and h:
+                        res["screen_w"], res["screen_h"] = w, h
             except Exception as exc:  # noqa: BLE001
                 res["screenshot_error"] = str(exc)
         return res
