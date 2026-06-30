@@ -337,15 +337,33 @@ async def describe_screen(bridge: Any, question: str = "") -> dict[str, Any]:
              "image_url": {"url": f"data:image/{fmt};base64,{img}"}},
         ]},
     ]
-    try:
-        text = await llm.chat(messages, base_url=llm.UITARS_URL, model=llm.UITARS_MODEL,
-                              temperature=0.1, max_tokens=400, timeout=90,
-                              stop=["<|im_end|>", "<|im_start|>"],
-                              extra_body={"repetition_penalty": 1.1})
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "content": f"Зрение недоступно: {exc}"}
-    text = (text or "").strip()
-    return {"ok": bool(text), "content": text or "Экран пуст или описание не получено."}
+    # Описание экрана делает МУЛЬТИМОДАЛЬНЫЙ ДИСПЕТЧЕР (в профиле gemma12 это
+    # Gemma-4-12B — настоящий VLM, описывает куда лучше, чем action-модель UI-TARS).
+    # Если диспетчер текстовый (qwen-classic) — он отвергнет картинку, тогда
+    # откатываемся на UI-TARS. Порядок настраивается JARVIS_VISION_MODEL.
+    pref = os.environ.get("JARVIS_VISION_MODEL", "auto").strip().lower()
+    if pref == "uitars":
+        targets = [(llm.UITARS_URL, llm.UITARS_MODEL)]
+    elif pref == "dispatcher":
+        targets = [(llm.QWEN_URL, llm.QWEN_MODEL)]
+    else:  # auto — сначала умный диспетчер, потом UI-TARS
+        targets = [(llm.QWEN_URL, llm.QWEN_MODEL), (llm.UITARS_URL, llm.UITARS_MODEL)]
+
+    last_err = ""
+    for url, model in targets:
+        try:
+            text = await llm.chat(messages, base_url=url, model=model, temperature=0.1,
+                                  max_tokens=400, timeout=90,
+                                  stop=["<|im_end|>", "<|im_start|>"],
+                                  extra_body={"repetition_penalty": 1.1})
+        except Exception as exc:  # noqa: BLE001
+            last_err = str(exc)
+            continue
+        text = (text or "").strip()
+        if text:
+            return {"ok": True, "content": text}
+    return {"ok": False,
+            "content": f"Не удалось получить описание экрана от моделей зрения. {last_err}".strip()}
 
 
 # --------------------------------------------------------------------------- #

@@ -358,9 +358,9 @@ def _safe_token(s: str) -> bool:
         c.isalnum() or c in "-_.:" for c in s)
 
 
-async def _host_exec(command: str) -> dict[str, Any]:
+async def _host_exec(command: str, timeout: int = 200) -> dict[str, Any]:
     """Выполнить команду на хосте через RPC-мост; вернуть {ok, code, out}."""
-    res = await bridge.call("exec", {"command": command})
+    res = await bridge.call("exec", {"command": command}, timeout=timeout)
     r = (res or {}).get("result", {})
     return {"ok": res.get("ok", False), "code": r.get("returncode"),
             "out": (r.get("stdout") or "") + (r.get("stderr") or "")}
@@ -615,14 +615,15 @@ async def _du_mb(mount_arg: str) -> tuple[dict[str, int], str]:
     """
     Размеры подпапок (МБ) внутри docker-маунта: имя → МБ. Возвращает (данные, note).
     Пробует alpine, при сбое — локальный jarvis/sandbox (есть всегда). --user 0 —
-    чтобы читать root-owned файлы тома (иначе размеры нулевые).
+    чтобы читать root-owned файлы тома (иначе размеры нулевые). Жёсткий таймаут,
+    чтобы измерение НЕ подвешивало эндпоинт (иначе фронт ловит «не удалось связаться»).
     """
     images = ["alpine", "jarvis/sandbox:latest", "busybox"]
     last = ""
     for img in images:
         r = await _host_exec(
             f'docker run --rm --user 0 {mount_arg} {img} sh -c '
-            f'"du -sm /m/* 2>/dev/null | sort -rn"')
+            f'"du -sm /m/* 2>/dev/null | sort -rn"', timeout=60)
         out: dict[str, int] = {}
         for line in (r.get("out") or "").splitlines():
             mt = re.match(r"\s*(\d+)\s+\S*?/([^/\s]+)\s*$", line)
@@ -641,30 +642,35 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
     action = payload.get("action", "")
 
     if action == "check":
-        df = await _host_exec("docker system df")
+        # Все команды с коротким таймаутом — эндпоинт ОБЯЗАН вернуться быстро,
+        # иначе фронт ловит «не удалось связаться» (фетч отваливается по таймауту).
+        df = await _host_exec("docker system df", timeout=60)
         dangling = await _host_exec(
-            'docker images -f dangling=true --format "{{.ID}}|{{.Size}}"')
-        cache = await _host_exec("docker builder du")
+            'docker images -f dangling=true --format "{{.ID}}|{{.Size}}"', timeout=60)
+        cache = await _host_exec("docker builder du", timeout=60)
         stopped = await _host_exec(
-            'docker ps -a --filter status=exited --format "{{.Names}}|{{.Image}}|{{.Status}}"')
-        vols = await _host_exec('docker volume ls -f dangling=true --format "{{.Name}}"')
+            'docker ps -a --filter status=exited --format "{{.Names}}|{{.Image}}|{{.Status}}"',
+            timeout=60)
+        vols = await _host_exec('docker volume ls -f dangling=true --format "{{.Name}}"',
+                                timeout=60)
         env_text = (await bridge.call("read_file", {"path": ENV_FILE})
                     ).get("result", {}).get("stdout", "")
         data_dir = _env_var(env_text, "JARVIS_DATA_DIR") or "../data"
 
-        # Размеры: модели-источники (data/models на диске) И их КОПИИ в ext4-томе
-        # jarvis-models (главный источник дублей), плюс кэш HF (jarvis-hf).
+        # Размеры меряем ТОЛЬКО на ext4-томах (быстро): копии моделей в jarvis-models
+        # (главный источник дублей) и кэш HF. data/models НЕ меряем du — это Windows-
+        # bind через 9p, du по 178 ГБ занимает минуты и подвешивал эндпоинт; имена
+        # источников берём быстрым `dir`, без размеров.
         notes: list[str] = []
-        data_sizes, n1 = await _du_mb(f'-v "{data_dir}/models:/m:ro"')
+        _ = data_dir  # (оставлено для совместимости; data/models не измеряем по du)
         vol_sizes, n2 = await _du_mb('-v jarvis-models:/m:ro')
-        for n in (n1, n2):
-            if n:
-                notes.append(n)
+        if n2:
+            notes.append(n2)
         hf = await _host_exec(
             'docker run --rm --user 0 -v jarvis-hf:/m:ro alpine sh -c '
             '"du -sm /m 2>/dev/null | tail -1" || '
             'docker run --rm --user 0 -v jarvis-hf:/m:ro jarvis/sandbox:latest sh -c '
-            '"du -sm /m 2>/dev/null | tail -1"')
+            '"du -sm /m 2>/dev/null | tail -1"', timeout=60)
         hf_mb = 0
         hfm = re.match(r"\s*(\d+)", hf.get("out") or "")
         if hfm:
@@ -673,7 +679,8 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
         def _referenced(name: str) -> bool:
             return name in env_text
 
-        model_dirs = sorted(data_sizes) or [
+        data_sizes: dict[str, int] = {}   # размеры источников не меряем (9p медленный)
+        model_dirs = [
             m.strip() for m in (await _host_exec("cmd /c dir /b data\\models"))["out"].splitlines()
             if m.strip()]
         referenced = [d for d in model_dirs if _referenced(d)]
