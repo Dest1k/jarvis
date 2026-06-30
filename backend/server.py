@@ -581,18 +581,29 @@ async def control_profile(payload: dict[str, Any]) -> JSONResponse:
         env = {**disp.get("env", {}), **gui.get("env", {})}
         await _update_env_vars(env)
         base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
-        # Стоп GPU-сервисов (освободить VRAM) → ПОСЛЕДОВАТЕЛЬНЫЙ старт: диспетчер
-        # с --wait (дождаться полной загрузки!) → затем UI-TARS → аудио/ядро.
-        # Это обязательно: второй vLLM-инстанс должен профилировать память уже
-        # после первого, иначе оба не помещаются (кумулятивный util).
-        seq = (
-            f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
-            f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
-            f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars & '
-            f'{base} up -d audio-layer backend sandbox'
-        )
+        if prof.get("mono"):
+            # МОНОЛИТ: одна жирная модель рулит всем. Поднимаем ТОЛЬКО диспетчер,
+            # UI-TARS останавливаем и удаляем (экономия VRAM); ядро перенаправит
+            # зрение/GUI на эндпоинт диспетчера (env профиля).
+            seq = (
+                f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+                f'{base} rm -f vllm-ui-tars & '
+                f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
+                f'{base} up -d --build audio-layer backend sandbox'
+            )
+        else:
+            # Стоп GPU-сервисов (освободить VRAM) → ПОСЛЕДОВАТЕЛЬНЫЙ старт: диспетчер
+            # с --wait (дождаться полной загрузки!) → затем UI-TARS → аудио/ядро.
+            # Второй vLLM-инстанс должен профилировать память уже после первого.
+            seq = (
+                f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+                f'{base} up -d --wait --wait-timeout 900 --force-recreate --no-deps vllm-qwen-coder && '
+                f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars & '
+                f'{base} up -d --build audio-layer backend sandbox'
+            )
         await _host_exec(f'start "jarvis-profile" cmd /c "{seq}"')
-        return JSONResponse({"ok": True, "applied": pid, "started": True})
+        return JSONResponse({"ok": True, "applied": pid, "mono": bool(prof.get("mono")),
+                             "started": True})
 
     return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
 
@@ -641,6 +652,27 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
     """check — найти мусор; clean — удалить выбранное."""
     action = payload.get("action", "")
 
+    # Мост обязателен (всё идёт через host docker). Если его нет — мгновенный
+    # понятный ответ, а не таймаут/500, который фронт показывает как «нет связи».
+    if not bridge._connected.is_set():
+        return JSONResponse({"ok": False, "notes": [
+            "RPC-мост не подключён. Запусти его (окно «JARVIS RPC» / "
+            "python jarvis.py bridge) и повтори."]})
+
+    # ВЕСЬ обработчик в защите: любой сбой → понятный JSON (а не 500/«нет связи»),
+    # и общий бюджет времени, чтобы эндпоинт всегда отвечал быстро.
+    try:
+        return await asyncio.wait_for(_cleanup_impl(action, payload), timeout=120)
+    except asyncio.TimeoutError:
+        return JSONResponse({"ok": False, "notes": [
+            "Проверка/очистка заняла слишком долго и была прервана. "
+            "Попробуй ещё раз — возможно, Docker/мост были заняты."]})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("cleanup failed")
+        return JSONResponse({"ok": False, "notes": [f"Сбой чистильщика: {exc}"]})
+
+
+async def _cleanup_impl(action: str, payload: dict[str, Any]) -> JSONResponse:
     if action == "check":
         # Все команды с коротким таймаутом — эндпоинт ОБЯЗАН вернуться быстро,
         # иначе фронт ловит «не удалось связаться» (фетч отваливается по таймауту).

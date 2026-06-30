@@ -1,5 +1,34 @@
 {
-  "_comment": "Профили системы JARVIS-OS (диспетчер + GUI-контроллер) для RTX 5090 (32 ГБ). Применяются кнопкой в Пульте или python jarvis.py --profile <id>. VRAM-расчёт — в docs/vram_matrix.md. Served-model-name остаётся qwen-coder/ui-tars в любом профиле, поэтому код агента менять не нужно.",
+  "_comment": "Профили системы JARVIS-OS для RTX 5090 (32 ГБ). Применяются кнопкой в Пульте или python jarvis.py up --profile <id>. Два типа: МОНОЛИТ (mono:true — одна жирная мультимодальная модель рулит всем: диспетчер+зрение+GUI, UI-TARS не поднимается) и ДВОЙНЫЕ (диспетчер + отдельный GUI-актуатор UI-TARS). Served-model-name диспетчера всегда qwen-coder, GUI — ui-tars; в монолите зрение/GUI перенаправляются на эндпоинт диспетчера через env.",
+  "gemma27-mono": {
+    "label": "★★ Монолит: Gemma-3-27B (AWQ) — одна умная модель рулит ВСЕМ",
+    "vram": "Gemma-3-27B AWQ-INT4 ~15.5 ГБ + KV fp8 ~6 + аудио ~2 ≈ 23-24 ГБ; резерв ~8 ГБ. UI-TARS НЕ запускается (экономия ~6-13 ГБ) — зрение и GUI делает сама Gemma.",
+    "note": "Одна жирная мультимодальная Gemma-3-27B рулит всем через инструментарий: CLI (windows.exec/powershell — почти любое администрирование), зрение (see_screen описывает экран), веб, память, код. GUI-клики тоже пробует сама. Максимум ума, минимум движущихся частей — рекомендуется, если двойная связка капризничает.",
+    "mono": true,
+    "dispatcher": {
+      "repo": "gaunernst/gemma-3-27b-it-int4-awq",
+      "name": "gemma-3-27b-awq",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma-3-27b-awq",
+        "JARVIS_QWEN_QUANT_ARGS": "",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.80",
+        "JARVIS_QWEN_MAX_LEN": "16384",
+        "JARVIS_QWEN_KV_DTYPE": "fp8"
+      }
+    },
+    "gui": {
+      "repo": "",
+      "name": "",
+      "env": {
+        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
+        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MAX_LEN": "16384",
+        "JARVIS_UITARS_COORD_MODE": "auto",
+        "JARVIS_VISION_MODEL": "dispatcher"
+      }
+    }
+  },
   "qwen-classic": {
     "label": "Классика: Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B",
     "vram": "Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0 = ~22.8 ГБ; резерв ~9.2 ГБ.",
@@ -26,7 +55,10 @@
         "JARVIS_UITARS_GPU_UTIL": "0.75",
         "JARVIS_UITARS_MAX_LEN": "8192",
         "JARVIS_UITARS_KV_DTYPE": "auto",
-        "JARVIS_UITARS_COORD_MODE": "normalized"
+        "JARVIS_UITARS_COORD_MODE": "normalized",
+        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
+        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
+        "JARVIS_VISION_MODEL": "auto"
       }
     }
   },
@@ -56,7 +88,10 @@
         "JARVIS_UITARS_GPU_UTIL": "0.90",
         "JARVIS_UITARS_MAX_LEN": "4096",
         "JARVIS_UITARS_KV_DTYPE": "fp8",
-        "JARVIS_UITARS_COORD_MODE": "normalized"
+        "JARVIS_UITARS_COORD_MODE": "normalized",
+        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
+        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
+        "JARVIS_VISION_MODEL": "auto"
       }
     }
   },
@@ -86,7 +121,10 @@
         "JARVIS_UITARS_GPU_UTIL": "0.72",
         "JARVIS_UITARS_MAX_LEN": "8192",
         "JARVIS_UITARS_KV_DTYPE": "fp8",
-        "JARVIS_UITARS_COORD_MODE": "absolute"
+        "JARVIS_UITARS_COORD_MODE": "absolute",
+        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
+        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
+        "JARVIS_VISION_MODEL": "auto"
       }
     }
   }

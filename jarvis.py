@@ -292,18 +292,23 @@ def free_vram() -> None:
     _compose("stop", "vllm-qwen-coder", "vllm-ui-tars", "audio-layer")
 
 
-def up_stack_sequential() -> None:
+def up_stack_sequential(mono: bool = False) -> None:
     """
-    Поднять стек ПОСЛЕДОВАТЕЛЬНО: второй vLLM-инстанс должен профилировать память
-    ПОСЛЕ полной загрузки первого, иначе оба не помещаются (см. кумулятивный util
-    UI-TARS в profiles.json/.env). --wait ждёт healthcheck каждого vLLM.
+    Поднять стек. В ДВОЙНОМ режиме — последовательно (второй vLLM профилирует память
+    после первого). В МОНОЛИТНОМ — поднимаем ТОЛЬКО диспетчер (жирная Gemma рулит
+    всем), UI-TARS не запускаем и останавливаем (экономия VRAM).
     """
     info("vLLM #1 (диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
     _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
              "--no-deps", "vllm-qwen-coder")
-    info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
-    _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
-             "--no-deps", "vllm-ui-tars")
+    if mono:
+        info("Монолит: UI-TARS не нужен — останавливаю его (если был запущен).")
+        _compose("stop", "vllm-ui-tars")
+        _compose("rm", "-f", "vllm-ui-tars")
+    else:
+        info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
+        _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
+                 "--no-deps", "vllm-ui-tars")
     info("Аудио, ядро, sandbox… (--build: подхватываю свежий код после git pull)")
     # --build обязателен: код ядра (orchestrator/) и mcp_servers.json ЗАШИТЫ в
     # образ jarvis/backend (не монтируются томом), поэтому после `git pull` без
@@ -311,7 +316,11 @@ def up_stack_sequential() -> None:
     # (BuildKit), так что при неизменных requirements пересборка быстрая —
     # переигрываются только COPY-слои. vLLM-сервисы собственного образа не имеют
     # (image:), их --build не трогает.
-    _compose("up", "-d", "--build", "--remove-orphans")
+    if mono:
+        # В монолите НЕ поднимаем vllm-ui-tars (иначе up поднял бы его заново).
+        _compose("up", "-d", "--build", "audio-layer", "backend", "sandbox")
+    else:
+        _compose("up", "-d", "--build", "--remove-orphans")
 
 
 def cmd_freevram() -> int:
@@ -346,8 +355,11 @@ def cmd_up(profile: str | None = None) -> int:
 
     sync_models()  # веса (по активному профилю) копируются в ext4-том
 
-    free_vram()            # освободить VRAM от прежних инстансов
-    up_stack_sequential()  # последовательный старт: vLLM#1 → vLLM#2 → аудио/ядро
+    # Монолитный профиль (mono:true) поднимает только диспетчера, без UI-TARS.
+    mono = bool(_load_profiles().get(profile, {}).get("mono")) if profile else False
+
+    free_vram()                 # освободить VRAM от прежних инстансов
+    up_stack_sequential(mono)   # монолит: только Gemma; иначе vLLM#1 → vLLM#2 → ядро
 
     cmd_dashboard()
 
@@ -413,8 +425,10 @@ HELP_TEXT = r"""
   python jarvis.py install                Полная первичная установка.
   python jarvis.py help                   Этот экран.
 
-ПРОФИЛИ (мозг + GUI одним пресетом, см. `profiles`):
-  gemma12-tars7   ★ рекомендованный: Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ).
+ПРОФИЛИ (один пресет = связка моделей, см. `profiles`):
+  gemma27-mono    ★★ МОНОЛИТ: одна Gemma-3-27B (AWQ) рулит ВСЕМ (диспетчер+зрение+
+                  GUI), UI-TARS не поднимается. Максимум ума, минимум частей.
+  gemma12-tars7   Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ) — двойная связка.
   gemma4-tars15   Gemma-4-26B-A4B MoE (NVFP4) + UI-TARS-2B.
   qwen-classic    Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B.
 

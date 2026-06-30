@@ -227,20 +227,24 @@ services:
     container_name: jarvis-backend
     restart: unless-stopped
     environment:
-      - JARVIS_QWEN_URL=http://vllm-qwen-coder:8001/v1
-      - JARVIS_UITARS_URL=http://vllm-ui-tars:8002/v1
+      # URL/имена моделей ПЕРЕОПРЕДЕЛЯЕМЫ из .env — это включает МОНОЛИТНЫЙ режим:
+      # профиль может направить зрение/GUI на ТОТ ЖЕ эндпоинт, что и диспетчер
+      # (одна жирная Gemma рулит всем), не поднимая отдельный UI-TARS.
+      - JARVIS_QWEN_URL=${JARVIS_QWEN_URL:-http://vllm-qwen-coder:8001/v1}
+      - JARVIS_UITARS_URL=${JARVIS_UITARS_URL:-http://vllm-ui-tars:8002/v1}
       - JARVIS_AUDIO_URL=http://audio-layer:8003
       # RPC-мост слушает на Windows-хосте; из WSL зеркалируется в localhost
       - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
       - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
       # Имена served-моделей и контекстные окна — для бюджета контекста агента
-      # (чтобы не упереться в окно Qwen/UI-TARS и не спровоцировать OOM по KV).
-      - JARVIS_QWEN_MODEL_NAME=qwen-coder
-      - JARVIS_UITARS_MODEL_NAME=ui-tars
+      # (чтобы не упереться в окно модели и не спровоцировать OOM по KV).
+      - JARVIS_QWEN_MODEL_NAME=${JARVIS_QWEN_MODEL_NAME:-qwen-coder}
+      - JARVIS_UITARS_MODEL_NAME=${JARVIS_UITARS_MODEL_NAME:-ui-tars}
       - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
       - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-8192}
-      # Система координат UI-TARS: 2B-SFT=normalized (0-1000), 1.5-7B/2.0=absolute.
-      # Задаётся профилем (см. profiles.json); auto — эвристика по величине.
+      # Кто описывает экран (see_screen): dispatcher|uitars|auto. В монолите —
+      # dispatcher (сама Gemma). Координаты GUI: absolute|normalized|auto.
+      - JARVIS_VISION_MODEL=${JARVIS_VISION_MODEL:-auto}
       - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory

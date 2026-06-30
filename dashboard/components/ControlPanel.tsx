@@ -394,8 +394,10 @@ export default function ControlPanel() {
           </div>
         )}
         <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
-          Классика (Qwen+TARS-2B) ↔ умный (Gemma-4-31B NVFP4 + UI-TARS-1.5-7B AWQ, KV-кэш fp8).
-          Из терминала: <code>python jarvis.py up --profile gemma4-tars15</code>.
+          Один клик «Применить профиль» = выбранная связка моделей перезапускается.
+          ★★ <b>gemma27-mono</b> — монолит: одна Gemma-3-27B рулит всем (без UI-TARS).
+          Остальные — двойные (мозг + UI-TARS). Из терминала:{" "}
+          <code>python jarvis.py up --profile gemma27-mono</code>.
         </p>
       </div>
 
