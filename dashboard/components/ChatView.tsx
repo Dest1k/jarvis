@@ -56,10 +56,13 @@ function loadTabs(): { tabs: Tab[]; chats: Record<string, ChatMessage[]> } {
 }
 
 export default function ChatView() {
-  const initial = useRef(loadTabs());
-  const [tabs, setTabs] = useState<Tab[]>(initial.current.tabs);
-  const [active, setActive] = useState<string>(initial.current.tabs[0]?.id || "default");
-  const [chats, setChats] = useState<Record<string, ChatMessage[]>>(initial.current.chats);
+  // ВАЖНО: первый рендер — детерминированный дефолт (совпадает с серверным
+  // HTML). Сохранённые вкладки/чаты из localStorage подгружаем ПОСЛЕ монтирования
+  // (useEffect ниже), иначе React падает на hydration mismatch.
+  const [tabs, setTabs] = useState<Tab[]>([{ id: "default", title: "Чат 1" }]);
+  const [active, setActive] = useState<string>("default");
+  const [chats, setChats] = useState<Record<string, ChatMessage[]>>({ default: [] });
+  const [hydrated, setHydrated] = useState(false);
   const [input, setInput] = useState("");
   const [conn, setConn] = useState("connecting");
   const [listening, setListening] = useState(false);
@@ -88,8 +91,19 @@ export default function ChatView() {
   useEffect(() => { speakRef.current = speak; }, [speak]);
   useEffect(() => { activeRef.current = active; }, [active]);
 
-  // persist tabs + chats
+  // Подгрузка сохранённого состояния ТОЛЬКО на клиенте после монтирования.
   useEffect(() => {
+    const { tabs: t, chats: c } = loadTabs();
+    setTabs(t);
+    setChats(c);
+    setActive(t[0]?.id || "default");
+    setHydrated(true);
+  }, []);
+
+  // persist tabs + chats (только после гидратации — чтобы не затереть
+  // сохранённое дефолтным состоянием до его загрузки).
+  useEffect(() => {
+    if (!hydrated) return;
     try {
       localStorage.setItem(LS_TABS, JSON.stringify(tabs));
       const slim: Record<string, ChatMessage[]> = {};
@@ -98,7 +112,7 @@ export default function ChatView() {
       }
       localStorage.setItem(LS_CHATS, JSON.stringify(slim));
     } catch { /* quota */ }
-  }, [tabs, chats]);
+  }, [tabs, chats, hydrated]);
 
   const setWorking = (session: string, on: boolean) =>
     setWorkingSessions((p) => (on ? [...new Set([...p, session])] : p.filter((s) => s !== session)));

@@ -275,6 +275,31 @@ async def test_linux_send_keys_routing():
     return "Linux send_keys: 'ctrl+s' и '^s'/'{ENTER}'"
 
 
+async def test_open_app_nonblocking():
+    """open_app должен запускать детачем без захвата pipe (иначе виснет на calc/браузере)."""
+    import subprocess as sp
+    import windows_rpc_bridge as wb
+    calls: dict = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            calls["cmd"] = cmd
+            calls["kw"] = kw
+        # НЕТ wait()/communicate() — если бы open_app их звал, тест бы это вскрыл
+
+    orig = wb.subprocess.Popen
+    wb.subprocess.Popen = FakePopen
+    try:
+        res = await wb.WindowsHostExecutor().open_app("calc")
+    finally:
+        wb.subprocess.Popen = orig
+    assert res["returncode"] == 0, res
+    assert 'start ""' in calls["cmd"] and "calc" in calls["cmd"], calls
+    assert calls["kw"].get("stdout") == sp.DEVNULL, calls["kw"]
+    assert calls["kw"].get("stderr") == sp.DEVNULL, calls["kw"]
+    return "open_app не блокирует (детач + DEVNULL, без захвата pipe)"
+
+
 async def test_llm_client_reuse():
     """Один и тот же httpx-клиент переиспользуется в пределах event loop."""
     a = llm._get_client()
@@ -291,7 +316,8 @@ _TESTS = [
     test_simple_answer, test_tool_call_calculator, test_gui_subagent_streams_steps,
     test_cli_to_gui_fallback_hint, test_parse_uitars_actions,
     test_linux_bridge_commands, test_key_translation,
-    test_interactive_guard, test_linux_send_keys_routing, test_llm_client_reuse,
+    test_interactive_guard, test_linux_send_keys_routing, test_open_app_nonblocking,
+    test_llm_client_reuse,
 ]
 
 

@@ -561,9 +561,31 @@ class WindowsHostExecutor(HostExecutor):
         return await self.powershell("Get-Clipboard -Raw", hidden=True)
 
     async def open_app(self, command: str) -> dict[str, Any]:
-        """Запустить приложение/исполняемый файл на хосте."""
+        """
+        Запустить приложение/файл/URL на хосте — НЕ блокируя.
+
+        КРИТИЧНО: запускаем через Popen с DEVNULL и БЕЗ ожидания. Если читать
+        stdout (capture_output) у долгоживущего приложения (calc, браузер,
+        `powershell -NoExit`), оно держит унаследованный pipe открытым, и
+        subprocess.run ВИСНЕТ до таймаута — хотя окно уже открылось. Именно это
+        раньше «вешало» задачу сразу после успешного открытия окна.
+        """
         log.info("Запуск приложения: %s", command)
-        return await self._run(f'start "" {command}', shell=True)
+        loop = asyncio.get_running_loop()
+
+        def _b() -> dict[str, Any]:
+            try:
+                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                subprocess.Popen(
+                    f'start "" {command}', shell=True,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags,
+                )
+                return {"returncode": 0, "stdout": f"Запущено: {command}"}
+            except Exception as exc:  # noqa: BLE001
+                return {"returncode": 1, "stderr": str(exc)}
+
+        return await loop.run_in_executor(None, _b)
 
     async def media_hook(self, key: str) -> dict[str, Any]:
         """Управление медиа (play/pause/next/prev/volume) через виртуальные клавиши."""
