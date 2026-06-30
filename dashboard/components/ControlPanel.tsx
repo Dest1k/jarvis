@@ -80,6 +80,7 @@ export default function ControlPanel() {
     cats: string[]; volumes: string[]; containers: string[];
     models: string[]; volModels: string[];
   }>({ cats: [], volumes: [], containers: [], models: [], volModels: [] });
+  const [cleanLog, setCleanLog] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -204,27 +205,43 @@ export default function ControlPanel() {
   const cleanupCheck = async () => {
     setBusy("clean-check");
     setCleanup(null);
+    setCleanLog("");
     setCleanSel({ cats: [], volumes: [], containers: [], models: [], volModels: [] });
-    const r = await fetch(`${API}/cleanup`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "check" }),
-    });
-    setCleanup(await r.json());
+    try {
+      const r = await fetch(`${API}/cleanup`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "check" }),
+      });
+      setCleanup(await r.json());
+    } catch {
+      setCleanup({ ok: false, notes: ["Не удалось связаться с ядром/мостом."] });
+    }
     setBusy("");
   };
+  // суммарный объём выбранного к удалению (МБ)
+  const selectedMb = (() => {
+    if (!cleanup) return 0;
+    let mb = 0;
+    for (const m of cleanSel.models) mb += cleanup.model_sizes_mb?.[m] || 0;
+    for (const n of cleanSel.volModels)
+      mb += (cleanup.vol_models?.find((v: any) => v.name === n)?.mb) || 0;
+    if (cleanSel.cats.includes("hf_cache")) mb += cleanup.hf_cache_mb || 0;
+    return mb;
+  })();
   const cleanupClean = async () => {
     const total = cleanSel.cats.length + cleanSel.volumes.length +
       cleanSel.containers.length + cleanSel.models.length + cleanSel.volModels.length;
     if (total === 0) { alert("Ничего не выбрано."); return; }
-    if (!confirm(`Удалить выбранное (${total} поз.)? Действие необратимо.`)) return;
+    if (!confirm(`Удалить выбранное (${total} поз., ~${fmtMb(selectedMb)})? Необратимо.`)) return;
     setBusy("clean-do");
+    setCleanLog("Удаляю выбранное…");
     const d = await postJson(`${API}/cleanup`, {
       action: "clean", categories: cleanSel.cats, volumes: cleanSel.volumes,
       containers: cleanSel.containers, models: cleanSel.models,
       vol_models: cleanSel.volModels,
     });
     setBusy("");
-    alert("Результат:\n" + String(d.log || "").slice(0, 2000));
+    setCleanLog(String(d.log || "Готово."));
     cleanupCheck();
   };
 
@@ -467,12 +484,32 @@ export default function ControlPanel() {
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <button className="btn" disabled={!!busy} onClick={cleanupCheck}>🔍 Проверить</button>
           <button className="btn danger" disabled={!!busy || !cleanup} onClick={cleanupClean}>
-            🗑 Удалить выбранное
+            🗑 Удалить выбранное{selectedMb > 0 ? ` (~${fmtMb(selectedMb)})` : ""}
           </button>
-          <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            Объекты с префиксом «jarvis» (контейнеры и тома весов) защищены и не удаляются.
-          </span>
+          {busy === "clean-check" && (
+            <span style={{ fontSize: 12, color: "var(--accent)" }}>
+              <span className="actor-spin" /> Сканирую мусор… (до минуты, при первом разе тянет alpine)
+            </span>
+          )}
+          {busy === "clean-do" && (
+            <span style={{ fontSize: 12, color: "var(--accent)" }}>
+              <span className="actor-spin" /> Удаляю выбранное…
+            </span>
+          )}
+          {!busy && (
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              Контейнеры «jarvis-*» защищены; копии моделей в томе и кэш HF — чистятся по выбору.
+            </span>
+          )}
         </div>
+        {cleanup?.notes?.length > 0 && (
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--warn)" }}>
+            {cleanup.notes.map((n: string, i: number) => <div key={i}>⚠ {n}</div>)}
+          </div>
+        )}
+        {cleanLog && (
+          <pre className="log-stream" style={{ height: "14vh", marginTop: 8 }}>{cleanLog}</pre>
+        )}
         {cleanup && (
           <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
             <pre className="log-stream" style={{ height: "16vh" }}>

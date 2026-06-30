@@ -611,17 +611,28 @@ def _env_var(env_text: str, key: str) -> str:
     return ""
 
 
-async def _du_mb(mount_arg: str) -> dict[str, int]:
-    """Размеры подпапок (МБ) внутри docker-маунта: имя → МБ (через alpine du)."""
-    r = await _host_exec(
-        f'docker run --rm {mount_arg} alpine sh -c '
-        f'"du -sm /m/* 2>/dev/null | sort -rn"')
-    out: dict[str, int] = {}
-    for line in (r.get("out") or "").splitlines():
-        mt = re.match(r"\s*(\d+)\s+\S*?/([^/\s]+)\s*$", line)
-        if mt:
-            out[mt.group(2)] = int(mt.group(1))
-    return out
+async def _du_mb(mount_arg: str) -> tuple[dict[str, int], str]:
+    """
+    Размеры подпапок (МБ) внутри docker-маунта: имя → МБ. Возвращает (данные, note).
+    Пробует alpine, при сбое — локальный jarvis/sandbox (есть всегда). --user 0 —
+    чтобы читать root-owned файлы тома (иначе размеры нулевые).
+    """
+    images = ["alpine", "jarvis/sandbox:latest", "busybox"]
+    last = ""
+    for img in images:
+        r = await _host_exec(
+            f'docker run --rm --user 0 {mount_arg} {img} sh -c '
+            f'"du -sm /m/* 2>/dev/null | sort -rn"')
+        out: dict[str, int] = {}
+        for line in (r.get("out") or "").splitlines():
+            mt = re.match(r"\s*(\d+)\s+\S*?/([^/\s]+)\s*$", line)
+            if mt:
+                out[mt.group(2)] = int(mt.group(1))
+        if out:
+            return out, ""
+        last = (r.get("out") or "").strip()
+    return {}, (f"не удалось измерить размеры (образы alpine/sandbox/busybox "
+                f"недоступны): {last[:160]}" if last else "")
 
 
 @app.post("/api/control/cleanup")
@@ -643,10 +654,16 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
 
         # Размеры: модели-источники (data/models на диске) И их КОПИИ в ext4-томе
         # jarvis-models (главный источник дублей), плюс кэш HF (jarvis-hf).
-        data_sizes = await _du_mb(f'-v "{data_dir}/models:/m:ro"')
-        vol_sizes = await _du_mb('-v jarvis-models:/m:ro')
+        notes: list[str] = []
+        data_sizes, n1 = await _du_mb(f'-v "{data_dir}/models:/m:ro"')
+        vol_sizes, n2 = await _du_mb('-v jarvis-models:/m:ro')
+        for n in (n1, n2):
+            if n:
+                notes.append(n)
         hf = await _host_exec(
-            'docker run --rm -v jarvis-hf:/m:ro alpine sh -c '
+            'docker run --rm --user 0 -v jarvis-hf:/m:ro alpine sh -c '
+            '"du -sm /m 2>/dev/null | tail -1" || '
+            'docker run --rm --user 0 -v jarvis-hf:/m:ro jarvis/sandbox:latest sh -c '
             '"du -sm /m 2>/dev/null | tail -1"')
         hf_mb = 0
         hfm = re.match(r"\s*(\d+)", hf.get("out") or "")
@@ -682,6 +699,7 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
             "unused_models": [d for d in model_dirs if not _referenced(d)],
             "vol_models": vol_models,            # КОПИИ в ext4-томе (дубли!) с МБ
             "hf_cache_mb": hf_mb,                # кэш HF (Whisper/Kokoro)
+            "notes": notes,                      # диагностика, если что-то не измерилось
         })
 
     if action == "clean":
