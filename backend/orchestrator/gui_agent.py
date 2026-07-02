@@ -60,11 +60,14 @@ def _uitars_system(mode: str, img_w: int, img_h: int) -> str:
     else:  # absolute (и auto — поведение модели 1.5/2.0)
         coord = (f"All coordinates are ABSOLUTE pixel positions (x,y) inside the "
                  f"screenshot, which is {img_w}x{img_h} pixels. (0,0) is top-left.")
+    # Промпт нейтрален к модели-исполнителю: в монолитных профилях актуатор —
+    # сам мозг (мультимодальная Gemma), в двойных — UI-TARS. Грамматика действий
+    # и формат вывода общие, их разбирает один парсер (_parse_uitars_action).
     return (
-        "You are UI-TARS, an autonomous GUI agent operating a real computer through "
-        "screenshots. You are given a TASK, the history of your previous steps, and "
-        "the CURRENT screenshot. Output the single best NEXT action that advances the "
-        "task, then stop.\n\n"
+        "You are the GUI actuator of JARVIS — an autonomous agent operating a real "
+        "computer with your own eyes and hands, through screenshots. You are given a "
+        "TASK, the history of your previous steps, and the CURRENT screenshot. Output "
+        "the single best NEXT action that advances the task, then stop.\n\n"
         f"## Coordinate system\n{coord}\n\n"
         "## Action space (output EXACTLY ONE action)\n"
         "click(start_box='(x,y)')\n"
@@ -77,6 +80,13 @@ def _uitars_system(mode: str, img_w: int, img_h: int) -> str:
         "wait()                          # screen still loading/animating\n"
         "finished(content='short result')  # the TASK is fully done\n"
         "fail(content='why impossible')    # truly cannot be done via GUI\n\n"
+        "## Rules\n"
+        "- Aim clicks at the CENTER of the target control (button, menu item, field).\n"
+        "- Click a text field first, then type() into it.\n"
+        "- If the task is ALREADY visibly complete on the screenshot, output "
+        "finished(...) immediately — do not repeat actions.\n"
+        "- If your previous step did not change the screen as expected, try a "
+        "different element or path instead of the same click again.\n\n"
         "## Output format — EXACTLY two lines, nothing else, no extra words\n"
         "Thought: <one short sentence>\n"
         "Action: <one action from the space above>"
@@ -110,25 +120,25 @@ class GuiAgent:
             shot = await self._screenshot()
             if not shot.get("ok"):
                 msg = shot.get("error", "не удалось снять скриншот")
-                await self._emit(emit, "thought", text=f"UI-TARS: {msg}")
+                await self._emit(emit, "thought", text=f"GUI: {msg}")
                 return {"ok": False, "content": f"GUI: {msg}", "steps": done_steps}
 
             try:
                 raw = await self._ask_uitars(goal, history, shot)
             except Exception as exc:  # noqa: BLE001
-                log.warning("UI-TARS недоступен: %s", exc)
-                return {"ok": False, "content": f"UI-TARS недоступен: {exc}",
+                log.warning("Модель-актуатор недоступна: %s", exc)
+                return {"ok": False, "content": f"Модель-актуатор недоступна: {exc}",
                         "steps": done_steps}
 
             act = _parse_uitars_action(raw)
             if not act:
                 bad += 1
                 await self._emit(emit, "thought",
-                                 text=f"UI-TARS дал неразборчивый ответ ({bad}/3).")
+                                 text=f"Актуатор дал неразборчивый ответ ({bad}/3).")
                 history.append(f"Step {step}: (модель ответила неразборчиво)")
                 if bad >= 3:        # три подряд — выходим, а не крутим до лимита
                     return {"ok": False,
-                            "content": "GUI: UI-TARS выдаёт неразборчивые ответы "
+                            "content": "GUI: модель-актуатор выдаёт неразборчивые ответы "
                                        "(возможно, не та версия/квантизация модели). "
                                        "Лучше решить задачу через CLI.",
                             "steps": done_steps}
@@ -144,7 +154,7 @@ class GuiAgent:
             if kind in ("finished", "done", "complete"):
                 content = act.get("content") or "цель достигнута"
                 await self._emit(emit, "tool_result", ok=True,
-                                 summary=f"UI-TARS завершил: {content}")
+                                 summary=f"GUI-актуатор завершил: {content}")
                 done_steps.append(f"finished: {content}")
                 return {"ok": True,
                         "content": f"Визуальная задача выполнена за {step} шаг(ов). {content}",
@@ -152,11 +162,11 @@ class GuiAgent:
             if kind in ("fail", "impossible"):
                 content = act.get("content") or "не удалось выполнить визуально"
                 await self._emit(emit, "tool_result", ok=False,
-                                 summary=f"UI-TARS остановился: {content}")
+                                 summary=f"GUI-актуатор остановился: {content}")
                 return {"ok": False, "content": f"GUI не справился: {content}",
                         "steps": done_steps}
             if kind == "wait":
-                await self._emit(emit, "thought", text="UI-TARS ждёт: экран ещё меняется.")
+                await self._emit(emit, "thought", text="Актуатор ждёт: экран ещё меняется.")
                 history.append(f"Step {step}: wait()")
                 continue
 
@@ -173,7 +183,7 @@ class GuiAgent:
         # лимит шагов исчерпан — отдаём, что есть (не падаем)
         tail = "; ".join(done_steps[-4:]) or "без видимого прогресса"
         await self._emit(emit, "thought",
-                         text=f"UI-TARS: достигнут лимит {self.max_steps} шагов.")
+                         text=f"GUI: достигнут лимит {self.max_steps} шагов.")
         return {"ok": False,
                 "content": f"GUI: достигнут лимит {self.max_steps} шагов. Последнее: {tail}",
                 "steps": done_steps}
