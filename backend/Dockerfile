@@ -48,7 +48,26 @@ RUN npm install -g --no-fund --no-audit \
         @modelcontextprotocol/server-sequential-thinking \
         @modelcontextprotocol/server-everything \
         @playwright/mcp \
+        playwright \
     || echo "[warn] MCP npm-серверы не установились"
+
+# Браузер для Playwright MCP. ТОНКОСТЬ: @playwright/mcp использует СВОЮ сборку
+# Chromium («Chrome for Testing», cdn.playwright.dev/builds/cft/…), привязанную к
+# его playwright-core. Это НЕ системный chrome-канал (его путь
+# /opt/google/chrome/chrome в контейнере отсутствует — отсюда ошибка «distribution
+# 'chrome' is not found») и НЕ обычный `playwright install chromium` (это ДРУГАЯ
+# сборка, MCP её не увидит). Поэтому ставим ровно то, что нужно MCP, ЕГО
+# инсталлятором (`@playwright/mcp install-browser chromium`) — версии гарантированно
+# совпадают, т.к. это тот же глобально установленный пакет (--no-install). Отдельно
+# `playwright install-deps` тянет системные библиотеки headless-Chromium (libnss3,
+# libatk, libgbm и пр.) — они общие для любой сборки. Сеть нужна ТОЛЬКО на сборке;
+# общий PLAYWRIGHT_BROWSERS_PATH → установщик и рантайм смотрят в ОДНО место. Сбой
+# не ломает образ (агент работает без браузерного MCP), доустановка:
+#   docker exec jarvis-backend sh -lc 'playwright install-deps chromium && npx --no-install @playwright/mcp install-browser chromium'
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN (playwright install-deps chromium || npx --yes playwright install-deps chromium || true) \
+    && npx --no-install @playwright/mcp install-browser chromium \
+    || echo "[warn] Chromium для Playwright MCP не установился — доустановите вручную (см. коммент выше)"
 
 COPY server.py ./
 COPY mcp_servers.json ./

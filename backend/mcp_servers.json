@@ -39,9 +39,11 @@
       "_desc": "Локальная БД SQLite (/data/jarvis.db): создавать таблицы, писать/читать/анализировать данные SQL-запросами (официальный). Полезно для бытовых учётов: списки, бюджет, заметки."
     },
     "playwright": {
-      "command": "npx", "args": ["--no-install", "@playwright/mcp", "--headless", "--isolated"],
+      "command": "npx",
+      "args": ["--no-install", "@playwright/mcp", "--headless", "--isolated",
+               "--browser", "chromium", "--no-sandbox"],
       "enabled": true,
-      "_desc": "Управление браузером (Microsoft Playwright MCP) через accessibility-дерево — навигация, клики, ввод, извлечение данных с сайтов. ТРЕБУЕТ браузер в контейнере: один раз `docker exec jarvis-backend npx playwright install chromium`. Без него инструменты видны, но вызовы навигации падают."
+      "_desc": "Управление браузером (Microsoft Playwright MCP) через accessibility-дерево — навигация, клики, ввод, извлечение данных с сайтов. Использует ВСТРОЕННЫЙ Chromium (--browser chromium), а НЕ системный chrome-канал (иначе ошибка «Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome»). --no-sandbox обязателен: контейнер работает от root. Браузер зашит в образ (Dockerfile: playwright install --with-deps chromium в PLAYWRIGHT_BROWSERS_PATH), доустановка вручную не нужна."
     },
     "everything": {
       "command": "mcp-server-everything", "args": [],
