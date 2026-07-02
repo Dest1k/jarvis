@@ -161,6 +161,13 @@ def is_destructive(action: str, payload: dict[str, Any]) -> bool:
     # Явный флаг от вызывающей стороны
     if payload.get("force_confirm"):
         return True
+    # Команда уже подтверждена оператором на стороне сервера (например,
+    # чистильщик Пульта с собственным диалогом «Удалить выбранное?»). Повторный
+    # интерактивный HITL-гейт не нужен — иначе операция подвисает в ожидании
+    # второго подтверждения. Флаг проставляется ТОЛЬКО доверенным backend'ом
+    # (server.py), модель-агент его выставить не может.
+    if payload.get("hitl_approved"):
+        return False
     if action in ("git_push", "delete_path", "kill_process", "system_power"):
         return True
     if action in ("exec", "powershell", "open_app"):

@@ -358,9 +358,20 @@ def _safe_token(s: str) -> bool:
         c.isalnum() or c in "-_.:" for c in s)
 
 
-async def _host_exec(command: str, timeout: int = 200) -> dict[str, Any]:
-    """Выполнить команду на хосте через RPC-мост; вернуть {ok, code, out}."""
-    res = await bridge.call("exec", {"command": command}, timeout=timeout)
+async def _host_exec(command: str, timeout: int = 200,
+                     approved: bool = False) -> dict[str, Any]:
+    """Выполнить команду на хосте через RPC-мост; вернуть {ok, code, out}.
+
+    approved=True помечает команду как УЖЕ подтверждённую оператором на стороне
+    сервера (флаг hitl_approved) — мост не поднимает повторный интерактивный
+    HITL-гейт. Используется ТОЛЬКО для операций Пульта, у которых уже есть свой
+    явный диалог подтверждения (например, чистильщик: «Удалить выбранное?»).
+    Модель-агент этот флаг выставить не может — он проставляется только здесь.
+    """
+    payload: dict[str, Any] = {"command": command}
+    if approved:
+        payload["hitl_approved"] = True
+    res = await bridge.call("exec", payload, timeout=timeout)
     r = (res or {}).get("result", {})
     return {"ok": res.get("ok", False), "code": r.get("returncode"),
             "out": (r.get("stdout") or "") + (r.get("stderr") or "")}
@@ -660,9 +671,12 @@ async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
             "python jarvis.py bridge) и повтори."]})
 
     # ВЕСЬ обработчик в защите: любой сбой → понятный JSON (а не 500/«нет связи»),
-    # и общий бюджет времени, чтобы эндпоинт всегда отвечал быстро.
+    # и общий бюджет времени, чтобы эндпоинт всегда отвечал быстро. Проверка
+    # (check) обязана возвращаться быстро; удаление (clean) может быть дольше
+    # (rmdir больших папок моделей на 9p), поэтому даём ему больший бюджет.
+    budget = 120 if action == "check" else 300
     try:
-        return await asyncio.wait_for(_cleanup_impl(action, payload), timeout=120)
+        return await asyncio.wait_for(_cleanup_impl(action, payload), timeout=budget)
     except asyncio.TimeoutError:
         return JSONResponse({"ok": False, "notes": [
             "Проверка/очистка заняла слишком долго и была прервана. "
@@ -749,8 +763,14 @@ async def _cleanup_impl(action: str, payload: dict[str, Any]) -> JSONResponse:
         vol_models = payload.get("vol_models", []) or []  # из ext4-тома jarvis-models
         log_lines: list[str] = []
 
+        # Все удаления чистильщика УЖЕ подтверждены оператором явным диалогом в
+        # Пульте («Удалить выбранное? Необратимо») и жёстко ограничены белым
+        # списком (_safe_token + PROTECTED_PREFIX). Поэтому идут с approved=True —
+        # без повторного интерактивного HITL-гейта моста (именно он раньше
+        # подвешивал clean: команды с токенами rm/rmdir ждали второго
+        # подтверждения на /ws/hitl, а эндпоинт отваливался по таймауту).
         async def _run(label: str, cmd: str) -> None:
-            r = await _host_exec(cmd)
+            r = await _host_exec(cmd, timeout=280, approved=True)
             log_lines.append(f"$ {label}\n{r['out'].strip()}")
 
         if "dangling_images" in cats:
