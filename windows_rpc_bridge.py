@@ -304,6 +304,48 @@ def _looks_interactive(command: str) -> bool:
         or low.rstrip().endswith("/k")
 
 
+# Бюджеты времени команд (сек). Обычные быстрые; «долгие» (установки/обновления/
+# скачивания) получают больший потолок, чтобы уложиться за ОДИН прогон и не
+# ретраить закачку. Жёсткий максимум страхует от вечного зависания.
+DEFAULT_CMD_TIMEOUT = int(os.environ.get("JARVIS_CMD_TIMEOUT", "120"))
+LONG_CMD_TIMEOUT = int(os.environ.get("JARVIS_LONG_CMD_TIMEOUT", "600"))
+MAX_CMD_TIMEOUT = int(os.environ.get("JARVIS_MAX_CMD_TIMEOUT", "1800"))
+_LONG_MARKERS = (
+    "wsl --install", "--install", "winget install", "winget upgrade",
+    "choco install", "dism", "sfc", "apt install", "apt-get install",
+    "dnf install", "pacman -s", "pip install", "npm install",
+    "docker pull", "docker build", "update", "upgrade",
+)
+
+
+def _is_long_running(command: str) -> bool:
+    low = f" {command.strip().lower()} "
+    return any(m in low for m in _LONG_MARKERS)
+
+
+def _effective_timeout(command: str, timeout: Optional[int]) -> int:
+    """Итоговый лимит: явный от вызывающего → эвристика долгих команд → дефолт."""
+    if timeout and int(timeout) > 0:
+        return min(int(timeout), MAX_CMD_TIMEOUT)
+    base = LONG_CMD_TIMEOUT if _is_long_running(command) else DEFAULT_CMD_TIMEOUT
+    return min(base, MAX_CMD_TIMEOUT)
+
+
+def _normalize_wsl(command: str) -> str:
+    """Обезопасить `wsl --install`: без --no-launch WSL ПОСЛЕ установки САМ
+    запускает дистрибутив в интерактивный первичный setup (OOBE — спрашивает имя
+    пользователя и пароль). Без терминала этот ввод взять неоткуда, и процесс
+    ВИСИТ, хотя дистрибутив уже скачан и зарегистрирован (ровно этот баг). Тихо
+    добавляем --no-launch: установка проходит, интерактива нет. Пользователя и
+    вход делают потом отдельной командой (`wsl -d <distro> ...`).
+    """
+    low = command.lower()
+    if "wsl" in low and "--install" in low and "--no-launch" not in low:
+        log.info("WSL install без --no-launch — добавляю --no-launch (защита от зависания OOBE)")
+        return command.rstrip() + " --no-launch"
+    return command
+
+
 # --------------------------------------------------------------------------- #
 # Исполнители нативных хуков ОС — кросс-платформенно (Windows + Linux)
 #
@@ -410,10 +452,13 @@ class HostExecutor:
             if hidden and sys.platform == "win32":
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             env = {**os.environ, "WSL_UTF8": "1"}
+            # stdin=DEVNULL: если команда всё-таки запросит ввод (пароль, y/n,
+            # первичный setup) — она получит EOF и БЫСТРО завершится, а не зависнет
+            # НАВСЕГДА в ожидании клавиатуры, которой у неинтерактивного моста нет.
             try:
                 proc = subprocess.run(
                     cmd, shell=shell, capture_output=True,
-                    timeout=timeout, env=env, **kwargs,
+                    timeout=timeout, env=env, stdin=subprocess.DEVNULL, **kwargs,
                 )
                 rc, out, err = proc.returncode, proc.stdout, proc.stderr
             except subprocess.TimeoutExpired as exc:
@@ -521,10 +566,12 @@ class HostExecutor:
         return await loop.run_in_executor(None, _b)
 
     # --- ОС-специфичные операции: реализуются в подклассах ----------------- #
-    async def exec_command(self, command: str) -> dict[str, Any]:
+    async def exec_command(self, command: str,
+                           timeout: Optional[int] = None) -> dict[str, Any]:
         raise NotImplementedError
 
-    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+    async def powershell(self, command: str, hidden: bool = False,
+                         timeout: Optional[int] = None) -> dict[str, Any]:
         raise NotImplementedError
 
     async def open_app(self, command: str) -> dict[str, Any]:
@@ -581,14 +628,18 @@ class WindowsHostExecutor(HostExecutor):
 
     platform = "windows"
 
-    async def exec_command(self, command: str) -> dict[str, Any]:
+    async def exec_command(self, command: str,
+                           timeout: Optional[int] = None) -> dict[str, Any]:
         """Выполнить произвольную команду cmd.exe."""
         if _looks_interactive(command):
             return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
+        command = _normalize_wsl(command)
         log.info("Выполняю команду хоста: %s", command)
-        return await self._run(command, shell=True)
+        return await self._run(command, shell=True,
+                               timeout=_effective_timeout(command, timeout))
 
-    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+    async def powershell(self, command: str, hidden: bool = False,
+                         timeout: Optional[int] = None) -> dict[str, Any]:
         """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики).
 
         Форсим UTF-8 у консоли PowerShell: тогда и вывод .NET-командлетов (кириллица
@@ -600,6 +651,7 @@ class WindowsHostExecutor(HostExecutor):
         """
         if _looks_interactive(command):
             return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
+        command = _normalize_wsl(command)
         log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
         wrapped = (
             "try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{}; "
@@ -607,7 +659,7 @@ class WindowsHostExecutor(HostExecutor):
         )
         return await self._run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapped],
-            hidden=hidden,
+            hidden=hidden, timeout=_effective_timeout(command, timeout),
         )
 
     async def set_clipboard(self, text: str) -> dict[str, Any]:
@@ -887,12 +939,15 @@ class LinuxHostExecutor(HostExecutor):
             os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
 
     # --- консоль/PowerShell/приложения ------------------------------------ #
-    async def exec_command(self, command: str) -> dict[str, Any]:
+    async def exec_command(self, command: str,
+                           timeout: Optional[int] = None) -> dict[str, Any]:
         """Выполнить команду через bash -lc (полноценный Linux-хост)."""
         log.info("Выполняю команду хоста (bash): %s", command)
-        return await self._run(["bash", "-lc", command], shell=False)
+        return await self._run(["bash", "-lc", command], shell=False,
+                               timeout=_effective_timeout(command, timeout))
 
-    async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
+    async def powershell(self, command: str, hidden: bool = False,
+                         timeout: Optional[int] = None) -> dict[str, Any]:
         """PowerShell на Linux — через pwsh, если установлен; иначе подсказка."""
         pwsh = _which("pwsh", "powershell")
         if not pwsh:
@@ -900,7 +955,8 @@ class LinuxHostExecutor(HostExecutor):
                     "stderr": "PowerShell на этом Linux-хосте не установлен. "
                               "Используй обычные команды (exec/shell)."}
         return await self._run([pwsh, "-NoProfile", "-NonInteractive",
-                                "-Command", command], shell=False)
+                                "-Command", command], shell=False,
+                               timeout=_effective_timeout(command, timeout))
 
     async def open_app(self, command: str) -> dict[str, Any]:
         """Открыть URL/файл (xdg-open) либо запустить приложение в фоне."""
@@ -1156,8 +1212,9 @@ class RpcRouter:
         self.host = make_host_executor()      # Windows или Linux — по текущей ОС
         self.git = GitAutomation(self.host)
         self.handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
-            "exec": lambda p: self.host.exec_command(p["command"]),
-            "powershell": lambda p: self.host.powershell(p["command"]),
+            "exec": lambda p: self.host.exec_command(p["command"], p.get("timeout")),
+            "powershell": lambda p: self.host.powershell(
+                p["command"], timeout=p.get("timeout")),
             "open_app": lambda p: self.host.open_app(p["command"]),
             "media_hook": lambda p: self.host.media_hook(p["key"]),
             "screenshot": lambda p: self.host.screenshot(

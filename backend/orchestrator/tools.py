@@ -55,6 +55,23 @@ SANDBOX_CONTAINER = os.environ.get("JARVIS_SANDBOX_CONTAINER", "jarvis-sandbox")
 MAX_OBSERVATION_CHARS = int(os.environ.get("JARVIS_MAX_OBSERVATION_CHARS", "16000"))
 HTTP_UA = "Mozilla/5.0 (JARVIS-OS agent) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
+# Бюджеты времени команд хоста (сек). «Долгие» (установки/обновления/скачивания)
+# получают больший потолок, чтобы уложиться за ОДИН прогон и не ретраить закачку.
+_DEFAULT_CMD_TIMEOUT = int(os.environ.get("JARVIS_CMD_TIMEOUT", "120"))
+_LONG_CMD_TIMEOUT = int(os.environ.get("JARVIS_LONG_CMD_TIMEOUT", "600"))
+_MAX_CMD_TIMEOUT = int(os.environ.get("JARVIS_MAX_CMD_TIMEOUT", "1800"))
+_LONG_CMD_MARKERS = (
+    "wsl --install", "--install", "winget install", "winget upgrade",
+    "choco install", "dism", "sfc", "apt install", "apt-get install",
+    "dnf install", "pacman -s", "pip install", "npm install",
+    "docker pull", "docker build", "update", "upgrade",
+)
+
+
+def _is_long_running_cmd(command: str) -> bool:
+    low = f" {command.strip().lower()} "
+    return any(m in low for m in _LONG_CMD_MARKERS)
+
 
 def _truncate(text: str, limit: int = MAX_OBSERVATION_CHARS) -> str:
     """Отдать вывод КАК ЕСТЬ; если длиннее лимита — обрезать СЕРЕДИНУ, сохранив и
@@ -266,7 +283,24 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
     elif action == "send_keys":
         payload["keys"] = args.get("keys", "")
 
-    res = await ctx.bridge.call(action, payload)
+    # Бюджет времени для exec/powershell: явный из args → эвристика долгих команд
+    # (установки/обновления/скачивания — им нужно больше, чтобы уложиться за ОДИН
+    # прогон и не плодить повторные закачки) → дефолт. Ожидание RPC ставим с
+    # запасом, иначе мост вернёт результат, а мы уже отвалимся по таймауту.
+    call_timeout = 200
+    if action in ("exec", "powershell"):
+        cmd = str(payload.get("command", ""))
+        try:
+            t = int(args.get("timeout") or 0)
+        except (TypeError, ValueError):
+            t = 0
+        if t <= 0:
+            t = _LONG_CMD_TIMEOUT if _is_long_running_cmd(cmd) else _DEFAULT_CMD_TIMEOUT
+        t = max(5, min(t, _MAX_CMD_TIMEOUT))
+        payload["timeout"] = t
+        call_timeout = t + 30
+
+    res = await ctx.bridge.call(action, payload, timeout=call_timeout)
     result = res.get("result", {}) or {}
     rc = result.get("returncode")
     stdout = result.get("stdout") or ""
@@ -1001,7 +1035,10 @@ class ToolRegistry:
              "content": "содержимое для write_file",
              "key": "для media_hook (play_pause|next|prev|vol_up|vol_down|mute)",
              "name": "имя процесса для kill_process",
-             "mode": "для system_power (lock|shutdown|reboot|cancel)"},
+             "mode": "для system_power (lock|shutdown|reboot|cancel)",
+             "timeout": "(опц.) лимит секунд для exec/powershell; для установок/"
+                        "обновлений/скачиваний ставь 600+ (иначе оборвётся и начнёт "
+                        "качать заново)"},
             tool_windows,
         ))
         self.add(Tool(
