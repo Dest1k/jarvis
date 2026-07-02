@@ -49,16 +49,32 @@ import httpx
 log = logging.getLogger("jarvis.tools")
 
 SANDBOX_CONTAINER = os.environ.get("JARVIS_SANDBOX_CONTAINER", "jarvis-sandbox")
-MAX_OBSERVATION_CHARS = 8000   # потолок наблюдения (защита контекстного окна)
+# Потолок ОДНОГО наблюдения (символов), отдаваемого мозгу. Держим щедрым, чтобы
+# передавать вывод команд как есть; общий объём всех наблюдений дополнительно
+# ограничивается по бюджету контекста уже в agent.py (свежие — целиком).
+MAX_OBSERVATION_CHARS = int(os.environ.get("JARVIS_MAX_OBSERVATION_CHARS", "16000"))
 HTTP_UA = "Mozilla/5.0 (JARVIS-OS agent) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 
 def _truncate(text: str, limit: int = MAX_OBSERVATION_CHARS) -> str:
-    if text is None:
-        return ""
+    """Отдать вывод КАК ЕСТЬ; если длиннее лимита — обрезать СЕРЕДИНУ, сохранив и
+    начало, и КОНЕЦ.
+
+    Для вывода команд это критично: результат и текст ошибки (ненулевой код,
+    трассировка, «Access denied», хвост лога) почти всегда в КОНЦЕ. Обрезание
+    хвоста (как было раньше) их теряло — и мозг не понимал, что произошло, и не
+    мог построить следующий шаг цепочки. Поэтому режем именно середину.
+    """
+    if not text:
+        return text or ""
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n…[обрезано, всего {len(text)} символов]"
+    head = limit // 2
+    tail = limit - head
+    cut = len(text) - limit
+    return (text[:head]
+            + f"\n…[вырезано {cut} симв. из середины; всего {len(text)}]…\n"
+            + text[-tail:])
 
 
 # --------------------------------------------------------------------------- #
@@ -251,24 +267,40 @@ async def tool_windows(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
         payload["keys"] = args.get("keys", "")
 
     res = await ctx.bridge.call(action, payload)
-    if not res.get("ok"):
-        # Настоящая причина неуспеха команды лежит в result.stderr/stdout (ненулевой
-        # код возврата), а res["error"] — только для транспортных/HITL-сбоев. Раньше
-        # код смотрел лишь в error и выдавал бесполезное «ошибка», теряя stderr
-        # (модель не понимала, что не так). Поднимаем реальный вывод.
-        result = res.get("result", {}) or {}
-        out = ((result.get("stderr") or "") + (result.get("stdout") or "")).strip()
-        err = res.get("error") or out or "команда завершилась с ненулевым кодом"
+    result = res.get("result", {}) or {}
+    rc = result.get("returncode")
+    stdout = result.get("stdout") or ""
+    stderr = result.get("stderr") or ""
+
+    # Транспортный/HITL-сбой моста: команда даже НЕ выполнилась (нет ни кода, ни
+    # вывода) — отдаём причину как есть.
+    if not res.get("ok") and rc is None and not stdout and not stderr:
+        err = res.get("error") or "не удалось выполнить действие на хосте"
         if res.get("halted"):
             return {"ok": False, "content": f"Операция остановлена HITL-гейтом: {err}"}
-        return {"ok": False, "content": _truncate(f"Команда завершилась с ошибкой:\n{err}")}
-    result = res.get("result", {}) or {}
-    out = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
-    if out:
-        return {"ok": True, "content": _truncate(out)}
-    # Пустой вывод при успехе — норма для open_app и команд без stdout. Делаем
-    # ответ ОДНОЗНАЧНЫМ «выполнено», иначе модель не понимает, что цель достигнута,
-    # и повторяет тот же вызов снова и снова.
+        return {"ok": False, "content": f"Хост вернул ошибку: {err}"}
+
+    ok = bool(res.get("ok"))
+    # ПОЛНЫЙ ФИДБЕК мозгу — ВНЕ зависимости от успеха/неудачи: код возврата + весь
+    # stdout + весь stderr, как есть. Именно на этом мозг строит следующий шаг
+    # цепочки (успех → идём дальше; ошибка → читаем текст и меняем подход).
+    combined = stdout.rstrip("\n")
+    if stderr.strip():
+        combined += ("\n" if combined else "") + "[stderr]\n" + stderr.rstrip("\n")
+    combined = combined.strip()
+
+    if combined:
+        head = f"[код возврата: {rc}]\n" if rc is not None else ""
+        return {"ok": ok, "content": _truncate(head + combined)}
+
+    # Вывод пуст. Для успешных действий без stdout (open_app, медиа, ввод текста)
+    # — ОДНОЗНАЧНОЕ «выполнено», иначе модель не понимает, что цель достигнута, и
+    # повторяет тот же вызов. Для неуспеха без вывода — честно с кодом возврата.
+    if not ok:
+        return {"ok": False,
+                "content": (f"[код возврата: {rc}] Команда завершилась ошибкой, "
+                            "но без текстового вывода." if rc is not None
+                            else f"Действие '{action}' не выполнено.")}
     done = {
         "open_app": "Приложение/ссылка успешно запущены на хосте.",
         "exec": "Команда выполнена успешно (вывод пуст).",

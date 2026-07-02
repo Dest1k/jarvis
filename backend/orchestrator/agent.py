@@ -476,12 +476,9 @@ _VERIFY_SYSTEM = (
 async def _verify_done(goal: str, plan: list[str],
                        scratch: list[dict[str, Any]]) -> dict[str, Any]:
     """Самопроверка: достигнута ли цель. {done, reason, next}."""
-    scratch_text = _scratch_to_text(scratch)
-    reserve = llm.estimate_tokens(_VERIFY_SYSTEM) + llm.estimate_tokens(scratch_text) + 300
-    # наблюдения важнее истории — если не влезает, режем хвост наблюдений
-    if reserve > llm.AGENT_INPUT_BUDGET:
-        scratch_text = scratch_text[-4000:]
     plan_text = "\n".join(f"- {p}" for p in plan) if plan else "(план не задан)"
+    scratch_text = _scratch_to_text(
+        scratch, max_chars=_scratch_budget_chars(_VERIFY_SYSTEM, goal, plan_text))
     user = (f"ЦЕЛЬ: {goal}\n\nПЛАН:\n{plan_text}\n\n"
             f"НАБЛЮДЕНИЯ ({len(scratch)} шаг(ов)):\n{scratch_text or '(пусто)'}\n\n"
             "Цель достигнута полностью? Ответь только JSON.")
@@ -567,15 +564,56 @@ def _normalize_plan(action: str, args: Any) -> tuple[str, dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Фаза 1 — планировщик
 # --------------------------------------------------------------------------- #
-def _scratch_to_text(scratch: list[dict[str, Any]]) -> str:
+def _scratch_to_text(scratch: list[dict[str, Any]],
+                     max_chars: Optional[int] = None) -> str:
+    """Свернуть журнал шагов (вызов + ПОЛНОЕ наблюдение) в текст для модели.
+
+    max_chars ограничивает суммарный размер (защита окна на длинных цепочках).
+    При переполнении СВЕЖИЕ шаги сохраняются ЦЕЛИКОМ (на них строится следующее
+    действие), а самые ранние опускаются с явной пометкой — так фидбек команд
+    доходит до мозга полностью там, где это важнее всего.
+    """
     if not scratch:
         return ""
-    parts = []
+    blocks: list[str] = []
     for i, s in enumerate(scratch, 1):
         args = json.dumps(s["args"], ensure_ascii=False)
-        parts.append(f"[Шаг {i}] action={s['action']} input={args}\n"
-                     f"наблюдение: {s['observation']}")
-    return "\n\n".join(parts)
+        blocks.append(f"[Шаг {i}] action={s['action']} input={args}\n"
+                      f"наблюдение: {s['observation']}")
+    if max_chars is None or sum(len(b) + 2 for b in blocks) <= max_chars:
+        return "\n\n".join(blocks)
+    # набираем с КОНЦА (свежие важнее), пока влезает; первый берём всегда, но
+    # если даже он один больше бюджета — режем его СЕРЕДИНУ (голова+хвост), чтобы
+    # промпт гарантированно уместился в окно на любом профиле.
+    kept: list[str] = []
+    total = 0
+    for b in reversed(blocks):
+        if not kept and len(b) + 2 > max_chars:
+            keep = max(200, max_chars - 2)
+            h = keep // 2
+            b = (b[:h] + f"\n…[вырезано {len(b) - keep} симв. наблюдения из середины]…\n"
+                 + b[-(keep - h):])
+        if kept and total + len(b) + 2 > max_chars:
+            break
+        kept.append(b)
+        total += len(b) + 2
+    omitted = len(blocks) - len(kept)
+    tail = list(reversed(kept))
+    if omitted:
+        tail.insert(0, f"[…опущены ранние {omitted} шаг(ов): не помещаются в контекст; "
+                       "свежие наблюдения ниже приведены полностью…]")
+    return "\n\n".join(tail)
+
+
+def _scratch_budget_chars(*reserved_texts: str) -> int:
+    """Сколько символов отдать под наблюдения, чтобы промпт влез в окно модели.
+
+    Бюджет входа модели — в токенах; переводим в символы (~3 симв/токен, как в
+    llm.estimate_tokens) за вычетом уже занятого (промпт, миссия) и запаса под
+    историю/ответ/оверхед.
+    """
+    reserved_tokens = sum(llm.estimate_tokens(t) for t in reserved_texts) + 1200
+    return max(6000, (llm.AGENT_INPUT_BUDGET - reserved_tokens) * 3)
 
 
 async def _plan_next(session_id: str, scratch: list[dict[str, Any]],
@@ -586,13 +624,15 @@ async def _plan_next(session_id: str, scratch: list[dict[str, Any]],
     шагов пройдено), которую держим перед глазами модели, чтобы за много шагов
     она не потеряла фокус на исходной цели.
     """
-    # бюджет: оставляем место под наблюдения, миссию и инструкцию
-    scratch_text = _scratch_to_text(scratch)
-    reserve = (llm.estimate_tokens(_planner_system()) + llm.estimate_tokens(scratch_text)
+    # бюджет: наблюдения (свежие — целиком) не должны выдавить промпт из окна
+    sys_prompt = _planner_system()
+    scratch_text = _scratch_to_text(
+        scratch, max_chars=_scratch_budget_chars(sys_prompt, mission or ""))
+    reserve = (llm.estimate_tokens(sys_prompt) + llm.estimate_tokens(scratch_text)
                + llm.estimate_tokens(mission or "") + 400)
     history_budget = max(800, llm.AGENT_INPUT_BUDGET - reserve)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _planner_system()}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": sys_prompt}]
     if mission:
         messages.append({"role": "system", "content": mission})
     messages.extend(_conversations.build_context(session_id, history_budget))
@@ -614,7 +654,7 @@ async def _plan_next(session_id: str, scratch: list[dict[str, Any]],
 # Фаза 2 — потоковый ответ
 # --------------------------------------------------------------------------- #
 async def _answer_messages(session_id: str, scratch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    scratch_text = _scratch_to_text(scratch)
+    scratch_text = _scratch_to_text(scratch, max_chars=_scratch_budget_chars(_ANSWER_SYSTEM))
     reserve = llm.estimate_tokens(_ANSWER_SYSTEM) + llm.estimate_tokens(scratch_text) + 300
     history_budget = max(1000, llm.AGENT_INPUT_BUDGET - reserve)
 
