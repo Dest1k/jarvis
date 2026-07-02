@@ -313,6 +313,76 @@ def _looks_interactive(command: str) -> bool:
 # Фабрика make_host_executor() подбирает реализацию под текущую ОС, так что
 # оркестратор и GUI-суб-агент (UI-TARS) работают одинаково на обеих системах.
 # --------------------------------------------------------------------------- #
+def _console_codepages() -> list[str]:
+    """Однобайтовые кодировки-фолбэки в ПРАВИЛЬНОМ порядке для этой Windows.
+
+    Нативные консольные утилиты (cmd.exe) пишут в OEM-кодовой странице, а не в
+    ANSI: на русской Windows OEM=cp866, ANSI=cp1251. Порядок «сначала реальный
+    OEM, потом ANSI» важен — иначе cp866-вывод, ошибочно прочитанный как cp1251,
+    даёт валидную, но НЕВЕРНУЮ кириллицу (тихий мусор). Берём реальные кодовые
+    страницы у системы; на не-Windows — разумные значения по умолчанию.
+    """
+    cps: list[str] = []
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            for cp in (ctypes.windll.kernel32.GetOEMCP(),
+                       ctypes.windll.kernel32.GetACP()):
+                name = f"cp{int(cp)}"
+                if cp and name not in cps:
+                    cps.append(name)
+        except Exception:  # noqa: BLE001
+            pass
+    for default in ("cp866", "cp1251"):
+        if default not in cps:
+            cps.append(default)
+    return cps
+
+
+_FALLBACK_ENCODINGS = _console_codepages()
+
+
+def _smart_decode(data: bytes | str) -> str:
+    """Декодировать вывод команды хоста БЕЗ мусора, определяя кодировку.
+
+    Зачем: разные инструменты Windows пишут в РАЗНЫХ кодировках, и наивное
+    decode('utf-8') превращает вывод в «коробочки» (как было с `wsl --list`):
+      • wsl.exe и многие UWP-утилиты — UTF-16LE (часто вообще без BOM);
+      • cmd.exe / нативные консольные тулзы — OEM-кодовая страница (для русской
+        Windows это cp866), реже ANSI cp1251;
+      • PowerShell/.NET — как настроен [Console]::OutputEncoding (мы форсим UTF-8).
+    Порядок: BOM → эвристика UTF-16 без BOM (много NUL-байтов) → строгий UTF-8 →
+    cp1251/cp866 → last-resort UTF-8 с заменой. Так мозг получает ЧИТАЕМЫЙ текст.
+    """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    if not data:
+        return ""
+    # 1) Явные BOM
+    if data[:2] == b"\xff\xfe":
+        return data[2:].decode("utf-16-le", "replace")
+    if data[:2] == b"\xfe\xff":
+        return data[2:].decode("utf-16-be", "replace")
+    if data[:3] == b"\xef\xbb\xbf":
+        return data[3:].decode("utf-8", "replace")
+    # 2) UTF-16 без BOM: у ASCII-текста каждый второй байт — NUL. wsl.exe именно
+    #    так и выводит `--list/--install`. Определяем по доле NUL и их чётности.
+    zeros = data.count(0)
+    if zeros >= max(2, len(data) // 4):
+        odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)   # LE: 'W\x00'
+        even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)  # BE: '\x00W'
+        return data.decode("utf-16-le" if odd >= even else "utf-16-be", "replace")
+    # 3) Строгий UTF-8, затем реальные OEM/ANSI кодовые страницы системы.
+    for enc in ("utf-8", *_FALLBACK_ENCODINGS):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", "replace")
+
+
 class HostExecutor:
     """Общие, ОС-независимые операции хоста (файлы/процессы/каталоги)."""
 
@@ -324,6 +394,11 @@ class HostExecutor:
         """
         Асинхронно выполнить процесс и вернуть структурированный результат.
 
+        Вывод берём СЫРЫМИ БАЙТАМИ и декодируем через _smart_decode — иначе вывод
+        wsl.exe (UTF-16LE) и русских консольных утилит (cp866) приходит мозгу
+        «коробочками». В окружение добавляем WSL_UTF8=1: с ним сам wsl.exe пишет
+        уже в UTF-8 (это основной, а не запасной путь).
+
         hidden=True (только Windows) запускает процесс БЕЗ окна — критично для
         UI-автоматики (SendKeys/Ctrl+V), чтобы окно консоли PowerShell не
         перехватывало фокус у целевого приложения (иначе вставка уходит «в никуда»).
@@ -334,14 +409,22 @@ class HostExecutor:
             kwargs: dict[str, Any] = {}
             if hidden and sys.platform == "win32":
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            proc = subprocess.run(
-                cmd, shell=shell, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout, **kwargs,
-            )
+            env = {**os.environ, "WSL_UTF8": "1"}
+            try:
+                proc = subprocess.run(
+                    cmd, shell=shell, capture_output=True,
+                    timeout=timeout, env=env, **kwargs,
+                )
+                rc, out, err = proc.returncode, proc.stdout, proc.stderr
+            except subprocess.TimeoutExpired as exc:
+                # частичный вывод до таймаута — тоже отдаём мозгу
+                out = (exc.stdout or b"") + f"\n[таймаут {timeout} c]".encode()
+                err = exc.stderr or b""
+                rc = None
             return {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
+                "returncode": rc,
+                "stdout": _smart_decode(out),
+                "stderr": _smart_decode(err),
             }
 
         return await loop.run_in_executor(None, _blocking)
@@ -506,12 +589,24 @@ class WindowsHostExecutor(HostExecutor):
         return await self._run(command, shell=True)
 
     async def powershell(self, command: str, hidden: bool = False) -> dict[str, Any]:
-        """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики)."""
+        """Выполнить PowerShell-команду (hidden=True — без окна, для UI-автоматики).
+
+        Форсим UTF-8 у консоли PowerShell: тогда и вывод .NET-командлетов (кириллица
+        имён служб/процессов), и STDOUT нативных тулзов в пайпе (например
+        `wsl --list --verbose | Out-String`), и то, что PS отдаёт нам в пайп, —
+        единый UTF-8. Без этого PS отдаёт OEM-страницу и мозг видит «коробочки».
+        Set [Console]::OutputEncoding в try/catch — на случай перенаправленных
+        хендлов (иначе командлет мог бы упасть терминирующей ошибкой).
+        """
         if _looks_interactive(command):
             return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
         log.info("PowerShell%s: %s", " (hidden)" if hidden else "", command[:200])
+        wrapped = (
+            "try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{}; "
+            "$OutputEncoding=[System.Text.Encoding]::UTF8; " + command
+        )
         return await self._run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapped],
             hidden=hidden,
         )
 
