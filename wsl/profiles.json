@@ -25,14 +25,45 @@
         "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
         "JARVIS_UITARS_MAX_LEN": "16384",
         "JARVIS_UITARS_COORD_MODE": "auto",
-        "JARVIS_VISION_MODEL": "dispatcher"
+        "JARVIS_VISION_MODEL": "dispatcher",
+        "JARVIS_ENABLE_UITARS": "0"
+      }
+    }
+  },
+  "gemma4-mono": {
+    "label": "★★ Монолит на Gemma-4-26B-A4B (NVFP4) — единый мозг рулит ВСЕМ",
+    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (util 0.82 → 26.2 ГБ: веса ~16.5 + overhead ~1 + KV fp8 ~8.7 на контекст 32k) + аудио ~2 ≈ 28.2 ГБ; резерв ~3.8 ГБ. UI-TARS НЕ запускается — освобождённые ~6 ГБ отданы под контекст (12k→32k) и KV.",
+    "note": "Монолит на ВАШЕЙ модели из data/models/gemma4-26b-a4b-nvfp4 (MoE, активно 4B → быстро, качество ~bf16 на NVFP4). Одна мультимодальная Gemma-4 рулит всем: CLI-администрирование (windows.exec/powershell), зрение (see_screen), GUI-клики (gui → тот же эндпоинт диспетчера), веб, память, код. Ресурсы поделены честно: аудио держит ~2 ГБ, всё остальное минус резерв рабочего стола — Gemma. Если не стартует из-за занятой VRAM — снизьте JARVIS_QWEN_GPU_UTIL до 0.78 или JARVIS_QWEN_MAX_LEN до 24576.",
+    "mono": true,
+    "dispatcher": {
+      "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
+      "name": "gemma4-26b-a4b-nvfp4",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
+        "JARVIS_QWEN_QUANT_ARGS": "",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.82",
+        "JARVIS_QWEN_MAX_LEN": "32768",
+        "JARVIS_QWEN_KV_DTYPE": "fp8"
+      }
+    },
+    "gui": {
+      "repo": "",
+      "name": "",
+      "env": {
+        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
+        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MAX_LEN": "32768",
+        "JARVIS_UITARS_COORD_MODE": "auto",
+        "JARVIS_VISION_MODEL": "dispatcher",
+        "JARVIS_ENABLE_UITARS": "0"
       }
     }
   },
   "qwen-classic": {
     "label": "Классика: Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B",
     "vram": "Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0 = ~22.8 ГБ; резерв ~9.2 ГБ.",
-    "note": "Стабильный профиль по умолчанию. Кодер-модель — иногда отказы на не-кодовых задачах.",
+    "note": "Стабильный профиль с ОТДЕЛЬНЫМ зрением (UI-TARS). Кодер-модель — иногда отказы на не-кодовых задачах. Если хотите единый мозг — берите gemma4-mono.",
     "dispatcher": {
       "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
       "name": "qwen-coder-14b",
@@ -58,14 +89,15 @@
         "JARVIS_UITARS_COORD_MODE": "normalized",
         "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
         "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto"
+        "JARVIS_VISION_MODEL": "auto",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     }
   },
   "gemma4-tars15": {
-    "label": "Умный: Gemma-4-26B-A4B MoE (NVFP4, 4B активных) + UI-TARS-2B",
-    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (MoE, активно 4B → быстро, util 0.62) + UI-TARS-2B ~5 (util 0.90 — КУМУЛЯТИВНЫЙ потолок!) + аудио 2 ≈ 27.4 ГБ; резерв ~4.6. KV обоих fp8.",
-    "note": "MoE 26B-A4B в NVFP4 (родной 4-бит float Blackwell, качество ~bf16). Вместо dense-31B: репо 31B NVFP4 ~30 ГБ и НЕ влезает. UI-TARS — лёгкий 2B (старший 7B рядом с 16.5-ГБ Gemma не помещается → для 7B берите профиль gemma12-tars7). ВАЖНО: util UI-TARS высокий (0.90) — это кумулятивный потолок vLLM на всю карту, не доля. Старт последовательный с освобождением VRAM. Если не стартует — освободите VRAM (закройте вкладки браузера) или возьмите gemma12-tars7.",
+    "label": "Умный (раздельный): Gemma-4-26B-A4B MoE (NVFP4) + ОТДЕЛЬНЫЙ UI-TARS-2B",
+    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (util 0.62) + UI-TARS-2B ~5 (util 0.90 — КУМУЛЯТИВНЫЙ потолок!) + аудио 2 ≈ 27.4 ГБ; резерв ~4.6. KV обоих fp8.",
+    "note": "Тот же мозг Gemma-4-26B-A4B, но зрение вынесено в ОТДЕЛЬНЫЙ UI-TARS-2B (на случай, если хочется специализированный GUI-контроллер). Обычно НЕ нужен: gemma4-mono делает то же самое одним мозгом и отдаёт высвобожденную VRAM под контекст. ВАЖНО: util UI-TARS высокий (0.90) — это кумулятивный потолок vLLM на всю карту. Старт последовательный с освобождением VRAM.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -91,14 +123,15 @@
         "JARVIS_UITARS_COORD_MODE": "normalized",
         "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
         "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto"
+        "JARVIS_VISION_MODEL": "auto",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     }
   },
   "gemma12-tars7": {
     "label": "★ Рекомендованный (просторный): Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ, взрослый)",
     "vram": "Gemma-4-12B NVFP4 ~7.7 ГБ + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 ≈ 18-20 ГБ; резерв ~12 ГБ. Запускается даже при занятом видеопамятью десктопе.",
-    "note": "Если A4B+2B не стартует из-за нехватки VRAM — берите этот: Gemma-4-12B (encoder-free multimodal, ~7.7 ГБ NVFP4) оставляет место взрослому UI-TARS-1.5-7B. Огромный запас. dispatcher util 0.34, UI-TARS util 0.55 (кумулятивно: второй инстанс должен покрыть и первый).",
+    "note": "Раздельный профиль с компактной Gemma-4-12B и ВЗРОСЛЫМ UI-TARS-1.5-7B. Огромный запас VRAM. dispatcher util 0.34, UI-TARS util 0.55 (кумулятивно: второй инстанс должен покрыть и первый). Для единого мозга без UI-TARS — gemma4-mono.",
     "dispatcher": {
       "repo": "coolthor/gemma-4-12B-it-NVFP4A16",
       "name": "gemma4-12b-nvfp4",
@@ -124,7 +157,8 @@
         "JARVIS_UITARS_COORD_MODE": "absolute",
         "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
         "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto"
+        "JARVIS_VISION_MODEL": "auto",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     }
   }

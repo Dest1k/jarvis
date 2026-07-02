@@ -177,11 +177,22 @@ def _data_dir_from_env() -> str:
     return _env_value("JARVIS_DATA_DIR")
 
 
+def _uitars_enabled() -> bool:
+    """Включён ли отдельный UI-TARS. В СОЛО-режиме Gemma-4 он выключен
+    (JARVIS_ENABLE_UITARS=0): зрение/GUI обслуживает сам мозг-диспетчер."""
+    return _env_value("JARVIS_ENABLE_UITARS") != "0"
+
+
 def _current_model_dirs() -> list[str]:
-    """Имена папок моделей текущего .env (диспетчер + GUI) — что синхронизировать."""
+    """Имена папок моделей текущего .env (диспетчер [+ GUI]) — что синхронизировать.
+
+    В СОЛО-режиме отдельной GUI-модели нет, поэтому UI-TARS из синка исключается.
+    """
     names: set[str] = set()
-    for key, default in (("JARVIS_QWEN_MODEL_PATH", "qwen-coder-14b"),
-                         ("JARVIS_UITARS_MODEL_PATH", "ui-tars")):
+    keys = [("JARVIS_QWEN_MODEL_PATH", "qwen-coder-14b")]
+    if _uitars_enabled():
+        keys.append(("JARVIS_UITARS_MODEL_PATH", "ui-tars"))
+    for key, default in keys:
         val = _env_value(key) or f"/models/{default}"
         name = val.rstrip("/").split("/")[-1]
         if name:
@@ -298,7 +309,7 @@ def up_stack_sequential(mono: bool = False) -> None:
     после первого). В МОНОЛИТНОМ — поднимаем ТОЛЬКО диспетчер (жирная Gemma рулит
     всем), UI-TARS не запускаем и останавливаем (экономия VRAM).
     """
-    info("vLLM #1 (диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
+    info("vLLM #1 (мозг-диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
     _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
              "--no-deps", "vllm-qwen-coder")
     if mono:
@@ -375,6 +386,9 @@ def cmd_up(profile: str | None = None) -> int:
 
     info("=" * 60)
     info("Готово. Пульт управления: http://localhost:3000  (вкладка «Пульт»)")
+    if not _uitars_enabled():
+        info("Режим: СОЛО — единый мозг Gemma-4 (планирует, кодит и САМ видит "
+             "экран). Отдельный UI-TARS выключен.")
     info("vLLM-модели прогреваются 1-2 мин — следите за статусом в дашборде.")
     info("Остановить всё: python jarvis.py stop")
     info("=" * 60)

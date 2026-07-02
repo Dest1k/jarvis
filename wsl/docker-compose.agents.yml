@@ -104,6 +104,11 @@ services:
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
+    # UI-TARS — ОПЦИОНАЛЬНЫЙ модуль зрения. В МОНОЛИТНОМ профиле (mono:true) он не
+    # запускается: лаунчер (jarvis.py / применение профиля) поднимает только
+    # диспетчера, а UI-TARS останавливает/удаляет — зрение и GUI делает сам мозг.
+    # В двойных профилях лаунчер поднимает его явно по имени. Сервис остаётся в
+    # файле и виден в Пульте в любом случае.
     # Лёгкий UI-TARS-2B вместо 7B: 2B (~4.2 ГБ FP16) комфортно живёт рядом с
     # Qwen-14B, тогда как 7B-FP16 (~16 ГБ) не помещался втроём с аудио в 32 ГБ.
     # Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует этот сервис).
@@ -175,9 +180,9 @@ services:
       - jarvis-hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
-    depends_on:
-      vllm-ui-tars:
-        condition: service_started
+    # Аудио НЕ зависит от UI-TARS (тот опционален и может быть выключен в
+    # СОЛО-режиме). Порядок старта vLLM-инстансов обеспечивает лаунчер
+    # (jarvis.py / применение профиля), а не depends_on.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s

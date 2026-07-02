@@ -30,6 +30,17 @@ UITARS_URL = os.environ.get("JARVIS_UITARS_URL", "http://vllm-ui-tars:8002/v1")
 QWEN_MODEL = os.environ.get("JARVIS_QWEN_MODEL_NAME", "qwen-coder")
 UITARS_MODEL = os.environ.get("JARVIS_UITARS_MODEL_NAME", "ui-tars")
 
+# Зрение / GUI-контроль (скриншот → действие). Это ОДНА точка, через которую
+# идёт визуальное управление экраном — кто именно «смотрит», задаётся профилем:
+#   • СОЛО-режим (единый мозг Gemma-4, мультимодальная): VISION_* указывают на
+#     сам диспетчер — Gemma видит скриншот и сама решает, куда кликнуть/что ввести.
+#     Отдельная vLLM-модель под GUI больше не нужна.
+#   • Классические профили (с UI-TARS): VISION_* указывают на инстанс UI-TARS.
+# По умолчанию (если профиль не задал переменные) — UI-TARS, ради обратной
+# совместимости со старыми конфигурациями.
+VISION_URL = os.environ.get("JARVIS_VISION_URL", UITARS_URL)
+VISION_MODEL = os.environ.get("JARVIS_VISION_MODEL", UITARS_MODEL)
+
 # Контекстные окна (берём из тех же переменных, что и compose). Держим бюджет
 # ВХОДА строго ниже окна, оставляя место под генерацию — иначе vLLM отвергнет
 # запрос (prompt + max_tokens > max_model_len) либо переполнит KV-кэш.
