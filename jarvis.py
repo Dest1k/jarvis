@@ -498,6 +498,46 @@ def up_stack_sequential(skip_uitars: bool = False) -> None:
         _compose("up", "-d", "--build", "--remove-orphans")
 
 
+def cmd_diag() -> int:
+    """
+    Диагностика одним вызовом: статус/рестарты/код выхода каждого контейнера
+    JARVIS + хвост логов тех, кто не running или перезапускался. Именно этот
+    вывод нужен для разбора «контейнер сам перезапускается».
+    """
+    if not docker_ready():
+        info("Docker не отвечает — сначала `python jarvis.py up` (он лечит сам).")
+        return 1
+    r = subprocess.run(["docker", "ps", "-a", "--filter", "name=jarvis-",
+                        "--format", "{{.Names}}"],
+                       capture_output=True, text=True)
+    names = [n.strip() for n in (r.stdout or "").splitlines() if n.strip()]
+    if not names:
+        info("Контейнеры jarvis-* не найдены (стек не поднимался?).")
+        return 1
+    troubled: list[str] = []
+    info("=" * 60)
+    for n in sorted(names):
+        i = subprocess.run(
+            ["docker", "inspect", n, "--format",
+             "{{.State.Status}}|{{.RestartCount}}|{{.State.ExitCode}}|{{.State.Error}}"],
+            capture_output=True, text=True)
+        status, restarts, exitcode, err = ((i.stdout or "").strip().split("|", 3) + ["", "", "", ""])[:4]
+        mark = "✔" if status == "running" and restarts in ("0", "") else "✖"
+        info(f"{mark} {n:24} status={status:12} restarts={restarts or 0} "
+             f"exit={exitcode}{(' err=' + err[:80]) if err else ''}")
+        if status != "running" or (restarts and restarts != "0"):
+            troubled.append(n)
+    for n in troubled:
+        info("-" * 60)
+        info(f"Хвост логов {n} (последние 40 строк — здесь настоящая причина):")
+        run(["docker", "logs", "--tail", "40", n])
+    if not troubled:
+        info("Все контейнеры стабильны. Если дашборд всё равно молчит — "
+             "`python jarvis.py status` и логи RPC-моста.")
+    info("=" * 60)
+    return 0
+
+
 def cmd_freevram() -> int:
     """Принудительно освободить VRAM, занятую JARVIS (остановить GPU-контейнеры)."""
     free_vram()
@@ -626,6 +666,7 @@ HELP_TEXT = r"""
   python jarvis.py dashboard              Только дашборд (Next.js, :3000).
   python jarvis.py bridge                 Только RPC-мост хоста (:8765).
   python jarvis.py freevram               Остановить vLLM/аудио — освободить VRAM.
+  python jarvis.py diag                   Диагностика: рестарты/exit-коды/логи контейнеров.
   python jarvis.py install                Полная первичная установка.
   python jarvis.py help                   Этот экран.
 
@@ -702,8 +743,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="up",
                    choices=["up", "install", "stop", "status", "dashboard", "bridge",
-                            "profiles", "freevram", "help"],
-                   help="up|stop|status|profiles|dashboard|bridge|freevram|install|help")
+                            "profiles", "freevram", "diag", "help"],
+                   help="up|stop|status|profiles|dashboard|bridge|freevram|diag|install|help")
     p.add_argument("--profile", default=None,
                    help="Профиль системы (диспетчер+GUI) перед запуском, см. "
                         "`jarvis.py profiles`. Напр.: --profile moe-turbo")
@@ -726,6 +767,8 @@ def main() -> int:
         return cmd_install(extra)
     if args.command == "profiles":
         return cmd_profiles()
+    if args.command == "diag":
+        return cmd_diag()
     if args.command == "freevram":
         return cmd_freevram()
     if args.command == "up":

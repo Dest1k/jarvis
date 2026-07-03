@@ -61,11 +61,13 @@ def _solo_vision(max_len: str) -> dict[str, str]:
         "JARVIS_ENABLE_UITARS": "0",
     }
 
-# Общие флаги Gemma 4 для vLLM: доверенный код архитектуры + встроенные парсеры
-# инструментов/reasoning (Gemma 4 — reasoning-модель; без парсера reasoning
-# «утекает» в контент). Наш агент использует two-phase JSON, поэтому
-# auto-tool-choice НЕ включаем, чтобы не конфликтовать с собственным протоколом.
-_GEMMA4_COMMON = "--trust-remote-code --reasoning-parser gemma4"
+# Общие флаги Gemma 4 для vLLM. ВАЖНО: НИКАКИХ --reasoning-parser/--tool-call-parser!
+# vLLM валидирует значения этих флагов по списку известных парсеров, и на сборке
+# без парсера 'gemma4' процесс умирает МГНОВЕННО на разборе аргументов →
+# рестарт-цикл контейнера (полевой инцидент). Наш агент работает по собственному
+# двухфазному JSON-протоколу и в серверных парсерах не нуждается; возможные
+# <thought>-утечки reasoning в контент вычищает llm.extract_json.
+_GEMMA4_COMMON = "--trust-remote-code"
 
 MODES: dict[str, dict[str, Any]] = {
     "moe-turbo": {
