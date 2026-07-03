@@ -15,13 +15,15 @@ import { useState } from "react";
 import ControlPanel from "@/components/ControlPanel";
 import ChatView from "@/components/ChatView";
 import MonitorView from "@/components/MonitorView";
+import CognitiveView from "@/components/CognitiveView";
 import HitlGate from "@/components/HitlGate";
 import StatusBar from "@/components/StatusBar";
 
-type View = "chat" | "control" | "monitor";
+type View = "chat" | "control" | "monitor" | "cognitive";
 
 const NAV: { id: View; label: string }[] = [
   { id: "chat", label: "💬 Чат" },
+  { id: "cognitive", label: "🧠 Разум" },
   { id: "control", label: "🛠️ Пульт управления" },
   { id: "monitor", label: "🖥️ Мониторная" },
 ];
@@ -56,6 +58,7 @@ export default function Page() {
         <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}>
           <ChatView />
         </div>
+        {view === "cognitive" && <CognitiveView />}
         {view === "control" && <ControlPanel />}
         {view === "monitor" && <MonitorView />}
       </main>

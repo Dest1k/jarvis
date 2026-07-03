@@ -1,0 +1,16 @@
+{
+  "name": "JARVIS OS · Command Center",
+  "short_name": "JARVIS",
+  "description": "Мобильный компаньон самособирающейся локальной мультиагентной системы: чат, разум агента, голос, уведомления.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#05080d",
+  "theme_color": "#0b0f16",
+  "lang": "ru",
+  "categories": ["productivity", "utilities", "developer"],
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
