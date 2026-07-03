@@ -303,17 +303,19 @@ def free_vram() -> None:
     _compose("stop", "vllm-qwen-coder", "vllm-ui-tars", "audio-layer")
 
 
-def up_stack_sequential(mono: bool = False) -> None:
+def up_stack_sequential(skip_uitars: bool = False) -> None:
     """
     Поднять стек. В ДВОЙНОМ режиме — последовательно (второй vLLM профилирует память
-    после первого). В МОНОЛИТНОМ — поднимаем ТОЛЬКО диспетчер (жирная Gemma рулит
-    всем), UI-TARS не запускаем и останавливаем (экономия VRAM).
+    после первого). Если UI-TARS отключён (СОЛО/монолит/moe-turbo — сам мозг видит
+    экран, JARVIS_ENABLE_UITARS=0) — поднимаем ТОЛЬКО диспетчер, а UI-TARS НЕ
+    запускаем и останавливаем: иначе он отъедает VRAM и падает в цикле (OOM).
     """
     info("vLLM #1 (мозг-диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
     _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
              "--no-deps", "vllm-qwen-coder")
-    if mono:
-        info("Монолит: UI-TARS не нужен — останавливаю его (если был запущен).")
+    if skip_uitars:
+        info("UI-TARS отключён (СОЛО/moe-turbo) — останавливаю его (если был запущен), "
+             "чтобы не занимал VRAM и не падал в цикле.")
         _compose("stop", "vllm-ui-tars")
         _compose("rm", "-f", "vllm-ui-tars")
     else:
@@ -327,8 +329,8 @@ def up_stack_sequential(mono: bool = False) -> None:
     # (BuildKit), так что при неизменных requirements пересборка быстрая —
     # переигрываются только COPY-слои. vLLM-сервисы собственного образа не имеют
     # (image:), их --build не трогает.
-    if mono:
-        # В монолите НЕ поднимаем vllm-ui-tars (иначе up поднял бы его заново).
+    if skip_uitars:
+        # НЕ поднимаем vllm-ui-tars (иначе `up --remove-orphans` поднял бы заново).
         _compose("up", "-d", "--build", "audio-layer", "backend", "sandbox")
     else:
         _compose("up", "-d", "--build", "--remove-orphans")
@@ -366,11 +368,15 @@ def cmd_up(profile: str | None = None) -> int:
 
     sync_models()  # веса (по активному профилю) копируются в ext4-том
 
-    # Монолитный профиль (mono:true) поднимает только диспетчера, без UI-TARS.
+    # UI-TARS не поднимаем, если профиль монолитный (mono:true) ИЛИ активный .env
+    # выключил его (JARVIS_ENABLE_UITARS=0 — режим moe-turbo/СОЛО). Раньше учитывался
+    # только mono, поэтому после применения moe-turbo обычный `up` всё равно
+    # поднимал UI-TARS → OOM и цикличное падение контейнера. Теперь — честно по .env.
     mono = bool(_load_profiles().get(profile, {}).get("mono")) if profile else False
+    skip_uitars = mono or not _uitars_enabled()
 
-    free_vram()                 # освободить VRAM от прежних инстансов
-    up_stack_sequential(mono)   # монолит: только Gemma; иначе vLLM#1 → vLLM#2 → ядро
+    free_vram()                     # освободить VRAM от прежних инстансов
+    up_stack_sequential(skip_uitars)  # СОЛО/moe: только Gemma; иначе vLLM#1 → vLLM#2 → ядро
 
     cmd_dashboard()
 
@@ -440,15 +446,28 @@ HELP_TEXT = r"""
   python jarvis.py help                   Этот экран.
 
 ПРОФИЛИ (один пресет = связка моделей, см. `profiles`):
-  gemma27-mono    ★★ МОНОЛИТ: одна Gemma-3-27B (AWQ) рулит ВСЕМ (диспетчер+зрение+
-                  GUI), UI-TARS не поднимается. Максимум ума, минимум частей.
+  ── v2.0 (Gemma 4, совпадают с кнопками «Инференс-режим» в Пульте) ──
+  moe-turbo       ★ СОЛО: Gemma-4-26B-A4B (NVFP4) — быстрый, БЕЗ UI-TARS.
+                  Для УЖЕ скачанной модели data/models/gemma4-26b-a4b-nvfp4.
+                  util 0.85; UI-TARS отключён (JARVIS_ENABLE_UITARS=0) —
+                  иначе он отъедает VRAM и падает в цикле на 32 ГБ.
+  dense-hybrid    ★ Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM +
+                  UI-TARS-2B. Максимум качества (--quantization modelopt).
+  ── прочие ──
+  gemma4-mono     МОНОЛИТ на Gemma-4-26B-A4B (то же, что moe-turbo, util 0.82).
+  gemma27-mono    ★★ МОНОЛИТ: Gemma-3-27B (AWQ) рулит ВСЕМ, UI-TARS не поднимается.
   gemma12-tars7   Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ) — двойная связка.
-  gemma4-tars15   Gemma-4-26B-A4B MoE (NVFP4) + UI-TARS-2B.
+  gemma4-tars15   Gemma-4-26B-A4B MoE (NVFP4, util 0.62) + ОТДЕЛЬНЫЙ UI-TARS-2B.
   qwen-classic    Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B.
 
-ТИПИЧНЫЙ СЦЕНАРИЙ:
+  ВАЖНО: профиль/режим с UI-TARS (dense-hybrid, *-tars*, qwen-classic) поднимает
+  ВТОРОЙ vLLM. СОЛО/monо/moe-turbo (JARVIS_ENABLE_UITARS=0) — UI-TARS НЕ
+  поднимается (иначе OOM). Лаунчер теперь честно читает этот флаг из wsl/.env.
+
+ТИПИЧНЫЙ СЦЕНАРИЙ (ваша скачанная Gemma-4-26B-A4B):
   1) git pull origin main          # подтянуть свежий код (канон. ветка — main)
-  2) python jarvis.py up --profile gemma12-tars7
+  2) python jarvis.py up --profile moe-turbo      # быстрый СОЛО, без UI-TARS
+     # или качество:  python jarvis.py up --profile dense-hybrid
   3) Открыть http://localhost:3000 → вкладка «Чат».
 
 ПОЛЕЗНОЕ:

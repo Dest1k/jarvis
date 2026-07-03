@@ -15,7 +15,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.80",
         "JARVIS_QWEN_MAX_LEN": "16384",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": ""
+        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_ENABLE_UITARS": "0"
       }
     },
     "gui": {
@@ -46,7 +47,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.82",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": ""
+        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_ENABLE_UITARS": "0"
       }
     },
     "gui": {
@@ -76,7 +78,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.45",
         "JARVIS_QWEN_MAX_LEN": "16384",
         "JARVIS_QWEN_KV_DTYPE": "auto",
-        "JARVIS_QWEN_EXTRA_ARGS": ""
+        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     },
     "gui": {
@@ -111,7 +114,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.62",
         "JARVIS_QWEN_MAX_LEN": "12288",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": ""
+        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     },
     "gui": {
@@ -146,7 +150,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.35",
         "JARVIS_QWEN_MAX_LEN": "12288",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": ""
+        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     },
     "gui": {
@@ -167,10 +172,30 @@
       }
     }
   },
-  "gemma4-dense-hybrid": {
-    "label": "★ v2.0 Dense-гибрид: Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM + UI-TARS-2B",
-    "vram": "NVFP4 ~21 ГБ помещается резидентно; util 0.68 × 32 = 21.8 ГБ на GPU (веса-резидент ~13 + KV ~8), ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS-2B ~5 + аудио ~2 в остатке.",
-    "note": "Реальные веса (проверено на HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it, 30.7B). Требует --quantization modelopt. Плотная 31B в NVFP4 ВЛЕЗАЕТ в 32 ГБ; оффлоад в host-RAM — осознанный размен VRAM ради запаса контекста и сосуществования с UI-TARS. Эквивалент инференс-режима dense-hybrid (inference.py).",
+  "moe-turbo": {
+    "label": "★ v2 moe-turbo (СОЛО): Gemma-4-26B-A4B (NVFP4) — быстрый, БЕЗ UI-TARS",
+    "mono": true,
+    "vram": "Веса NVFP4 ~16.5 ГБ, util 0.85 → 27.2 ГБ; + аудио ~2 = ~29 ГБ; резерв ~3 ГБ под десктоп. UI-TARS ОТКЛЮЧЁН (Gemma 4 мультимодальна — видит экран сама).",
+    "note": "Уже скачанная модель (data/models/gemma4-26b-a4b-nvfp4). Эквивалент кнопки moe-turbo в Пульте. UI-TARS не поднимается (JARVIS_ENABLE_UITARS=0) — иначе OOM на 32 ГБ.",
+    "dispatcher": {
+      "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
+      "name": "gemma4-26b-a4b-nvfp4",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
+        "JARVIS_QWEN_QUANT_ARGS": "",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.85",
+        "JARVIS_QWEN_MAX_LEN": "32768",
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --max-num-seqs 16",
+        "JARVIS_ENABLE_UITARS": "0"
+      }
+    }
+  },
+  "dense-hybrid": {
+    "label": "★ v2 dense-hybrid: Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM + UI-TARS-2B",
+    "vram": "NVFP4 ~21 ГБ; util 0.68 → 21.8 ГБ на GPU + оффлоад ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS-2B ~5 + аудио ~2 в остатке.",
+    "note": "Реальные веса (HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it). Требует --quantization modelopt. Плотная 31B в NVFP4 влезает в 32 ГБ; оффлоад в host-RAM — запас под контекст и UI-TARS. Эквивалент кнопки dense-hybrid в Пульте.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
       "name": "gemma4-31b-it-nvfp4",
@@ -181,7 +206,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.68",
         "JARVIS_QWEN_MAX_LEN": "16384",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --cpu-offload-gb 8 --swap-space 8"
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --cpu-offload-gb 8 --swap-space 8",
+        "JARVIS_ENABLE_UITARS": "1"
       }
     },
     "gui": {

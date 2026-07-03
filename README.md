@@ -501,7 +501,7 @@ python-серверы `mcp-server-*` + npm `@modelcontextprotocol/server-*`) —
 
 | Режим | Репозиторий (проверен) | Параметры | На диске | Оптимизация |
 |-------|------------------------|-----------|----------|-------------|
-| **moe-turbo** | `nvidia/Gemma-4-26B-A4B-NVFP4` | 25.2B / 3.8B актив. (MoE) | ~16.5 ГБ | префикс-кэш, util 0.90, UI-TARS off |
+| **moe-turbo** | `nvidia/Gemma-4-26B-A4B-NVFP4` | 25.2B / 3.8B актив. (MoE) | ~16.5 ГБ | префикс-кэш, util 0.85, UI-TARS off |
 | **dense-hybrid** | `nvidia/Gemma-4-31B-IT-NVFP4` | 30.7B (dense) | ~21 ГБ | `--quantization modelopt`, оффлоад в 128 ГБ RAM |
 
 > Плотная 31B в NVFP4 (~21 ГБ) **помещается в 32 ГБ** резидентно; оффлоад
