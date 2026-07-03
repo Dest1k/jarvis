@@ -126,21 +126,50 @@ def _kill_docker_desktop() -> None:
                        capture_output=True, text=True)
 
 
+def _docker_settings_paths() -> list[Path]:
+    appdata = os.environ.get("APPDATA", "")
+    return [Path(appdata) / "Docker" / f
+            for f in ("settings-store.json", "settings.json")]
+
+
+# Варианты имён ключей в разных версиях Docker Desktop (camelCase/PascalCase).
+_WSL_LIST_KEYS = ("integratedWslDistros", "IntegratedWslDistros")
+_WSL_DEFAULT_KEYS = ("enableIntegrationWithDefaultWslDistro",
+                     "EnableIntegrationWithDefaultWslDistro")
+
+
+def _wsl_integration_enabled() -> bool:
+    """Включена ли в Docker Desktop WSL-интеграция с пользовательскими дистро."""
+    for p in _docker_settings_paths():
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if any(data.get(k) for k in _WSL_LIST_KEYS):
+            return True
+        if any(data.get(k) is True for k in _WSL_DEFAULT_KEYS):
+            return True
+    return False
+
+
 def _disable_wsl_integration() -> bool:
     """
     Отключить WSL-интеграцию Docker Desktop с пользовательскими дистрибутивами.
 
-    Лечит устойчивый краш старта Docker Desktop на этапе «setting up docker user
-    group in <distro>» (Wsl/Service/0x800703e3): интеграция с Ubuntu-24.04
-    НАШЕМУ стеку не нужна — контейнеры живут в служебном дистрибутиве
-    docker-desktop, а docker CLI работает из Windows. Правит settings-store.json
-    (или settings.json) с резервной копией .bak. Возвращает True, если что-то
-    реально изменили.
+    Лечит устойчивые падения Docker Desktop на интеграции с Ubuntu-24.04
+    (Wsl/Service/0x800703e3 на старте; «wsl distro proxy … has exited with an
+    error: exit status 1» в работе): интеграция НАШЕМУ стеку не нужна —
+    контейнеры живут в служебном дистрибутиве docker-desktop, а docker CLI
+    работает из Windows. Правит settings-store.json (или settings.json) с
+    резервной копией .bak. ВЫЗЫВАТЬ ТОЛЬКО ПРИ ОСТАНОВЛЕННОМ Docker Desktop —
+    иначе он перезапишет файл своим состоянием при выходе.
+    Возвращает True, если что-то реально изменили.
     """
-    appdata = os.environ.get("APPDATA", "")
     changed = False
-    for fname in ("settings-store.json", "settings.json"):
-        p = Path(appdata) / "Docker" / fname
+    for p in _docker_settings_paths():
+        fname = p.name
         if not p.exists():
             continue
         try:
@@ -170,6 +199,38 @@ def _disable_wsl_integration() -> bool:
         except OSError as exc:
             info(f"Не удалось поправить {fname}: {exc}")
     return changed
+
+
+def ensure_no_wsl_integration() -> None:
+    """
+    ПРОАКТИВНО отключить WSL-интеграцию Docker Desktop перед подъёмом стека.
+
+    Урок полевых логов: движок docker может отвечать (docker info OK), пока
+    интеграционный прокси в Ubuntu-24.04 живёт своей жизнью и через минуты
+    падает («wsl distro proxy … exited with an error: exit status 1»), роняя
+    Docker Desktop целиком — реактивное лечение (только при мёртвом движке)
+    этот случай НЕ ловило. Стеку JARVIS интеграция не нужна, поэтому глушим
+    её заранее: стоп Docker → правка настроек (с .bak) → Docker поднимет
+    ensure_docker() следом.
+
+    Отключаемо: флаг --keep-wsl-integration или JARVIS_KEEP_WSL_INTEGRATION=1.
+    """
+    if os.environ.get("JARVIS_KEEP_WSL_INTEGRATION") == "1":
+        info("WSL-интеграция Docker оставлена как есть (JARVIS_KEEP_WSL_INTEGRATION=1).")
+        return
+    if not _wsl_integration_enabled():
+        return
+    info("В Docker Desktop включена WSL-интеграция с пользовательскими дистро — "
+         "она нестабильна (крашит Docker: Wsl/Service/0x800703e3 / distro proxy "
+         "exit 1) и стеку JARVIS не нужна. Отключаю (резервная копия .bak; "
+         "вернуть: Settings → Resources → WSL Integration или флаг "
+         "--keep-wsl-integration)…")
+    _kill_docker_desktop()
+    time.sleep(3)
+    if _disable_wsl_integration():
+        run(["wsl", "--shutdown"])
+        time.sleep(8)
+    # Docker поднимет ensure_docker() следом — здесь не стартуем.
 
 
 def ensure_docker(wait_secs: int = 180) -> bool:
@@ -211,11 +272,13 @@ def ensure_docker(wait_secs: int = 180) -> bool:
         return True
 
     # --- СТАДИЯ 3: отключить WSL-интеграцию (крашится именно она) ---
+    # Порядок критичен: СНАЧАЛА остановить Docker Desktop (иначе при выходе он
+    # перезапишет settings-store.json своим состоянием), ПОТОМ править файл.
     info("Docker всё ещё молчит. Отключаю WSL-интеграцию Docker Desktop с "
          "пользовательскими дистрибутивами (стеку JARVIS она не нужна)…")
+    _kill_docker_desktop()
+    time.sleep(3)
     if _disable_wsl_integration():
-        _kill_docker_desktop()
-        time.sleep(3)
         run(["wsl", "--shutdown"])
         time.sleep(8)
         _start_docker_desktop()
@@ -460,6 +523,12 @@ def cmd_up(profile: str | None = None) -> int:
 
     cmd_bridge()
 
+    # Профилактика падений Docker Desktop: интеграция с Ubuntu-24.04 крашит его
+    # (полевые логи: 0x800703e3 на старте; distro proxy exit 1 в работе) и стеку
+    # не нужна. Глушим ДО ensure_docker — движок может быть «жив», пока
+    # интеграция тикает бомбой в фоне.
+    ensure_no_wsl_integration()
+
     # Docker обязателен для всего стека — поднимаем/ждём ДО операций с контейнерами,
     # иначе раньше сыпались «cannot find …dockerDesktopLinuxEngine» и стек не вставал.
     if not ensure_docker():
@@ -476,6 +545,22 @@ def cmd_up(profile: str | None = None) -> int:
 
     free_vram()                     # освободить VRAM от прежних инстансов
     up_stack_sequential(skip_uitars)  # СОЛО/moe: только Gemma; иначе vLLM#1 → vLLM#2 → ядро
+
+    # Контроль ядра: дашборд без backend (:8000) бесполезен и сыплет
+    # ECONNREFUSED в консоль Next.js. Если ядро не поднялось — сразу показываем
+    # хвост его логов (обычно там и есть настоящая причина).
+    info("Проверяю ядро (backend, порт 8000)…")
+    for _ in range(30):
+        if port_open(8000):
+            info("Ядро отвечает.")
+            break
+        time.sleep(2)
+    else:
+        info("Ядро (backend :8000) НЕ отвечает. Хвост логов backend:")
+        _compose("logs", "--tail", "40", "backend")
+        info("Статус контейнеров:")
+        run(["docker", "ps", "-a", "--filter", "name=jarvis-",
+             "--format", "{{.Names}}\t{{.Status}}"])
 
     cmd_dashboard()
 
@@ -579,13 +664,17 @@ HELP_TEXT = r"""
 ДИАГНОСТИКА:
   • «Docker не отвечает» — `up` сам поднимет Docker Desktop; либо запусти его и
     дождись «Engine running».
-  • Docker Desktop крашится сразу после загрузки с Wsl/Service/0x800703e3
-    («setting up docker user group in Ubuntu-24.04», «Операция ввода/вывода
-    была прервана…») — `up` теперь лечит сам: сброс `wsl --shutdown` → рестарт
-    Docker; при упорстве отключает WSL-интеграцию с пользовательскими
-    дистрибутивами (стеку она не нужна; резервная копия настроек — .bak).
-    Вручную: Docker Desktop → Settings → Resources → WSL Integration → снять
-    галочку Ubuntu-24.04 → `wsl --shutdown` → повторить up.
+  • Docker Desktop падает из-за WSL-интеграции с Ubuntu-24.04 — симптомы:
+    Wsl/Service/0x800703e3 («setting up docker user group…») на старте ИЛИ
+    «wsl distro proxy in Ubuntu-24.04 … exited with an error: exit status 1»
+    в работе (движок может отвечать, а через минуты всё падает). `up` теперь
+    глушит эту интеграцию ПРОАКТИВНО до подъёма стека (стеку она не нужна;
+    резервная копия настроек — .bak; вернуть — Settings → Resources → WSL
+    Integration или флаг --keep-wsl-integration). Если дистрибутив
+    Ubuntu-24.04 повреждён и мешает даже так — крайняя мера (УДАЛИТ его
+    содержимое!): `wsl --unregister ubuntu-24.04`.
+  • «Ядро (backend :8000) НЕ отвечает» после подъёма — `up` сам покажет хвост
+    логов backend и статусы контейнеров; настоящая причина обычно там.
   • «RPC-мост: нет» — закрой окно «JARVIS RPC» и запусти `python jarvis.py up`
     (или `python jarvis.py bridge`).
   • vLLM падает на старте — глянь «Мониторную»; частая причина — мало VRAM
@@ -617,8 +706,14 @@ def main() -> int:
                    help="up|stop|status|profiles|dashboard|bridge|freevram|install|help")
     p.add_argument("--profile", default=None,
                    help="Профиль системы (диспетчер+GUI) перед запуском, см. "
-                        "`jarvis.py profiles`. Напр.: --profile gemma12-tars7")
+                        "`jarvis.py profiles`. Напр.: --profile moe-turbo")
+    p.add_argument("--keep-wsl-integration", action="store_true",
+                   help="НЕ отключать WSL-интеграцию Docker Desktop с "
+                        "пользовательскими дистро (по умолчанию отключается — "
+                        "она нестабильна и стеку не нужна).")
     args, extra = p.parse_known_args()
+    if args.keep_wsl_integration:
+        os.environ["JARVIS_KEEP_WSL_INTEGRATION"] = "1"
 
     if args.command == "help":
         return cmd_help()
