@@ -31,29 +31,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+from . import fsio
 from .llm import estimate_tokens
 
 log = logging.getLogger("jarvis.memory")
 
-
-def _resolve_memory_dir() -> Path:
-    """Определить пишущий каталог для памяти (том → /tmp как фолбэк)."""
-    candidate = os.environ.get("JARVIS_MEMORY_DIR", "/data/memory")
-    for path in (candidate, "/tmp/jarvis-memory"):
-        try:
-            p = Path(path)
-            p.mkdir(parents=True, exist_ok=True)
-            # проверка записи
-            probe = p / ".write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-            return p
-        except OSError:
-            continue
-    return Path("/tmp")
-
-
-MEMORY_DIR = _resolve_memory_dir()
+# Пишущий каталог памяти (том → /tmp как фолбэк). Все записи идут через fsio:
+# атомарно (никогда не видно полуфайла), строго UTF-8 + LF.
+MEMORY_DIR = fsio.resolve_writable_dir(
+    os.environ.get("JARVIS_MEMORY_DIR", "/data/memory"), "/tmp/jarvis-memory")
 
 
 # --------------------------------------------------------------------------- #
@@ -77,9 +63,7 @@ class LongTermMemory:
 
     def _save(self) -> None:
         try:
-            self.path.write_text(
-                json.dumps(self._items, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            fsio.write_json(self.path, self._items)
         except OSError as exc:
             log.warning("Не удалось сохранить долговременную память: %s", exc)
 
@@ -191,9 +175,7 @@ class ConversationManager:
     def _save(self) -> None:
         try:
             raw = {sid: c.to_dict() for sid, c in self._sessions.items()}
-            self.path.write_text(
-                json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            fsio.write_json(self.path, raw)
         except OSError as exc:
             log.warning("Не удалось сохранить диалоги: %s", exc)
 

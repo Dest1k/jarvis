@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+
+log = logging.getLogger("jarvis.llm")
 
 # --------------------------------------------------------------------------- #
 # Адреса и имена моделей (совпадают с docker-compose / server.py)
@@ -51,6 +54,14 @@ UITARS_MAX_LEN = int(os.environ.get("JARVIS_UITARS_MAX_LEN", "8192"))
 QWEN_OUTPUT_RESERVE = int(os.environ.get("JARVIS_QWEN_OUTPUT_RESERVE", "3072"))
 # Итоговый бюджет ВХОДНОГО контекста для Qwen-агента.
 AGENT_INPUT_BUDGET = max(2048, QWEN_MAX_LEN - QWEN_OUTPUT_RESERVE)
+
+# v2.0: ретраи неблокирующих вызовов. Переключение инференс-режима перезапускает
+# vLLM-контейнер — высокогоризонтный цикл агента обязан пережить этот интервал,
+# а не завершиться. Транзиентные сетевые ошибки повторяем с backoff.
+LLM_RETRIES = max(1, int(os.environ.get("JARVIS_LLM_RETRIES", "3")))
+LLM_RETRY_BASE_DELAY = float(os.environ.get("JARVIS_LLM_RETRY_DELAY", "2.0"))
+_TRANSIENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                     httpx.RemoteProtocolError, httpx.PoolTimeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,11 +157,22 @@ async def chat(
     if extra_body:
         body.update(extra_body)
     cli = _get_client()
-    r = await cli.post(f"{base_url}/chat/completions", json=body,
-                       timeout=httpx.Timeout(timeout, connect=10.0))
-    r.raise_for_status()
-    data = r.json()
-    return data["choices"][0]["message"]["content"] or ""
+    delay = LLM_RETRY_BASE_DELAY
+    for attempt in range(1, LLM_RETRIES + 1):
+        try:
+            r = await cli.post(f"{base_url}/chat/completions", json=body,
+                               timeout=httpx.Timeout(timeout, connect=10.0))
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"] or ""
+        except _TRANSIENT_ERRORS as exc:
+            if attempt >= LLM_RETRIES:
+                raise
+            log.warning("LLM-вызов не прошёл (%s), попытка %d/%d через %.1f с.",
+                        exc, attempt, LLM_RETRIES, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 20.0)
+    raise RuntimeError("недостижимо")  # для type-checker'а
 
 
 async def chat_stream(

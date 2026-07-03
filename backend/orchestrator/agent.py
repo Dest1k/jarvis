@@ -65,7 +65,9 @@ import os
 from typing import Any, AsyncIterator, Optional
 
 from . import llm
+from .incidents import IncidentLedger
 from .memory import ConversationManager, LongTermMemory
+from .skills import forge
 from .tools import Tool, ToolContext, ToolRegistry
 
 log = logging.getLogger("jarvis.agent")
@@ -105,6 +107,8 @@ _longterm = LongTermMemory()
 _SOFT_BUDGET = max(2500, int(llm.AGENT_INPUT_BUDGET * 0.5))
 _conversations = ConversationManager(_longterm, soft_budget_tokens=_SOFT_BUDGET)
 _registry = ToolRegistry()
+# v2.0: журнал решённых инцидентов (эпистемическое логирование сбоев → рецептов).
+_ledger = IncidentLedger()
 
 
 # Какая «модель/подсистема» отрабатывает инструмент — для визуализации в чате
@@ -724,6 +728,8 @@ async def run_chat(session_id: str, user_text: str,
     scratch: list[dict[str, Any]] = []
     seen_calls: set[str] = set()      # защита от зацикливания на одинаковых вызовах
     fail_streak: dict[str, int] = {}  # подряд идущие неудачи по инструментам
+    last_failure: dict[str, str] = {} # v2.0: последняя ошибка инструмента (для журнала инцидентов)
+    actions_taken: list[str] = []     # v2.0: последовательность хода (для кузницы навыков)
 
     # --- ФАЗА 0: определить режим и (для сложной цели) декомпозировать ---
     # Простой вопрос/одно действие → короткий ход (как раньше). Сложная цель →
@@ -834,11 +840,31 @@ async def run_chat(session_id: str, user_text: str,
             result = holder.get("result") or {"ok": False,
                                               "content": "Инструмент не вернул результат."}
             observation = result.get("content", "")
+            actions_taken.append(action)
 
             if result.get("ok"):
+                # v2.0: успех после недавнего сбоя того же инструмента → рецепт в журнал.
+                if action in last_failure:
+                    try:
+                        _ledger.record(
+                            tool=action, error=last_failure.pop(action),
+                            resolution=("Успешный повтор с аргументами: "
+                                        + json.dumps(args, ensure_ascii=False)[:600]),
+                            context=user_text[:200])
+                        yield {"type": "thought", "actor": "dispatcher",
+                               "text": (f"Сбой «{action}» преодолён; занёс рецепт в журнал "
+                                        "инцидентов — второй раз эта ошибка нас не задержит.")}
+                    except Exception:  # noqa: BLE001
+                        log.exception("Не удалось записать инцидент")
                 fail_streak[action] = 0
             else:
                 fail_streak[action] = fail_streak.get(action, 0) + 1
+                last_failure[action] = observation[:1500]
+                # v2.0: журнал инцидентов — известная ошибка → готовый рецепт в наблюдение.
+                hit = _ledger.lookup(action, observation)
+                if hit is not None:
+                    observation += ("\n[журнал инцидентов] Похожая ошибка уже решалась. "
+                                    f"Проверенный рецепт: {hit['resolution']}")
                 # АВТО-FALLBACK CLI → GUI: консольное действие на ПК не сработало —
                 # подсказываем мозгу довести задачу визуально.
                 if action in _CLI_HOST_TOOLS:
@@ -891,6 +917,18 @@ async def run_chat(session_id: str, user_text: str,
     _conversations.add(session_id, "assistant", final_text)
     yield {"type": "assistant_done", "content": final_text}
 
+    # --- v2.0: кузница навыков — наблюдаем рутину хода, при повторе предлагаем навык ---
+    try:
+        suggestion = forge.observe(actions_taken)
+        if suggestion:
+            yield {"type": "skill_suggestion",
+                   "routine": suggestion["routine"], "count": suggestion["count"],
+                   "text": (f"Замечаю, что рутина «{suggestion['routine']}» повторяется "
+                            f"уже {suggestion['count']}-й раз. Позвольте скомпилировать её "
+                            "в постоянный навык (skill_compile) — автоматизация лишней не бывает.")}
+    except Exception:  # noqa: BLE001
+        log.exception("Кузница навыков: сбой наблюдения (не критично)")
+
     # --- авто-сброс контекста при переполнении окна ---
     try:
         if await _conversations.maybe_summarize(session_id, _summarize):
@@ -911,7 +949,27 @@ def memory_overview(session_id: str = "default") -> dict[str, Any]:
         "recent_count": len(conv.messages),
         "longterm": _longterm.all()[:50],
         "longterm_count": len(_longterm.all()),
+        # v2.0: журнал инцидентов и каталог навыков — для вкладки памяти дашборда.
+        "incidents": _ledger.all(limit=25),
+        "incident_count": len(_ledger.all(limit=100000)),
+        "skills": forge.list_skills(),
     }
+
+
+# --------------------------------------------------------------------------- #
+# v2.0: журнал инцидентов и навыки (для дашборда)
+# --------------------------------------------------------------------------- #
+def incident_overview(limit: int = 50) -> dict[str, Any]:
+    return {"incidents": _ledger.all(limit=limit),
+            "count": len(_ledger.all(limit=100000))}
+
+
+def clear_incidents() -> int:
+    return _ledger.clear()
+
+
+def skills_overview() -> dict[str, Any]:
+    return {"skills": forge.list_skills()}
 
 
 def reset_context(session_id: str = "default", keep_summary: bool = False) -> None:

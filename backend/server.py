@@ -272,7 +272,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("Остановка ядра JARVIS-OS.")
 
 
-app = FastAPI(title="JARVIS-OS Core Controller", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="JARVIS v2.0 Core Controller", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -658,6 +658,65 @@ async def _du_mb(mount_arg: str) -> tuple[dict[str, int], str]:
                 f"недоступны): {last[:160]}" if last else "")
 
 
+# --------------------------------------------------------------------------- #
+# ИНФЕРЕНС-РЕЖИМЫ v2.0 (диспетчер): MoE-турбо ↔ dense-гибрид Gemma 4.
+# Реестр — orchestrator.inference; здесь оркестрируем запись env-набора режима
+# в wsl/.env и последовательный рестарт диспетчера через RPC-мост.
+# --------------------------------------------------------------------------- #
+@app.get("/api/control/inference")
+async def inference_modes() -> JSONResponse:
+    """Каталог инференс-режимов + активный режим (по содержимому wsl/.env)."""
+    from orchestrator import inference
+    cfg = await bridge.call("read_file", {"path": ENV_FILE})
+    env_text = (cfg.get("result", {}) or {}).get("stdout", "")
+    return JSONResponse({"modes": inference.describe(),
+                         "active": inference.detect_mode(env_text)})
+
+
+@app.post("/api/control/inference")
+async def inference_apply(payload: dict[str, Any]) -> JSONResponse:
+    """Переключить инференс-режим диспетчера: download | apply."""
+    from orchestrator import inference
+    mode_id = payload.get("mode", "")
+    mode = inference.MODES.get(mode_id)
+    if mode is None:
+        return JSONResponse({"ok": False, "error": "Неизвестный режим."}, status_code=400)
+    action = payload.get("action", "apply")
+
+    if action == "download":
+        repo, name = mode["model_repo"], mode["model_name"]
+        if not _safe_token(name):
+            return JSONResponse({"ok": False, "error": "Некорректное имя модели."},
+                                status_code=400)
+        res = await _host_exec(
+            f'start "hf-{name}" python hf_downloader.py {repo} --dest data\\models\\{name}')
+        return JSONResponse({"ok": res["ok"], "started": True,
+                             "download": f"{repo} → data/models/{name}"})
+
+    if action == "apply":
+        updates = inference.env_updates(mode_id) or {}
+        await _update_env_vars(updates)
+        base = f"docker compose -f {COMPOSE} --env-file {ENV_FILE}"
+        # Освободить VRAM, поднять диспетчер с --wait (dense-гибрид долго
+        # профилирует оффлоад), затем аудио/ядро. UI-TARS стартует лишь если
+        # режим его не отключил (JARVIS_ENABLE_UITARS).
+        enable_uitars = updates.get("JARVIS_ENABLE_UITARS", "1") == "1"
+        uitars_step = (
+            f'{base} up -d --wait --wait-timeout 600 --force-recreate --no-deps vllm-ui-tars && '
+            if enable_uitars else f'{base} stop vllm-ui-tars & ')
+        seq = (
+            f'{base} stop vllm-qwen-coder vllm-ui-tars audio-layer & '
+            f'{base} up -d --wait --wait-timeout 1200 --force-recreate --no-deps vllm-qwen-coder && '
+            + uitars_step +
+            f'{base} up -d audio-layer backend sandbox'
+        )
+        await _host_exec(f'start "jarvis-inference" cmd /c "{seq}"')
+        return JSONResponse({"ok": True, "applied": mode_id, "started": True,
+                             "uitars_enabled": enable_uitars})
+
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
 @app.post("/api/control/cleanup")
 async def control_cleanup(payload: dict[str, Any]) -> JSONResponse:
     """check — найти мусор; clean — удалить выбранное."""
@@ -974,6 +1033,29 @@ async def agent_mcp() -> JSONResponse:
     """Статус MCP-серверов и список их инструментов (для дашборда)."""
     from orchestrator import agent
     return JSONResponse(agent.mcp_status())
+
+
+@app.get("/api/agent/incidents")
+async def agent_incidents(limit: int = 50) -> JSONResponse:
+    """v2.0: журнал решённых инцидентов (эпистемическая память)."""
+    from orchestrator import agent
+    return JSONResponse(agent.incident_overview(limit=limit))
+
+
+@app.post("/api/agent/incidents")
+async def agent_incidents_action(payload: dict[str, Any]) -> JSONResponse:
+    """v2.0: действия над журналом инцидентов: clear."""
+    from orchestrator import agent
+    if payload.get("action") == "clear":
+        return JSONResponse({"ok": True, "cleared": agent.clear_incidents()})
+    return JSONResponse({"ok": False, "error": "Неизвестное действие."}, status_code=400)
+
+
+@app.get("/api/agent/skills")
+async def agent_skills() -> JSONResponse:
+    """v2.0: каталог скомпилированных навыков (кузница навыков)."""
+    from orchestrator import agent
+    return JSONResponse(agent.skills_overview())
 
 
 # --------------------------------------------------------------------------- #

@@ -35,3 +35,6 @@ logs/
 runtime/
 sandbox/
 deployment_report_*.md
+
+# Ядро v2.0 (рантайм): журнал инцидентов, навыки, медиа — не коммитим.
+.jarvis_core/

@@ -82,6 +82,7 @@ services:
       --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
       --enable-prefix-caching
       --max-num-seqs 8
+      ${JARVIS_QWEN_EXTRA_ARGS:-}
       --host 0.0.0.0
       --port 8001
     ports:
@@ -168,11 +169,24 @@ services:
     container_name: jarvis-audio
     restart: unless-stopped
     <<: *gpu-all
+    # v2.0: приоритетная изоляция аудио-потоков (SYS_NICE) и закрепление весов
+    # ASR/TTS в RAM (IPC_LOCK + снятый memlock), чтобы голос не заикался под
+    # нагрузкой и веса не уходили в своп при давлении KV-кэша основной LLM.
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     environment:
       - WHISPER_MODEL=large-v3
       - WHISPER_COMPUTE_TYPE=int8_float16
       - KOKORO_VOICE=af_sky
       - NVIDIA_VISIBLE_DEVICES=0
+      # Приоритет аудио-потоков (nice) и пиннинг весов в RAM (mlockall).
+      - JARVIS_AUDIO_NICE=${JARVIS_AUDIO_NICE:--10}
+      - JARVIS_AUDIO_MLOCK=${JARVIS_AUDIO_MLOCK:-1}
       # Возобновляемая загрузка весов (Whisper/Kokoro) — см. комментарий выше
       - HF_HUB_ENABLE_HF_TRANSFER=0
       - HF_HUB_DOWNLOAD_TIMEOUT=120
@@ -253,6 +267,9 @@ services:
       - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
       # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
+      # v2.0: ядро (журнал инцидентов, кузница навыков, медиа) — на томе данных,
+      # чтобы опыт и навыки переживали рестарт контейнера.
+      - JARVIS_CORE_DIR=/data/jarvis_core
       # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).
       - JARVIS_MCP_CONFIG=/app/mcp_servers.json
     extra_hosts:
@@ -264,6 +281,8 @@ services:
       - ${JARVIS_HOME_HOST:-~/.jarvis}:/root/.jarvis
       # Постоянная память агента — на томе данных (переживает рестарт контейнера).
       - ${JARVIS_DATA_DIR:-../data}/memory:/data/memory
+      # Ядро v2.0: resolved_incidents.json, tools/ (навыки), media/ — на томе данных.
+      - ${JARVIS_DATA_DIR:-../data}/jarvis_core:/data/jarvis_core
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

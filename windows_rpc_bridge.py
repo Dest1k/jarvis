@@ -493,8 +493,18 @@ class HostExecutor:
 
         return await loop.run_in_executor(None, _b)
 
+    # Windows-нативные скрипты, которым CRLF нужен по природе — их переводы
+    # строк НЕ нормализуем. Всё остальное пишется с LF (инженерный стандарт v2.0).
+    _CRLF_SUFFIXES = (".bat", ".cmd", ".ps1", ".psm1", ".reg")
+
     async def write_file(self, path: str, content: str) -> dict[str, Any]:
-        """Записать файл на хосте (конфиг из дашборда / создание файлов агентом)."""
+        """
+        Записать файл на хосте (конфиг из дашборда / создание файлов агентом).
+
+        v2.0: жёсткие гарантии — UTF-8 всегда; LF для всех файлов, КРОМЕ явно
+        Windows-нативных (.bat/.ps1/...). newline="" отключает платформенную
+        трансляцию, иначе Windows молча вернул бы CRLF.
+        """
         loop = asyncio.get_running_loop()
         real = self._expand_path(path)
 
@@ -502,11 +512,14 @@ class HostExecutor:
             try:
                 p = Path(real)
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
+                keep_crlf = p.suffix.lower() in self._CRLF_SUFFIXES
+                data = content if keep_crlf else content.replace("\r\n", "\n").replace("\r", "\n")
+                p.write_text(data, encoding="utf-8", newline="")
                 # Возвращаем АБСОЛЮТНЫЙ путь — агент использует его, чтобы открыть
                 # файл в нужной программе (напр. code "<path>").
+                eol = "CRLF" if keep_crlf else "LF"
                 return {"returncode": 0,
-                        "stdout": f"Записано {len(content)} символов в {p.resolve()}"}
+                        "stdout": f"Записано {len(data)} символов в {p.resolve()} (UTF-8, {eol})"}
             except Exception as exc:  # noqa: BLE001
                 return {"returncode": 1, "stderr": str(exc)}
 

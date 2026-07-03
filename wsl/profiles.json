@@ -14,7 +14,8 @@
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.80",
         "JARVIS_QWEN_MAX_LEN": "16384",
-        "JARVIS_QWEN_KV_DTYPE": "fp8"
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": ""
       }
     },
     "gui": {
@@ -44,7 +45,8 @@
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.82",
         "JARVIS_QWEN_MAX_LEN": "32768",
-        "JARVIS_QWEN_KV_DTYPE": "fp8"
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": ""
       }
     },
     "gui": {
@@ -73,7 +75,8 @@
         "JARVIS_QWEN_DTYPE": "half",
         "JARVIS_QWEN_GPU_UTIL": "0.45",
         "JARVIS_QWEN_MAX_LEN": "16384",
-        "JARVIS_QWEN_KV_DTYPE": "auto"
+        "JARVIS_QWEN_KV_DTYPE": "auto",
+        "JARVIS_QWEN_EXTRA_ARGS": ""
       }
     },
     "gui": {
@@ -107,7 +110,8 @@
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.62",
         "JARVIS_QWEN_MAX_LEN": "12288",
-        "JARVIS_QWEN_KV_DTYPE": "fp8"
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": ""
       }
     },
     "gui": {
@@ -141,7 +145,8 @@
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.35",
         "JARVIS_QWEN_MAX_LEN": "12288",
-        "JARVIS_QWEN_KV_DTYPE": "fp8"
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": ""
       }
     },
     "gui": {
@@ -159,6 +164,36 @@
         "JARVIS_UITARS_MODEL_NAME": "ui-tars",
         "JARVIS_VISION_MODEL": "auto",
         "JARVIS_ENABLE_UITARS": "1"
+      }
+    }
+  },
+  "gemma4-dense-hybrid": {
+    "label": "★ v2.0 Dense-гибрид: Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM + UI-TARS-2B",
+    "vram": "NVFP4 ~21 ГБ помещается резидентно; util 0.68 × 32 = 21.8 ГБ на GPU (веса-резидент ~13 + KV ~8), ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS-2B ~5 + аудио ~2 в остатке.",
+    "note": "Реальные веса (проверено на HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it, 30.7B). Требует --quantization modelopt. Плотная 31B в NVFP4 ВЛЕЗАЕТ в 32 ГБ; оффлоад в host-RAM — осознанный размен VRAM ради запаса контекста и сосуществования с UI-TARS. Эквивалент инференс-режима dense-hybrid (inference.py).",
+    "dispatcher": {
+      "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
+      "name": "gemma4-31b-it-nvfp4",
+      "env": {
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-it-nvfp4",
+        "JARVIS_QWEN_QUANT_ARGS": "--quantization modelopt",
+        "JARVIS_QWEN_DTYPE": "auto",
+        "JARVIS_QWEN_GPU_UTIL": "0.68",
+        "JARVIS_QWEN_MAX_LEN": "16384",
+        "JARVIS_QWEN_KV_DTYPE": "fp8",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --cpu-offload-gb 8 --swap-space 8"
+      }
+    },
+    "gui": {
+      "repo": "bytedance-research/UI-TARS-2B-SFT",
+      "name": "ui-tars",
+      "env": {
+        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
+        "JARVIS_UITARS_QUANT_ARGS": "",
+        "JARVIS_UITARS_DTYPE": "half",
+        "JARVIS_UITARS_GPU_UTIL": "0.85",
+        "JARVIS_UITARS_MAX_LEN": "4096",
+        "JARVIS_UITARS_KV_DTYPE": "fp8"
       }
     }
   }

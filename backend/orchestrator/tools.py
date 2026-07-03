@@ -40,11 +40,16 @@ import operator as _operator
 import os
 import re
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
+
+from . import media
+from .git_intel import GitIntelligence
+from .skills import forge
 
 log = logging.getLogger("jarvis.tools")
 
@@ -990,6 +995,119 @@ async def tool_list_dir(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
     return {"ok": res.get("ok", False), "content": _truncate(out or "(пусто)")}
 
 
+# --- v2.0: Git-интеллект (разведка веток, diff-оценка, безопасный перенос) -- #
+def _make_git_runner(repo: str, ctx: ToolContext):
+    """
+    Исполнитель git-команд по расположению репозитория: /workspace/… — sandbox;
+    иначе — Windows-хост через RPC-мост (деструктивные git-паттерны проходят HITL).
+    """
+    if repo.startswith("/workspace"):
+        from . import dockerapi
+
+        async def _sandbox_run(cmd: str) -> tuple[Optional[int], str]:
+            return await dockerapi.exec_run(
+                SANDBOX_CONTAINER, ["bash", "-lc", cmd], timeout=90)
+
+        return _sandbox_run
+
+    if ctx.bridge is None:
+        return None
+
+    async def _host_run(cmd: str) -> tuple[Optional[int], str]:
+        res = await ctx.bridge.call("exec", {"command": cmd})
+        r = (res or {}).get("result", {}) or {}
+        rc = r.get("returncode")
+        out = ((r.get("stdout") or "") + (r.get("stderr") or "")).strip()
+        if rc is None:
+            rc = 0 if res.get("ok") else 1
+            out = out or str(res.get("error") or "")
+        return rc, out
+
+    return _host_run
+
+
+async def tool_git_intel(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Автономный Git-модуль: scan | evaluate | port (см. git_intel.py)."""
+    repo = str(args.get("repo", "")).strip()
+    action = str(args.get("action", "scan")).strip().lower()
+    if not repo:
+        return {"ok": False, "content": "Не задан 'repo' (путь к репозиторию)."}
+    runner = _make_git_runner(repo, ctx)
+    if runner is None:
+        return {"ok": False,
+                "content": "RPC-мост недоступен — git на хосте невозможен "
+                           "(для sandbox путь должен начинаться с /workspace)."}
+    gi = GitIntelligence(repo, runner)
+    if action in ("scan", "branches", "discover"):
+        return await gi.scan()
+    if action in ("evaluate", "diff", "analyze"):
+        donor = str(args.get("branch", "")).strip()
+        if not donor:
+            return {"ok": False, "content": "Для evaluate нужна 'branch' (ветка-донор)."}
+        return await gi.evaluate(donor)
+    if action == "port":
+        donor = str(args.get("branch", "")).strip()
+        paths = args.get("paths") or []
+        if isinstance(paths, str):
+            paths = [p.strip() for p in paths.split(",") if p.strip()]
+        if not donor:
+            return {"ok": False, "content": "Для port нужна 'branch' (ветка-донор)."}
+        return await gi.port(donor, paths, message=str(args.get("message", "")))
+    return {"ok": False,
+            "content": f"Неизвестное действие '{action}'. Доступно: scan, evaluate, port."}
+
+
+# --- v2.0: Кузница навыков (компиляция рутин в CLI-скрипты) ----------------- #
+async def tool_skill_compile(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Скомпилировать рутину в постоянный CLI-навык (.jarvis_core/tools)."""
+    result = forge.compile_skill(
+        name=str(args.get("name", "")),
+        description=str(args.get("description", "")),
+        code=str(args.get("code", "")),
+        language=str(args.get("language", "python")),
+        usage=str(args.get("usage", "")),
+    )
+    if not result.get("ok"):
+        return {"ok": False, "content": result.get("error", "Компиляция не удалась.")}
+    return {"ok": True,
+            "content": (f"Навык '{result['name']}' скомпилирован и внесён в индекс "
+                        f"({result['path']}). Запуск: skill_run.")}
+
+
+async def tool_skill_list(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Каталог скомпилированных навыков из центрального индекса."""
+    items = forge.list_skills()
+    if not items:
+        return {"ok": True, "content": "Навыки ещё не скомпилированы "
+                                       "(индекс .jarvis_core/tools пуст)."}
+    lines = [f"- {it['name']} ({it['language']}): {it['description']}"
+             f" | запуск: {it['usage']}" for it in items]
+    return {"ok": True, "content": _truncate("Скомпилированные навыки:\n" + "\n".join(lines))}
+
+
+async def tool_skill_run(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Исполнить скомпилированный навык в изолированном sandbox."""
+    name = str(args.get("name", "")).strip()
+    if not name:
+        return {"ok": False, "content": "Не задано 'name' навыка."}
+    raw_args = args.get("args") or []
+    if isinstance(raw_args, str):
+        raw_args = raw_args.split()
+    timeout = int(args.get("timeout", 120))
+    return await forge.run_skill(name, [str(a) for a in raw_args], timeout=timeout)
+
+
+# --- v2.0: Запись экрана в HEVC/H.265 (hardware-accelerated) ---------------- #
+async def tool_screen_record(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Записать виртуальный десктоп в HEVC-MP4 (NVENC → QSV → libx265)."""
+    duration = int(args.get("duration", 10))
+    size = str(args.get("size", "1280x720")).strip() or "1280x720"
+    fps = max(1, min(int(args.get("fps", 30)), 60))
+    if not re.match(r"^\d{2,4}x\d{2,4}$", size):
+        return {"ok": False, "content": f"Некорректный размер кадра: '{size}'."}
+    return await media.record_display(duration, size=size, fps=fps)
+
+
 # =========================================================================== #
 # Реестр
 # =========================================================================== #
@@ -1187,6 +1305,56 @@ class ToolRegistry:
             {"path": "путь к папке (поддержка %USERPROFILE%, ~)"},
             tool_list_dir,
         ))
+        # --- v2.0: git-интеллект, кузница навыков, запись экрана ---
+        self.add(Tool(
+            "git_intel",
+            "Git-интеллект: action=scan — разведка веток (git branch -a, свежесть "
+            "коммитов); action=evaluate — сравнить активную ветку с веткой-донором и "
+            "получить анализ, какие улучшенные блоки кода отсутствуют в активной; "
+            "action=port — БЕЗОПАСНО перенести файлы донора в новую staging-ветку "
+            "(main и активная ветка не трогаются).",
+            {"repo": "путь к репозиторию (Windows-путь или /workspace/... для sandbox)",
+             "action": "scan|evaluate|port",
+             "branch": "ветка-донор (для evaluate/port)",
+             "paths": "(для port) файлы для переноса, список или через запятую",
+             "message": "(опц., для port) сообщение коммита"},
+            tool_git_intel,
+        ))
+        self.add(Tool(
+            "skill_compile",
+            "Скомпилировать повторяющуюся рутину в ПОСТОЯННЫЙ CLI-навык: скрипт "
+            "сохраняется в .jarvis_core/tools (UTF-8, LF, shebang, --help) и вносится "
+            "в центральный индекс. Скрипт должен быть самодостаточным (argparse/getopts).",
+            {"name": "имя навыка (латиница/цифры/подчёркивания)",
+             "description": "что делает навык (для индекса)",
+             "language": "python|bash",
+             "code": "полный код CLI-скрипта",
+             "usage": "(опц.) пример запуска для индекса"},
+            tool_skill_compile,
+        ))
+        self.add(Tool(
+            "skill_list",
+            "Показать каталог скомпилированных навыков (центральный индекс).",
+            {},
+            tool_skill_list,
+        ))
+        self.add(Tool(
+            "skill_run",
+            "Исполнить скомпилированный навык в изолированном sandbox.",
+            {"name": "имя навыка из skill_list",
+             "args": "(опц.) аргументы CLI, список или строка",
+             "timeout": "(опц.) лимит секунд, по умолч. 120"},
+            tool_skill_run,
+        ))
+        self.add(Tool(
+            "screen_record",
+            "Записать видео виртуального десктопа в HEVC/H.265 (аппаратное "
+            "ускорение NVENC; файл — в .jarvis_core/media).",
+            {"duration": "длительность в секундах (по умолч. 10, макс. 600)",
+             "size": "(опц.) размер кадра, по умолч. 1280x720",
+             "fps": "(опц.) кадров/с, по умолч. 30"},
+            tool_screen_record,
+        ))
 
     def add(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -1214,4 +1382,10 @@ class ToolRegistry:
             return await tool.handler(args or {}, ctx)
         except Exception as exc:  # noqa: BLE001
             log.exception("Инструмент %s упал", name)
-            return {"ok": False, "content": f"Инструмент '{name}' завершился ошибкой: {exc}"}
+            # v2.0: traceback — ТЕЛЕМЕТРИЯ для самокорректирующегося цикла и
+            # сопоставления с журналом инцидентов (см. agent.py).
+            tb_tail = _truncate(traceback.format_exc(), 1200)
+            return {"ok": False,
+                    "content": (f"Инструмент '{name}' завершился ошибкой: {exc}\n"
+                                f"[телеметрия traceback]\n{tb_tail}"),
+                    "error": str(exc)}
