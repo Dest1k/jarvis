@@ -30,7 +30,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from cognitive_core import config, db, ingest, models, subagents
+from cognitive_core import config, db, ingest, maintenance, models, subagents
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -464,6 +464,37 @@ async def update_plan_task(plan_id: str, task_id: str, payload: dict[str, Any]) 
         params=params, actor=str(payload.get("actor", "local-admin")),
         actor_kind="human", reason="manual task edit")
     return _env({"task": res.get("after")}, audit_id=res.get("audit_id"))
+
+
+# --------------------------------------------------------------------------- #
+# Sleep-Cycle / память: консолидация, forgetting, recall, post-mortem
+# --------------------------------------------------------------------------- #
+@router.post("/maintenance/sleep-cycle")
+async def run_sleep_cycle() -> JSONResponse:
+    """Прогнать sleep-cycle: decay → prune → consolidate (для idle/ручного запуска)."""
+    return _env(await maintenance.sleep_cycle())
+
+
+@router.post("/maintenance/recall/{node_id}")
+async def recall_node(node_id: str) -> JSONResponse:
+    return _env(await maintenance.recall(node_id))
+
+
+@router.post("/maintenance/reinforce/{node_id}")
+async def reinforce_node(node_id: str) -> JSONResponse:
+    return _env(await maintenance.reinforce(node_id))
+
+
+@router.post("/maintenance/post-mortem")
+async def post_mortem(payload: dict[str, Any]) -> JSONResponse:
+    """Разбор завершённой задачи: success/failure → эпизод + корректирующее знание."""
+    res = await maintenance.post_mortem(
+        session_id=str(payload.get("session_id", "default")),
+        task=str(payload.get("task", "")),
+        outcome=str(payload.get("outcome", "unknown")),
+        detail=str(payload.get("detail", "")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(res)
 
 
 @router.websocket("/stream")
