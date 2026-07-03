@@ -251,6 +251,14 @@ bridge = HostBridgeClient()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("Старт ядра JARVIS-OS. Подключаюсь к подсистемам…")
+    # Когнитивное ядро: подключить БД и применить схему (best-effort — сбой БД
+    # не должен ронять ядро; эндпоинты /api/cognitive тогда вернут ошибку).
+    try:
+        from cognitive_core import db as cc_db
+        await cc_db.connect()
+        log.info("Когнитивное ядро: БД подключена (%s).", cc_db.DB_PATH)
+    except Exception:  # noqa: BLE001
+        log.exception("Когнитивное ядро: БД не поднялась (работаю без неё)")
     bridge_task = asyncio.create_task(bridge.run_forever())
     # MCP-серверы поднимаем в фоне (не блокируя старт ядра): инструменты появятся
     # в реестре агента по мере подключения серверов.
@@ -280,6 +288,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Когнитивное ядро: живые REST/WS-контракты дашборда (settings/graph/audit/db/
+# state/health). Подключается best-effort — если модуль недоступен, ядро
+# работает как прежде.
+try:
+    from cognitive_api import router as cognitive_router
+    app.include_router(cognitive_router)
+    log.info("Когнитивное ядро: API-роутер подключён (/api/cognitive/*).")
+except Exception:  # noqa: BLE001
+    log.exception("Когнитивное ядро: API-роутер не подключён")
 
 
 # --------------------------------------------------------------------------- #

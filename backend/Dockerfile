@@ -70,8 +70,10 @@ RUN (playwright install-deps chromium || npx --yes playwright install-deps chrom
     || echo "[warn] Chromium для Playwright MCP не установился — доустановите вручную (см. коммент выше)"
 
 COPY server.py ./
+COPY cognitive_api.py ./
 COPY mcp_servers.json ./
 COPY orchestrator ./orchestrator
+COPY cognitive_core ./cognitive_core
 COPY entrypoint.sh ./
 # Страховка от CRLF: если entrypoint.sh пришёл с Windows-переводами строк
 # (git core.autocrlf=true), shebang '…/env bash\r' не выполнится на Linux и
