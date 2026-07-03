@@ -14,14 +14,18 @@ inference.py — двухрежимный инференс-конвейер JARV
         ~4.8 ГБ под аудио и рабочий стол, иначе они голодают на 32 ГБ). UI-TARS
         отключается — карта отдана скорости диспетчера.
 
-    РЕЖИМ 2 — «dense-hybrid»: nvidia/Gemma-4-31B-IT-NVFP4
-        База google/gemma-4-31B-it. Плотная, 30.7B. NVFP4 ≈ 21 ГБ на диске —
-        РЕЗИДЕНТНО помещается в 32 ГБ (веса 21 + KV в остатке). Гибридный
-        оффлоад (--cpu-offload-gb) переносит часть параметров в 128-ГБ
-        host-RAM, освобождая VRAM под больший контекст и сосуществование с
-        UI-TARS/аудио; --swap-space страхует KV от OOM. Это НЕ спасение от
-        неминуемого OOM (модель и так влезает), а осознанный размен VRAM на
-        host-RAM ради запаса. Требует --quantization modelopt.
+    РЕЖИМ 2 — «dense-hybrid» (СОЛО): nvidia/Gemma-4-31B-IT-NVFP4
+        База google/gemma-4-31B-it. Плотная, 30.7B, мультимодальная — экран
+        видит сама, отдельный UI-TARS НЕ поднимается. NVFP4 ≈ 21 ГБ на диске.
+        Гибридный оффлоад (--cpu-offload-gb) переносит часть параметров в
+        128-ГБ host-RAM, высвобождая VRAM под KV-кэш; --swap-space страхует
+        KV от OOM. Это НЕ спасение от неминуемого OOM (модель и так влезает),
+        а осознанный размен VRAM на host-RAM ради запаса. Требует
+        --quantization modelopt.
+
+    Оба режима — СОЛО: JARVIS_ENABLE_UITARS=0, зрение (see_screen/gui)
+    перенаправлено на эндпоинт диспетчера. Второй vLLM не поднимается — на
+    32-ГБ карте ему нет места рядом с агрессивным KV-пулом (OOM-цикл).
 
 Модуль — ЧИСТЫЙ реестр режимов (без I/O): вычисляет наборы env-переменных
 для docker-compose и распознаёт активный режим по содержимому wsl/.env.
@@ -34,11 +38,28 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # Ключи env, которыми режим управляет (совпадают с docker-compose.agents.yml).
+# ВАЖНО: vision-ключи (JARVIS_UITARS_URL и т.д.) входят в набор — иначе при
+# переключении с двойного профиля в .env залипал бы адрес выключенного UI-TARS
+# и «зрение» било бы в мёртвый эндпоинт.
 _MANAGED_KEYS = (
     "JARVIS_QWEN_MODEL_PATH", "JARVIS_QWEN_QUANT_ARGS", "JARVIS_QWEN_DTYPE",
     "JARVIS_QWEN_GPU_UTIL", "JARVIS_QWEN_MAX_LEN", "JARVIS_QWEN_KV_DTYPE",
     "JARVIS_QWEN_EXTRA_ARGS", "JARVIS_ENABLE_UITARS",
+    "JARVIS_UITARS_URL", "JARVIS_UITARS_MODEL_NAME", "JARVIS_UITARS_MAX_LEN",
+    "JARVIS_UITARS_COORD_MODE", "JARVIS_VISION_MODEL",
 )
+
+# СОЛО-редирект зрения: обе Gemma 4 мультимодальны — see_screen/gui обслуживает
+# сам диспетчер, отдельный UI-TARS не поднимается (экономия ~5-6 ГБ VRAM).
+def _solo_vision(max_len: str) -> dict[str, str]:
+    return {
+        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
+        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MAX_LEN": max_len,
+        "JARVIS_UITARS_COORD_MODE": "auto",
+        "JARVIS_VISION_MODEL": "dispatcher",
+        "JARVIS_ENABLE_UITARS": "0",
+    }
 
 # Общие флаги Gemma 4 для vLLM: доверенный код архитектуры + встроенные парсеры
 # инструментов/reasoning (Gemma 4 — reasoning-модель; без парсера reasoning
@@ -70,33 +91,33 @@ MODES: dict[str, dict[str, Any]] = {
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --max-num-seqs 16",
-            "JARVIS_ENABLE_UITARS": "0",
+            **_solo_vision("32768"),
         },
     },
     "dense-hybrid": {
-        "label": "Режим 2 · Dense-гибрид: Gemma-4-31B-IT (NVFP4) + оффлоад в 128 ГБ RAM",
+        "label": "Режим 2 · Dense-гибрид (СОЛО): Gemma-4-31B-IT (NVFP4) + оффлоад в 128 ГБ RAM",
         "model_repo": "nvidia/Gemma-4-31B-IT-NVFP4",
         "model_name": "gemma4-31b-it-nvfp4",
         "summary": (
-            "Максимальное качество (плотная 30.7B). NVFP4 ~21 ГБ РЕЗИДЕНТНО "
-            "помещается в 32 ГБ. Гибридный оффлоад (--cpu-offload-gb 8) "
-            "переносит часть весов в pinned host-RAM (DMA по PCIe 5.0, prefetch "
-            "перекрыт вычислением), освобождая VRAM под больший контекст и "
-            "сосуществование с UI-TARS-2B; --swap-space 8 страхует KV от OOM. "
+            "Максимальное качество (плотная 30.7B, мультимодальная — экран видит "
+            "САМА, UI-TARS не поднимается). NVFP4 ~21 ГБ; гибридный оффлоад "
+            "(--cpu-offload-gb 8) переносит часть весов в pinned host-RAM (DMA "
+            "по PCIe 5.0, prefetch перекрыт вычислением), высвобождая VRAM под "
+            "KV-кэш; --swap-space 8 страхует KV от OOM. "
             "Требует --quantization modelopt. vLLM TP=1."
         ),
-        "vram": "GPU util 0.68 × 32 = 21.8 ГБ (веса-резидент ~13 + KV ~8); "
+        "vram": "GPU util 0.75 × 32 = 24.0 ГБ (веса-резидент ~13 + overhead ~1 + KV ~10); "
                 "~8 ГБ весов и до 8 ГБ KV-свопа в host-RAM (из 128); "
-                "UI-TARS-2B ~5 + аудио ~2 в GPU-остатке.",
+                "аудио ~2 + резерв десктопа ~6 ГБ. UI-TARS НЕ поднимается.",
         "env": {
             "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-it-nvfp4",
             "JARVIS_QWEN_QUANT_ARGS": "--quantization modelopt",
             "JARVIS_QWEN_DTYPE": "auto",
-            "JARVIS_QWEN_GPU_UTIL": "0.68",
+            "JARVIS_QWEN_GPU_UTIL": "0.75",
             "JARVIS_QWEN_MAX_LEN": "16384",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --cpu-offload-gb 8 --swap-space 8",
-            "JARVIS_ENABLE_UITARS": "1",
+            **_solo_vision("16384"),
         },
     },
 }

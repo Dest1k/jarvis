@@ -88,47 +88,146 @@ def docker_ready() -> bool:
         return False
 
 
-def ensure_docker(wait_secs: int = 180) -> bool:
-    """
-    Гарантировать, что Docker-демон запущен. Если нет — попытаться запустить
-    Docker Desktop и дождаться готовности. Без этого все docker-команды сыпали
-    «cannot find file …dockerDesktopLinuxEngine» и стек молча не поднимался.
-    """
-    if docker_ready():
-        return True
-    info("Docker не отвечает — пробую запустить Docker Desktop…")
+def _start_docker_desktop() -> bool:
+    """Запустить Docker Desktop (по известным путям или ярлыку)."""
     candidates = [
         os.path.expandvars(r"%ProgramFiles%\Docker\Docker\Docker Desktop.exe"),
         os.path.expandvars(r"%ProgramW6432%\Docker\Docker\Docker Desktop.exe"),
         os.path.expandvars(r"%LocalAppData%\Docker\Docker Desktop.exe"),
     ]
-    started = False
     for exe in candidates:
         if exe and Path(exe).exists():
             try:
                 subprocess.Popen([exe], close_fds=True)
-                started = True
-                break
+                return True
             except Exception:  # noqa: BLE001
                 continue
-    if not started:
-        try:                       # последняя попытка — по ярлыку в PATH/Start
-            subprocess.Popen('start "" "Docker Desktop"', shell=True)
-            started = True
-        except Exception:  # noqa: BLE001
-            pass
-    if not started:
+    try:                       # последняя попытка — по ярлыку в PATH/Start
+        subprocess.Popen('start "" "Docker Desktop"', shell=True)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wait_docker(wait_secs: int) -> bool:
+    """Подождать готовности Docker-демона (docker info) до wait_secs секунд."""
+    for _ in range(max(1, wait_secs // 3)):
+        time.sleep(3)
+        if docker_ready():
+            return True
+    return False
+
+
+def _kill_docker_desktop() -> None:
+    """Мягко прибить процессы Docker Desktop перед перезапуском."""
+    for name in ("Docker Desktop.exe", "com.docker.backend.exe",
+                 "com.docker.build.exe", "com.docker.dev-envs.exe"):
+        subprocess.run(["taskkill", "/F", "/IM", name],
+                       capture_output=True, text=True)
+
+
+def _disable_wsl_integration() -> bool:
+    """
+    Отключить WSL-интеграцию Docker Desktop с пользовательскими дистрибутивами.
+
+    Лечит устойчивый краш старта Docker Desktop на этапе «setting up docker user
+    group in <distro>» (Wsl/Service/0x800703e3): интеграция с Ubuntu-24.04
+    НАШЕМУ стеку не нужна — контейнеры живут в служебном дистрибутиве
+    docker-desktop, а docker CLI работает из Windows. Правит settings-store.json
+    (или settings.json) с резервной копией .bak. Возвращает True, если что-то
+    реально изменили.
+    """
+    appdata = os.environ.get("APPDATA", "")
+    changed = False
+    for fname in ("settings-store.json", "settings.json"):
+        p = Path(appdata) / "Docker" / fname
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        upd = {}
+        # ключи различаются регистром между версиями Docker Desktop
+        for key in ("integratedWslDistros", "IntegratedWslDistros"):
+            if data.get(key):
+                upd[key] = []
+        for key in ("enableIntegrationWithDefaultWslDistro",
+                    "EnableIntegrationWithDefaultWslDistro"):
+            if data.get(key) is True:
+                upd[key] = False
+        if not upd:
+            continue
+        try:
+            p.with_suffix(p.suffix + ".bak").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            data.update(upd)
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+            info(f"Отключил WSL-интеграцию Docker Desktop в {fname} "
+                 f"(резервная копия: {fname}.bak).")
+            changed = True
+        except OSError as exc:
+            info(f"Не удалось поправить {fname}: {exc}")
+    return changed
+
+
+def ensure_docker(wait_secs: int = 180) -> bool:
+    """
+    Гарантировать, что Docker-демон запущен, с многоступенчатым лечением.
+
+    СТАДИЯ 1: запустить Docker Desktop и подождать.
+    СТАДИЯ 2: не поднялся → типовое залипание WSL (Wsl/Service/0x800703e3,
+        «Операция ввода/вывода была прервана…» на `wsl -d <distro> -e whoami`
+        в фазе "setting up docker user group"). Лечение: убить Docker Desktop,
+        `wsl --shutdown` (полный сброс WSL-ВМ), запустить заново.
+    СТАДИЯ 3: упорствует → отключить WSL-интеграцию Docker Desktop с
+        пользовательскими дистрибутивами (наш стек в ней не нуждается) и
+        перезапустить ещё раз.
+    """
+    if docker_ready():
+        return True
+    info("Docker не отвечает — пробую запустить Docker Desktop…")
+    if not _start_docker_desktop():
         info("Не нашёл Docker Desktop.exe. Запусти Docker Desktop вручную и повтори "
              "`python jarvis.py up`.")
         return False
     info(f"Жду готовности Docker (до {wait_secs} с, первый запуск дольше)…")
-    for _ in range(max(1, wait_secs // 3)):
+    if _wait_docker(wait_secs):
+        info("Docker готов.")
+        return True
+
+    # --- СТАДИЯ 2: сброс WSL (классическое лечение Wsl/Service/0x800703e3) ---
+    info("Docker не поднялся. Похоже на залипание WSL (Wsl/Service/0x800703e3). "
+         "Сбрасываю WSL-ВМ и перезапускаю Docker Desktop…")
+    _kill_docker_desktop()
+    time.sleep(3)
+    run(["wsl", "--shutdown"])
+    time.sleep(8)          # дать службе WSL полностью остановить ВМ
+    _start_docker_desktop()
+    info(f"Повторное ожидание Docker (до {wait_secs} с)…")
+    if _wait_docker(wait_secs):
+        info("Docker готов (после сброса WSL).")
+        return True
+
+    # --- СТАДИЯ 3: отключить WSL-интеграцию (крашится именно она) ---
+    info("Docker всё ещё молчит. Отключаю WSL-интеграцию Docker Desktop с "
+         "пользовательскими дистрибутивами (стеку JARVIS она не нужна)…")
+    if _disable_wsl_integration():
+        _kill_docker_desktop()
         time.sleep(3)
-        if docker_ready():
-            info("Docker готов.")
+        run(["wsl", "--shutdown"])
+        time.sleep(8)
+        _start_docker_desktop()
+        info(f"Финальное ожидание Docker (до {wait_secs} с)…")
+        if _wait_docker(wait_secs):
+            info("Docker готов (после отключения WSL-интеграции).")
             return True
-    info("Docker так и не ответил. Открой Docker Desktop, дождись «Engine running» "
-         "и повтори `python jarvis.py up`.")
+
+    info("Docker так и не ответил. Вручную: открой Docker Desktop → дождись "
+         "«Engine running»; если крашится с Wsl/Service/0x800703e3 — Settings → "
+         "Resources → WSL Integration → сними галочку с Ubuntu-24.04, затем "
+         "`wsl --shutdown` и повтори `python jarvis.py up`.")
     return False
 
 
@@ -446,13 +545,13 @@ HELP_TEXT = r"""
   python jarvis.py help                   Этот экран.
 
 ПРОФИЛИ (один пресет = связка моделей, см. `profiles`):
-  ── v2.0 (Gemma 4, совпадают с кнопками «Инференс-режим» в Пульте) ──
+  ── v2.0 (Gemma 4, СОЛО, совпадают с кнопками «Инференс-режим» в Пульте) ──
   moe-turbo       ★ СОЛО: Gemma-4-26B-A4B (NVFP4) — быстрый, БЕЗ UI-TARS.
                   Для УЖЕ скачанной модели data/models/gemma4-26b-a4b-nvfp4.
-                  util 0.85; UI-TARS отключён (JARVIS_ENABLE_UITARS=0) —
-                  иначе он отъедает VRAM и падает в цикле на 32 ГБ.
-  dense-hybrid    ★ Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM +
-                  UI-TARS-2B. Максимум качества (--quantization modelopt).
+                  util 0.85; зрение — сама Gemma (мультимодальная).
+  dense-hybrid    ★ СОЛО: Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM,
+                  БЕЗ UI-TARS. Максимум качества (--quantization modelopt);
+                  util 0.75, зрение — сама Gemma.
   ── прочие ──
   gemma4-mono     МОНОЛИТ на Gemma-4-26B-A4B (то же, что moe-turbo, util 0.82).
   gemma27-mono    ★★ МОНОЛИТ: Gemma-3-27B (AWQ) рулит ВСЕМ, UI-TARS не поднимается.
@@ -460,9 +559,10 @@ HELP_TEXT = r"""
   gemma4-tars15   Gemma-4-26B-A4B MoE (NVFP4, util 0.62) + ОТДЕЛЬНЫЙ UI-TARS-2B.
   qwen-classic    Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B.
 
-  ВАЖНО: профиль/режим с UI-TARS (dense-hybrid, *-tars*, qwen-classic) поднимает
-  ВТОРОЙ vLLM. СОЛО/monо/moe-turbo (JARVIS_ENABLE_UITARS=0) — UI-TARS НЕ
-  поднимается (иначе OOM). Лаунчер теперь честно читает этот флаг из wsl/.env.
+  ВАЖНО: второй vLLM (UI-TARS) поднимают ТОЛЬКО двойные профили (*-tars*,
+  qwen-classic). Все СОЛО-профили (moe-turbo, dense-hybrid, *-mono) ставят
+  JARVIS_ENABLE_UITARS=0 — лаунчер честно читает флаг из wsl/.env и UI-TARS
+  не запускает (на 32 ГБ рядом с жирной Gemma он падал в OOM-цикле).
 
 ТИПИЧНЫЙ СЦЕНАРИЙ (ваша скачанная Gemma-4-26B-A4B):
   1) git pull origin main          # подтянуть свежий код (канон. ветка — main)
@@ -479,6 +579,13 @@ HELP_TEXT = r"""
 ДИАГНОСТИКА:
   • «Docker не отвечает» — `up` сам поднимет Docker Desktop; либо запусти его и
     дождись «Engine running».
+  • Docker Desktop крашится сразу после загрузки с Wsl/Service/0x800703e3
+    («setting up docker user group in Ubuntu-24.04», «Операция ввода/вывода
+    была прервана…») — `up` теперь лечит сам: сброс `wsl --shutdown` → рестарт
+    Docker; при упорстве отключает WSL-интеграцию с пользовательскими
+    дистрибутивами (стеку она не нужна; резервная копия настроек — .bak).
+    Вручную: Docker Desktop → Settings → Resources → WSL Integration → снять
+    галочку Ubuntu-24.04 → `wsl --shutdown` → повторить up.
   • «RPC-мост: нет» — закрой окно «JARVIS RPC» и запусти `python jarvis.py up`
     (или `python jarvis.py bridge`).
   • vLLM падает на старте — глянь «Мониторную»; частая причина — мало VRAM

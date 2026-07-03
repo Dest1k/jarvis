@@ -502,12 +502,15 @@ python-серверы `mcp-server-*` + npm `@modelcontextprotocol/server-*`) —
 | Режим | Репозиторий (проверен) | Параметры | На диске | Оптимизация |
 |-------|------------------------|-----------|----------|-------------|
 | **moe-turbo** | `nvidia/Gemma-4-26B-A4B-NVFP4` | 25.2B / 3.8B актив. (MoE) | ~16.5 ГБ | префикс-кэш, util 0.85, UI-TARS off |
-| **dense-hybrid** | `nvidia/Gemma-4-31B-IT-NVFP4` | 30.7B (dense) | ~21 ГБ | `--quantization modelopt`, оффлоад в 128 ГБ RAM |
+| **dense-hybrid** | `nvidia/Gemma-4-31B-IT-NVFP4` | 30.7B (dense) | ~21 ГБ | `--quantization modelopt`, util 0.75, оффлоад в 128 ГБ RAM, UI-TARS off |
 
-> Плотная 31B в NVFP4 (~21 ГБ) **помещается в 32 ГБ** резидентно; оффлоад
-> (`--cpu-offload-gb`) — осознанный размен VRAM на host-RAM ради запаса
-> контекста и сосуществования с UI-TARS, а не спасение от неминуемого OOM.
-> Обе модели — vLLM TP=1; Gemma 4 — reasoning-модель (`--reasoning-parser gemma4`).
+> Оба режима — **СОЛО**: Gemma 4 мультимодальна (экран видит сама), отдельный
+> UI-TARS не поднимается — на 32-ГБ карте рядом с жирной Gemma он падал в
+> OOM-цикле. Плотная 31B в NVFP4 (~21 ГБ) помещается в 32 ГБ; оффлоад
+> (`--cpu-offload-gb`) — осознанный размен VRAM на host-RAM ради KV-запаса,
+> а не спасение от неминуемого OOM. Обе модели — vLLM TP=1; Gemma 4 —
+> reasoning-модель (`--reasoning-parser gemma4`). Профили запуска:
+> `python jarvis.py up --profile moe-turbo | dense-hybrid`.
 
 ### B. Низколатентный аудио-слой (`audio_layer.py`)
 Выделенные пулы ASR/TTS с приоритетной изоляцией потоков (`SYS_NICE`), пиннинг

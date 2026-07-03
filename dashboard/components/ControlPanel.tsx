@@ -369,10 +369,12 @@ export default function ControlPanel() {
           )}
         </div>
         <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
-          <b>moe-turbo</b> — скорость (UI-TARS отключается). <b>dense-hybrid</b> — качество
-          (Gemma-4-31B + оффлоад в 128 ГБ RAM, UI-TARS включён). Переключение
-          перезапускает диспетчер последовательно (с прогревом). Из терминала:{" "}
-          <code>curl -X POST /api/core/api/control/inference -d {"'{\"action\":\"apply\",\"mode\":\"moe-turbo\"}'"}</code>.
+          <b>moe-turbo</b> — скорость. <b>dense-hybrid</b> — качество (Gemma-4-31B +
+          оффлоад в 128 ГБ RAM). Оба режима — СОЛО: Gemma 4 мультимодальна и видит
+          экран сама, отдельный UI-TARS не поднимается (на 32 ГБ ему нет места —
+          OOM-цикл). Переключение перезапускает диспетчер с прогревом. Из терминала:{" "}
+          <code>python jarvis.py up --profile moe-turbo</code> или{" "}
+          <code>--profile dense-hybrid</code>.
         </p>
       </div>
 

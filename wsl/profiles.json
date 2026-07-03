@@ -190,12 +190,24 @@
         "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --max-num-seqs 16",
         "JARVIS_ENABLE_UITARS": "0"
       }
+    },
+    "gui": {
+      "repo": "",
+      "name": "",
+      "env": {
+        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
+        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MAX_LEN": "32768",
+        "JARVIS_UITARS_COORD_MODE": "auto",
+        "JARVIS_VISION_MODEL": "dispatcher",
+        "JARVIS_ENABLE_UITARS": "0"
+      }
     }
   },
   "dense-hybrid": {
-    "label": "★ v2 dense-hybrid: Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM + UI-TARS-2B",
-    "vram": "NVFP4 ~21 ГБ; util 0.68 → 21.8 ГБ на GPU + оффлоад ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS-2B ~5 + аудио ~2 в остатке.",
-    "note": "Реальные веса (HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it). Требует --quantization modelopt. Плотная 31B в NVFP4 влезает в 32 ГБ; оффлоад в host-RAM — запас под контекст и UI-TARS. Эквивалент кнопки dense-hybrid в Пульте.",
+    "label": "★ v2 dense-hybrid (СОЛО): Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM, БЕЗ UI-TARS",
+    "vram": "NVFP4 ~21 ГБ (резидентно ~13 при --cpu-offload-gb 8); util 0.75 → 24.0 ГБ на GPU (веса ~13 + overhead ~1 + KV ~10) + аудио ~2 = ~26 ГБ; резерв ~6 ГБ. ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS НЕ поднимается.",
+    "note": "Реальные веса (HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it). Требует --quantization modelopt. СОЛО: мультимодальная 31B сама видит экран (see_screen/gui → эндпоинт диспетчера), UI-TARS отключён — экономия ~5 ГБ VRAM. Эквивалент кнопки dense-hybrid в Пульте.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
       "name": "gemma4-31b-it-nvfp4",
@@ -203,24 +215,25 @@
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-it-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "--quantization modelopt",
         "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.68",
+        "JARVIS_QWEN_GPU_UTIL": "0.75",
         "JARVIS_QWEN_MAX_LEN": "16384",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --reasoning-parser gemma4 --cpu-offload-gb 8 --swap-space 8",
-        "JARVIS_ENABLE_UITARS": "1"
+        "JARVIS_ENABLE_UITARS": "0"
       }
     },
     "gui": {
-      "repo": "bytedance-research/UI-TARS-2B-SFT",
-      "name": "ui-tars",
+      "repo": "",
+      "name": "",
       "env": {
-        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
-        "JARVIS_UITARS_QUANT_ARGS": "",
-        "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.85",
-        "JARVIS_UITARS_MAX_LEN": "4096",
-        "JARVIS_UITARS_KV_DTYPE": "fp8"
+        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
+        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MAX_LEN": "16384",
+        "JARVIS_UITARS_COORD_MODE": "auto",
+        "JARVIS_VISION_MODEL": "dispatcher",
+        "JARVIS_ENABLE_UITARS": "0"
       }
-    }
+    },
+    "mono": true
   }
 }
