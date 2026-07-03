@@ -731,6 +731,23 @@ async def run_chat(session_id: str, user_text: str,
     last_failure: dict[str, str] = {} # v2.0: последняя ошибка инструмента (для журнала инцидентов)
     actions_taken: list[str] = []     # v2.0: последовательность хода (для кузницы навыков)
 
+    # --- Когнитивное ядро: трасса объяснимости + активность + RAG (best-effort) ---
+    from . import cc_bridge
+    _trace = cc_bridge.new_trace()
+    cc_bridge.note_activity()   # сигнал suspend/resume: пользователь активен
+    _rag_files: list[str] = []
+    await cc_bridge.log_episode(trace=_trace, session_id=session_id,
+                                entry_type="action", content=f"Запрос пользователя: {user_text}")
+    rag_text, _rag_files = await cc_bridge.rag_context(session_id, user_text)
+    if rag_text.strip():
+        # Инъекция релевантных фрагментов загруженных файлов в контекст хода —
+        # scratch виден и планировщику, и фазе ответа (RAG в оба конца).
+        scratch.append({"action": "rag_files", "args": {},
+                        "observation": "Релевантные фрагменты загруженных файлов "
+                                       "(используй их в ответе):\n" + rag_text})
+        yield {"type": "thought", "actor": "dispatcher",
+               "text": "Подтянул релевантные фрагменты из загруженных файлов сессии (RAG)."}
+
     # --- ФАЗА 0: определить режим и (для сложной цели) декомпозировать ---
     # Простой вопрос/одно действие → короткий ход (как раньше). Сложная цель →
     # АВТОНОМНЫЙ режим: план-чеклист, повышенный потолок шагов, самопроверка.
@@ -916,6 +933,15 @@ async def run_chat(session_id: str, user_text: str,
 
     _conversations.add(session_id, "assistant", final_text)
     yield {"type": "assistant_done", "content": final_text}
+
+    # --- Когнитивное ядро: залогировать финал хода (объяснимость + опыт) ---
+    # outcome: если среди наблюдений была traceback-телеметрия сбоя — failure.
+    _had_fail = any("[телеметрия traceback]" in s.get("observation", "") for s in scratch)
+    _outcome = "failure" if _had_fail else "success"
+    await cc_bridge.log_episode(
+        trace=_trace, session_id=session_id, entry_type=_outcome,
+        content=f"Ответ ассистента: {final_text}", used_file_ids=_rag_files,
+        outcome=_outcome)
 
     # --- v2.0: кузница навыков — наблюдаем рутину хода, при повторе предлагаем навык ---
     try:

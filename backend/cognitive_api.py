@@ -302,6 +302,16 @@ async def cognitive_state() -> JSONResponse:
     return _env(await _cognition_snapshot())
 
 
+@router.get("/explain")
+async def explain(session_id: str = "default") -> JSONResponse:
+    """«Почему ты так сделал?» — трасса последнего хода: шаги + файлы + знания."""
+    try:
+        from orchestrator import cc_bridge
+        return _env(await cc_bridge.explain(session_id))
+    except Exception as exc:  # noqa: BLE001
+        return _env(ok=False, error=f"explain недоступен: {exc}")
+
+
 @router.get("/health")
 async def health_snapshots(limit: int = 30) -> JSONResponse:
     # последние снимки по каждому компоненту
