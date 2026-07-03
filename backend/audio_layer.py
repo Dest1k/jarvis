@@ -159,18 +159,73 @@ def _load_kokoro():
     return _kokoro
 
 
+# Диагностика OS/питон-зависимостей аудио-слоя. Ни один сбой здесь НЕ роняет
+# процесс: /health продолжает отвечать «ok» в деградированном режиме, а отчёт
+# уходит в лог и в /health.deps — его читает Recovery-Agent и дашборд «Health».
+_AUDIO_DEPS = {
+    "numpy": "pip: numpy",
+    "faster_whisper": "pip: faster-whisper (+ CUDA/cuDNN в образе)",
+    "webrtcvad": "pip: webrtcvad (нужен компилятор при сборке)",
+    "kokoro": "pip: kokoro (TTS)",
+    "soundfile": "pip: soundfile + системная libsndfile1",
+}
+
+
+def _startup_diagnostics() -> dict[str, Any]:
+    """Проверить импортируемость ключевых зависимостей (без падения процесса)."""
+    import importlib
+    report: dict[str, Any] = {}
+    for mod, hint in _AUDIO_DEPS.items():
+        try:
+            importlib.import_module(mod)
+            report[mod] = {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            report[mod] = {"ok": False, "error": str(exc)[:200], "fix": hint}
+            log.warning("Аудио-зависимость '%s' недоступна: %s | Починка: %s",
+                        mod, exc, hint)
+    missing = [m for m, r in report.items() if not r["ok"]]
+    if missing:
+        log.warning("Аудио-слой в ДЕГРАДИРОВАННОМ режиме (нет: %s). Сервис жив, "
+                    "но ASR/TTS для этих компонентов недоступны. Быстрый fallback "
+                    "всей системы: python jarvis.py up --no-audio.", ", ".join(missing))
+    else:
+        log.info("Диагностика аудио-зависимостей: всё на месте.")
+    return report
+
+
+_deps_report: dict[str, Any] = {}
+
+
 @app.on_event("startup")
 async def _warmup() -> None:
-    """Прогреть модели в фоне: /health отвечает сразу, оркестратор не ждёт."""
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(_asr_pool, _load_whisper)
-    loop.run_in_executor(_tts_pool, _load_kokoro)
+    """
+    Прогреть модели в фоне: /health отвечает сразу, оркестратор не ждёт.
+
+    Любой сбой прогрева ЛОКАЛИЗОВАН (не роняет контейнер) — по требованию
+    резильентности: аудио опционально, а его отказ не должен ронять весь стек.
+    """
+    global _deps_report
+    _deps_report = _startup_diagnostics()
+
+    async def _safe_warm(pool, fn, tag: str) -> None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(pool, fn)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Прогрев %s не удался (%s) — сервис продолжает работу "
+                        "в деградированном режиме.", tag, exc)
+
+    # gather с локализацией ошибок в каждом пуле; исключения НЕ всплывают наружу
+    asyncio.create_task(_safe_warm(_asr_pool, _load_whisper, "ASR/Whisper"))
+    asyncio.create_task(_safe_warm(_tts_pool, _load_kokoro, "TTS/Kokoro"))
     log.info("Фоновый прогрев ASR/TTS запущен в изолированных пулах.")
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", "warm": dict(_warm)})
+    """Готовность + отчёт о зависимостях (degraded, если что-то недоступно)."""
+    degraded = any(not r.get("ok") for r in _deps_report.values())
+    return JSONResponse({"status": "ok", "degraded": degraded,
+                         "warm": dict(_warm), "deps": _deps_report})
 
 
 # --------------------------------------------------------------------------- #

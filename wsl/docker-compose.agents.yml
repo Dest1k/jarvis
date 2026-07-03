@@ -252,6 +252,9 @@ services:
       - JARVIS_QWEN_URL=${JARVIS_QWEN_URL:-http://vllm-qwen-coder:8001/v1}
       - JARVIS_UITARS_URL=${JARVIS_UITARS_URL:-http://vllm-ui-tars:8002/v1}
       - JARVIS_AUDIO_URL=http://audio-layer:8003
+      # Аудио опционально: 0 → ядро/дашборд не пытаются к нему подключаться
+      # (безопасный fallback, если аудио крашит старт; см. --no-audio).
+      - JARVIS_ENABLE_AUDIO=${JARVIS_ENABLE_AUDIO:-1}
       # RPC-мост слушает на Windows-хосте; из WSL зеркалируется в localhost
       - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
       - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
@@ -285,10 +288,13 @@ services:
       - ${JARVIS_DATA_DIR:-../data}/jarvis_core:/data/jarvis_core
     ports:
       - "127.0.0.1:8000:8000"
+    # Аудио НАМЕРЕННО убрано из depends_on: аудио-слой ОПЦИОНАЛЕН и не должен
+    # быть в критическом пути. Раньше его падение/крэш-цикл (нет libsndfile/
+    # espeak/PortAudio, OOM Whisper, рассинхрон CUDA) тормозил и «ронял» весь
+    # старт стека. Теперь backend поднимается независимо; аудио — best-effort
+    # (см. --no-audio в jarvis.py и graceful-degradation в audio_layer.py).
     depends_on:
       vllm-qwen-coder:
-        condition: service_started
-      audio-layer:
         condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]

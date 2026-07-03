@@ -345,6 +345,18 @@ def _uitars_enabled() -> bool:
     return _env_value("JARVIS_ENABLE_UITARS") != "0"
 
 
+def _audio_enabled() -> bool:
+    """
+    Поднимать ли аудио-слой (ASR/TTS). Отключается флагом --no-audio,
+    переменной JARVIS_ENABLE_AUDIO=0 (окружение или wsl/.env) — безопасный
+    fallback, если аудио крашит старт (нет libsndfile/espeak/PortAudio,
+    OOM Whisper, рассинхрон CUDA). Backend и дашборд работают и без аудио.
+    """
+    if os.environ.get("JARVIS_ENABLE_AUDIO") == "0":
+        return False
+    return _env_value("JARVIS_ENABLE_AUDIO") != "0"
+
+
 def _current_model_dirs() -> list[str]:
     """Имена папок моделей текущего .env (диспетчер [+ GUI]) — что синхронизировать.
 
@@ -455,6 +467,19 @@ def apply_profile(profile_id: str) -> bool:
     return True
 
 
+def _set_env_vars(updates: dict[str, str]) -> None:
+    """Записать/заменить набор переменных в wsl/.env (слияние по ключу)."""
+    if not updates:
+        return
+    existing = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+    lines = [l for l in existing.splitlines()
+             if not any(l.startswith(k + "=") for k in updates)]
+    for k, v in updates.items():
+        lines.append(f"{k}={v}")
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _compose(*args: str) -> int:
     return run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), *args])
 
@@ -465,12 +490,17 @@ def free_vram() -> None:
     _compose("stop", "vllm-qwen-coder", "vllm-ui-tars", "audio-layer")
 
 
-def up_stack_sequential(skip_uitars: bool = False) -> None:
+def up_stack_sequential(skip_uitars: bool = False, with_audio: bool = True) -> None:
     """
     Поднять стек. В ДВОЙНОМ режиме — последовательно (второй vLLM профилирует память
     после первого). Если UI-TARS отключён (СОЛО/монолит/moe-turbo — сам мозг видит
     экран, JARVIS_ENABLE_UITARS=0) — поднимаем ТОЛЬКО диспетчер, а UI-TARS НЕ
     запускаем и останавливаем: иначе он отъедает VRAM и падает в цикле (OOM).
+
+    with_audio=False (флаг --no-audio) — аудио-слой НЕ поднимается и
+    останавливается: безопасный fallback, если он крашит старт. Ядро/дашборд
+    работают без него. Аудио НИКОГДА не в критическом пути: его поднимаем
+    последним и НЕ ждём healthcheck (--wait), чтобы его сбой не ронял старт.
     """
     info("vLLM #1 (мозг-диспетчер) — поднимаю и ЖДУ готовности (минуты при загрузке весов)…")
     _compose("up", "-d", "--wait", "--wait-timeout", "900", "--force-recreate",
@@ -484,18 +514,24 @@ def up_stack_sequential(skip_uitars: bool = False) -> None:
         info("vLLM #2 (UI-TARS) — поднимаю и ЖДУ готовности…")
         _compose("up", "-d", "--wait", "--wait-timeout", "600", "--force-recreate",
                  "--no-deps", "vllm-ui-tars")
-    info("Аудио, ядро, sandbox… (--build: подхватываю свежий код после git pull)")
-    # --build обязателен: код ядра (orchestrator/) и mcp_servers.json ЗАШИТЫ в
-    # образ jarvis/backend (не монтируются томом), поэтому после `git pull` без
-    # пересборки контейнер крутил бы старый код. Слои с зависимостями кешируются
-    # (BuildKit), так что при неизменных requirements пересборка быстрая —
-    # переигрываются только COPY-слои. vLLM-сервисы собственного образа не имеют
-    # (image:), их --build не трогает.
-    if skip_uitars:
-        # НЕ поднимаем vllm-ui-tars (иначе `up --remove-orphans` поднял бы заново).
-        _compose("up", "-d", "--build", "audio-layer", "backend", "sandbox")
+
+    # Ядро и sandbox — критический путь (без аудио). --build обязателен: код ядра
+    # (orchestrator/) и mcp_servers.json ЗАШИТЫ в образ jarvis/backend, поэтому
+    # после `git pull` без пересборки крутился бы старый код. Слои зависимостей
+    # кешируются (BuildKit), пересборка быстрая. Аудио поднимаем ОТДЕЛЬНО и
+    # НЕ через --remove-orphans, чтобы не трогать выключенные сервисы.
+    info("Ядро (backend) и sandbox… (--build: подхватываю свежий код после git pull)")
+    _compose("up", "-d", "--build", "backend", "sandbox")
+
+    if with_audio:
+        # Аудио — best-effort, БЕЗ --wait: его крэш не должен ронять старт.
+        info("Аудио-слой (ASR/TTS) — поднимаю в фоне (best-effort, без ожидания).")
+        _compose("up", "-d", "--build", "audio-layer")
     else:
-        _compose("up", "-d", "--build", "--remove-orphans")
+        info("Аудио-слой ОТКЛЮЧЁН (--no-audio) — не поднимаю и останавливаю "
+             "(если был запущен). Ядро и дашборд работают без него.")
+        _compose("stop", "audio-layer")
+        _compose("rm", "-f", "audio-layer")
 
 
 def cmd_diag() -> int:
@@ -580,11 +616,20 @@ def cmd_up(profile: str | None = None) -> int:
     # выключил его (JARVIS_ENABLE_UITARS=0 — режим moe-turbo/СОЛО). Раньше учитывался
     # только mono, поэтому после применения moe-turbo обычный `up` всё равно
     # поднимал UI-TARS → OOM и цикличное падение контейнера. Теперь — честно по .env.
+    # Зафиксировать выбор аудио в .env, чтобы backend-контейнер и дашборд знали,
+    # а решение пережило рестарт. Флаг --no-audio → 0; иначе не понижаем уже
+    # установленное значение (уважаем ручную правку .env).
+    if os.environ.get("JARVIS_ENABLE_AUDIO") == "0":
+        _set_env_vars({"JARVIS_ENABLE_AUDIO": "0"})
+    elif not _env_value("JARVIS_ENABLE_AUDIO"):
+        _set_env_vars({"JARVIS_ENABLE_AUDIO": "1"})
+
     mono = bool(_load_profiles().get(profile, {}).get("mono")) if profile else False
     skip_uitars = mono or not _uitars_enabled()
+    with_audio = _audio_enabled()
 
     free_vram()                     # освободить VRAM от прежних инстансов
-    up_stack_sequential(skip_uitars)  # СОЛО/moe: только Gemma; иначе vLLM#1 → vLLM#2 → ядро
+    up_stack_sequential(skip_uitars, with_audio)  # СОЛО/moe: только Gemma; аудио — опц.
 
     # Контроль ядра: дашборд без backend (:8000) бесполезен и сыплет
     # ECONNREFUSED в консоль Next.js. Если ядро не поднялось — сразу показываем
@@ -619,7 +664,11 @@ def cmd_up(profile: str | None = None) -> int:
     if not _uitars_enabled():
         info("Режим: СОЛО — единый мозг Gemma-4 (планирует, кодит и САМ видит "
              "экран). Отдельный UI-TARS выключен.")
+    if not with_audio:
+        info("Аудио: ОТКЛЮЧЕНО (--no-audio). Голосовой ввод/озвучка недоступны; "
+             "чат и всё остальное работает. Включить: python jarvis.py up (без флага).")
     info("vLLM-модели прогреваются 1-2 мин — следите за статусом в дашборде.")
+    info("Диагностика при сбоях: python jarvis.py diag")
     info("Остановить всё: python jarvis.py stop")
     info("=" * 60)
     return 0
@@ -657,9 +706,11 @@ HELP_TEXT = r"""
 ============================================================
 
 КОМАНДЫ:
-  python jarvis.py up [--profile <id>]   Поднять ВСЁ: Docker → RPC-мост → стек
-                                          (vLLM ×2 + аудио + ядро + sandbox) →
+  python jarvis.py up [--profile <id>] [--no-audio]
+                                          Поднять ВСЁ: Docker → RPC-мост → стек
+                                          (vLLM + [аудио] + ядро + sandbox) →
                                           дашборд → браузер. Без аргументов = up.
+                                          --no-audio — безопасный старт без аудио.
   python jarvis.py stop                   Остановить контейнерный стек.
   python jarvis.py status                 Статус контейнеров, моста, дашборда.
   python jarvis.py profiles               Список профилей (мозг + GUI).
@@ -752,9 +803,15 @@ def main() -> int:
                    help="НЕ отключать WSL-интеграцию Docker Desktop с "
                         "пользовательскими дистро (по умолчанию отключается — "
                         "она нестабильна и стеку не нужна).")
+    p.add_argument("--no-audio", action="store_true",
+                   help="Безопасный fallback: НЕ поднимать аудио-слой (ASR/TTS). "
+                        "Ядро и дашборд стартуют чисто. Используйте, если аудио "
+                        "крашит старт (нет libsndfile/espeak/PortAudio, OOM Whisper).")
     args, extra = p.parse_known_args()
     if args.keep_wsl_integration:
         os.environ["JARVIS_KEEP_WSL_INTEGRATION"] = "1"
+    if args.no_audio:
+        os.environ["JARVIS_ENABLE_AUDIO"] = "0"
 
     if args.command == "help":
         return cmd_help()

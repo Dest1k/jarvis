@@ -301,16 +301,22 @@ async def status() -> JSONResponse:
         except Exception:  # noqa: BLE001
             return False
 
-    qwen_ok, uitars_ok, audio_ok = await asyncio.gather(
-        probe(QWEN_URL.replace("/v1", "/health")),
-        probe(UITARS_URL.replace("/v1", "/health")),
-        probe(f"{AUDIO_URL}/health"),
-    )
+    # Аудио опционально: при JARVIS_ENABLE_AUDIO=0 не тратим 3с на заведомо
+    # отсутствующий сервис и честно рапортуем "disabled" (дашборд скрывает mic).
+    audio_enabled = os.environ.get("JARVIS_ENABLE_AUDIO", "1") != "0"
+    probes = [probe(QWEN_URL.replace("/v1", "/health")),
+              probe(UITARS_URL.replace("/v1", "/health"))]
+    if audio_enabled:
+        probes.append(probe(f"{AUDIO_URL}/health"))
+    results = await asyncio.gather(*probes)
+    qwen_ok, uitars_ok = results[0], results[1]
+    audio_ok = results[2] if audio_enabled else False
     return JSONResponse({
         "core": True,
         "qwen_coder": qwen_ok,
         "ui_tars": uitars_ok,
         "audio": audio_ok,
+        "audio_enabled": audio_enabled,
         "rpc_bridge": bridge._connected.is_set(),
     })
 
