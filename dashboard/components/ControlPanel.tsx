@@ -74,6 +74,8 @@ export default function ControlPanel() {
   const [brain, setBrain] = useState<BrainPreset>(BRAIN_PRESETS[0]);
   const [profiles, setProfiles] = useState<Record<string, any>>({});
   const [profileSel, setProfileSel] = useState("");
+  // v2.0: инференс-режимы Gemma 4 (переключатель moe-turbo ↔ dense-hybrid)
+  const [inf, setInf] = useState<{ modes: Record<string, any>; active: string | null } | null>(null);
   const [cleanup, setCleanup] = useState<any | null>(null);
   const [mcp, setMcp] = useState<any | null>(null);
   const [cleanSel, setCleanSel] = useState<{
@@ -95,6 +97,10 @@ export default function ControlPanel() {
       const m = await fetch("/api/core/api/agent/mcp", { cache: "no-store" });
       setMcp(await m.json());
     } catch { setMcp(null); }
+    try {
+      const i = await fetch(`${API}/inference`, { cache: "no-store" });
+      setInf(await i.json());
+    } catch { setInf(null); }
   }, []);
 
   useEffect(() => {
@@ -258,6 +264,25 @@ export default function ControlPanel() {
     setTimeout(refresh, 1500);
   };
 
+  // --- v2.0: инференс-режимы Gemma 4 (MoE-турбо ↔ dense-гибрид) ---
+  const applyMode = async (mode: string) => {
+    const m = inf?.modes?.[mode];
+    if (!confirm(`Применить режим «${m?.label || mode}»? Диспетчер будет пересоздан ` +
+      `и прогреется 1–3 мин (dense-гибрид дольше — оффлоад в RAM).`)) return;
+    setBusy(`inf:${mode}`);
+    await postJson(`${API}/inference`, { action: "apply", mode });
+    setBusy("");
+    alert("Режим применяется. Диспетчер перезапускается — следите в «Мониторной» (сервис Qwen).");
+    setTimeout(refresh, 2500);
+  };
+  const downloadMode = async (mode: string) => {
+    setBusy(`infdl:${mode}`);
+    await postJson(`${API}/inference`, { action: "download", mode });
+    setBusy("");
+    alert("Загрузка весов режима запущена на хосте (отдельное окно с прогрессом). " +
+      "Дождитесь завершения, затем «Применить».");
+  };
+
   const services = (ov?.services || "")
     .split("\n")
     .map((l) => l.trim())
@@ -302,6 +327,53 @@ export default function ControlPanel() {
         <pre style={{ margin: "8px 0 0", color: "var(--accent)" }}>
           {ov?.gpu || "нет данных (нужен RPC-мост)"}
         </pre>
+      </div>
+
+      {/* v2.0: Инференс-режим Gemma 4 — переключатель одной кнопкой */}
+      <div className="panel">
+        <strong style={{ display: "block", marginBottom: 8 }}>
+          🚀 Инференс-режим Gemma 4 (переключатель)
+        </strong>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 10 }}>
+          {Object.entries(inf?.modes || {}).map(([id, m]) => {
+            const active = inf?.active === id;
+            const mm: any = m;
+            return (
+              <div key={id} className="panel" style={{
+                border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+                background: active ? "rgba(80,200,255,0.06)" : "transparent",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className={`status-dot ${active ? "ok" : ""}`} />
+                  <strong style={{ fontSize: 13 }}>{mm.label}</strong>
+                  {active && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--accent)" }}>● активен</span>}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>{mm.summary}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>VRAM: {mm.vram}</div>
+                <code style={{ fontSize: 11, display: "block", marginTop: 6 }}>{mm.model_repo}</code>
+                <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+                  <button className="btn" disabled={!!busy} onClick={() => downloadMode(id)}>
+                    ⬇ Скачать веса
+                  </button>
+                  <button className="btn primary" disabled={!!busy || active} onClick={() => applyMode(id)}>
+                    {active ? "✓ Применён" : "✅ Применить режим"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {(!inf || Object.keys(inf.modes || {}).length === 0) && (
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              Нет данных (нужен backend с ядром v2.0 и RPC-мост).
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+          <b>moe-turbo</b> — скорость (UI-TARS отключается). <b>dense-hybrid</b> — качество
+          (Gemma-4-31B + оффлоад в 128 ГБ RAM, UI-TARS включён). Переключение
+          перезапускает диспетчер последовательно (с прогревом). Из терминала:{" "}
+          <code>curl -X POST /api/core/api/control/inference -d {"'{\"action\":\"apply\",\"mode\":\"moe-turbo\"}'"}</code>.
+        </p>
       </div>
 
       {/* Сервисы */}
