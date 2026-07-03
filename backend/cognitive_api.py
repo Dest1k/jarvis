@@ -30,7 +30,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from cognitive_core import config, db, ingest, models
+from cognitive_core import config, db, ingest, models, subagents
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -382,6 +382,88 @@ async def rag_search(payload: dict[str, Any]) -> JSONResponse:
         query, session_id=payload.get("session_id") or None,
         k=int(payload.get("k", 5)))
     return _env({"query": query, "hits": hits})
+
+
+# --------------------------------------------------------------------------- #
+# Суб-агенты: Critic-гейт и декомпозиция целей → планы
+# --------------------------------------------------------------------------- #
+def _dispatcher_chat():
+    """Инъектируемый chat к диспетчер-модели (или None, если недоступна)."""
+    try:
+        from orchestrator import llm
+        return llm.chat
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.post("/critic/review")
+async def critic_review(payload: dict[str, Any]) -> JSONResponse:
+    """Прогнать текст навыка/правила через Critic (правила + опц. LLM)."""
+    review = await subagents.critic_review(
+        kind=str(payload.get("kind", "rule")),
+        title=str(payload.get("title", "")),
+        body=str(payload.get("body", "")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(review, ok=True,
+                state="success" if review["verdict"] == "approved" else "processing")
+
+
+@router.post("/knowledge/commit")
+async def knowledge_commit(payload: dict[str, Any]) -> JSONResponse:
+    """Critic-гейт → коммит узла в граф (active) или сохранение rejected."""
+    res = await subagents.commit_knowledge_if_approved(
+        kind=str(payload.get("kind", "rule")),
+        title=str(payload.get("title", "")),
+        body=str(payload.get("body", "")),
+        tags=payload.get("tags") or [],
+        owner_id=str(payload.get("owner_id", "local-admin")),
+        source_trace=str(payload.get("source_trace", "")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(res, ok=True,
+                state="success" if res["status"] == "active" else "processing")
+
+
+@router.post("/plans/decompose")
+async def plans_decompose(payload: dict[str, Any]) -> JSONResponse:
+    """Декомпозировать цель в план с задачами и зависимостями."""
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        return _env(ok=False, error="Не задана 'goal'.")
+    res = await subagents.decompose_goal(
+        goal, owner_id=str(payload.get("owner_id", "local-admin")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(res)
+
+
+@router.get("/plans")
+async def list_plans(limit: int = 50) -> JSONResponse:
+    rows = await db.query(
+        "SELECT * FROM project_plans ORDER BY created_at DESC LIMIT ?",
+        (max(1, min(limit, 200)),))
+    return _env({"plans": rows})
+
+
+@router.get("/plans/{plan_id}/tasks")
+async def plan_tasks(plan_id: str) -> JSONResponse:
+    rows = await db.query(
+        "SELECT * FROM project_tasks WHERE plan_id=? ORDER BY order_index", (plan_id,))
+    return _env({"plan_id": plan_id, "tasks": rows})
+
+
+@router.put("/plans/{plan_id}/tasks/{task_id}")
+async def update_plan_task(plan_id: str, task_id: str, payload: dict[str, Any]) -> JSONResponse:
+    allowed = {"title", "assignee", "status", "progress", "result", "order_index"}
+    fields = {k: v for k, v in payload.items() if k in allowed}
+    if not fields:
+        return _env(ok=False, error="Нет допустимых полей.")
+    set_clause = ", ".join(f"{k}=?" for k in fields)
+    params = list(fields.values()) + [task_id, plan_id]
+    res = await db.mutate_with_audit(
+        table="project_tasks", row_id=task_id, op="update", pk_col="id",
+        sql=f"UPDATE project_tasks SET {set_clause} WHERE id=? AND plan_id=?",
+        params=params, actor=str(payload.get("actor", "local-admin")),
+        actor_kind="human", reason="manual task edit")
+    return _env({"task": res.get("after")}, audit_id=res.get("audit_id"))
 
 
 @router.websocket("/stream")
