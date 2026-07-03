@@ -30,7 +30,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from cognitive_core import config, db, ingest, maintenance, models, subagents
+from cognitive_core import (config, db, ingest, learning, maintenance,
+                            models, subagents)
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -503,6 +504,37 @@ async def post_mortem(payload: dict[str, Any]) -> JSONResponse:
         task=str(payload.get("task", "")),
         outcome=str(payload.get("outcome", "unknown")),
         detail=str(payload.get("detail", "")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(res)
+
+
+# --------------------------------------------------------------------------- #
+# Lifelong Learning: фоновый цикл самосовершенствования (suspend/resume)
+# --------------------------------------------------------------------------- #
+@router.get("/learning/status")
+async def learning_status() -> JSONResponse:
+    return _env(await learning.status())
+
+
+@router.post("/learning/start")
+async def learning_start() -> JSONResponse:
+    await learning.start()
+    return _env(await learning.status())
+
+
+@router.post("/learning/suspend")
+async def learning_suspend(payload: dict[str, Any]) -> JSONResponse:
+    await learning.on_user_activity(
+        active_user=str(payload.get("user", "local-admin")),
+        goal=str(payload.get("goal", "")))
+    return _env(await learning.status())
+
+
+@router.post("/learning/iterate")
+async def learning_iterate(payload: dict[str, Any]) -> JSONResponse:
+    """Ручной прогон ОДНОЙ итерации обучения (для демонстрации/теста)."""
+    res = await learning.learning_iteration(
+        int(payload.get("iteration", 0)),
         chat=_dispatcher_chat() if payload.get("use_llm") else None)
     return _env(res)
 

@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS agent_cognitive_state (
     -- чекпоинт фонового цикла для zero-latency resume (JSON: цель, шаг, скрэтч)
     checkpoint   TEXT NOT NULL DEFAULT '{}',
     active_goal  TEXT,
-    active_user  TEXT REFERENCES user_roles_and_permissions(user_id),
+    -- active_user — информационное поле (id сессии/пользователя); БЕЗ FK, т.к.
+    -- сессия чата не обязана быть зарегистрированным user_id.
+    active_user  TEXT,
     updated_at   REAL NOT NULL DEFAULT (unixepoch('subsec'))
 );
 INSERT OR IGNORE INTO agent_cognitive_state (id, state) VALUES (1, 'IDLE');
