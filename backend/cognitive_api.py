@@ -27,10 +27,10 @@ import json
 import time
 from typing import Any, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from cognitive_core import config, db, models
+from cognitive_core import config, db, ingest, models
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -319,6 +319,69 @@ async def record_health(payload: dict[str, Any]) -> JSONResponse:
         "VALUES (?,?,?,?,?)",
         (snap.component, snap.status, snap.detail, snap.suggested_fix, int(snap.fix_applied)))
     return _env({"recorded": snap.component})
+
+
+# --------------------------------------------------------------------------- #
+# RAG: загрузка файлов и семантический поиск (Core Chat / вложения)
+# --------------------------------------------------------------------------- #
+@router.post("/files/upload")
+async def upload_file(file: UploadFile = File(...),
+                      session_id: str = Form("default"),
+                      message_id: str = Form(""),
+                      owner_id: str = Form("local-admin")) -> JSONResponse:
+    """
+    Приём файла из чата: dedup(sha256) → parse → chunk → embed → ready.
+    Немедленно возвращает запись реестра с итоговым ingest_status и числом чанков
+    (готовых к RAG-инъекции в текущую сессию).
+    """
+    data = await file.read()
+    if not data:
+        return _env(ok=False, error="Пустой файл.")
+    try:
+        rec = await ingest.ingest_file(
+            filename=file.filename or "upload.bin", data=data,
+            owner_id=owner_id, session_id=session_id or "default",
+            message_id=message_id or None, origin="user")
+    except Exception as exc:  # noqa: BLE001
+        return _env(ok=False, error=f"Сбой конвейера ingestion: {exc}")
+    ok = rec.get("ingest_status") == "ready"
+    return _env({"file": rec, "deduplicated": rec.get("deduplicated", False)},
+                ok=True, state="success" if ok else "processing")
+
+
+@router.get("/files")
+async def list_files(session_id: str = "", limit: int = 100) -> JSONResponse:
+    where, params = [], []
+    if session_id:
+        where.append("session_id = ?"); params.append(session_id)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    params.append(max(1, min(limit, 500)))
+    rows = await db.query(
+        f"SELECT id,file_name,mime_type,size_bytes,ingest_status,ingest_error,"
+        f"token_count,chunk_count,session_id,origin,uploaded_at "
+        f"FROM file_attachments_registry {clause} ORDER BY uploaded_at DESC LIMIT ?", params)
+    return _env({"files": rows})
+
+
+@router.delete("/files/{file_id}")
+async def delete_file(file_id: str, actor: str = "local-admin") -> JSONResponse:
+    res = await db.mutate_with_audit(
+        table="file_attachments_registry", row_id=file_id, op="delete", pk_col="id",
+        sql="DELETE FROM file_attachments_registry WHERE id=?", params=(file_id,),
+        actor=actor, actor_kind="human", reason="delete file")
+    # чанки удалятся каскадом (ON DELETE CASCADE)
+    return _env({"deleted": file_id}, audit_id=res.get("audit_id"))
+
+
+@router.post("/rag/search")
+async def rag_search(payload: dict[str, Any]) -> JSONResponse:
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        return _env(ok=False, error="Не задан 'query'.")
+    hits = await ingest.search_chunks(
+        query, session_id=payload.get("session_id") or None,
+        k=int(payload.get("k", 5)))
+    return _env({"query": query, "hits": hits})
 
 
 @router.websocket("/stream")
