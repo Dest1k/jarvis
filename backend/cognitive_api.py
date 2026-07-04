@@ -384,6 +384,12 @@ async def delete_file(file_id: str, actor: str = "local-admin") -> JSONResponse:
     return _env({"deleted": file_id}, audit_id=res.get("audit_id"))
 
 
+@router.post("/rag/reembed")
+async def rag_reembed() -> JSONResponse:
+    """Пересчитать эмбеддинги всех чанков активным провайдером (после смены)."""
+    return _env(await ingest.reembed_all())
+
+
 @router.post("/rag/search")
 async def rag_search(payload: dict[str, Any]) -> JSONResponse:
     query = str(payload.get("query", "")).strip()

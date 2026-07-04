@@ -149,18 +149,25 @@ def chunk_text(text: str, max_tokens: int = CHUNK_TOKENS,
 
 
 # --------------------------------------------------------------------------- #
-# Эмбеддинги: локальный hashing-bag (детерминирован, оффлайн, ноль VRAM).
-# Единая точка замены на модельные эмбеддинги (vLLM /v1/embeddings).
+# Эмбеддинги: провайдер local (hashing-bag, оффлайн) ИЛИ vllm (/v1/embeddings).
+#   JARVIS_EMBED_PROVIDER=local|vllm  (по умолчанию local — ноль зависимостей)
+#   JARVIS_EMBED_URL=http://vllm-qwen-coder:8001/v1  JARVIS_EMBED_MODEL=<id>
+# Модельный провайдер — с АВТО-FALLBACK на local при любой ошибке (никогда не
+# роняет ingestion). L2-нормализация в обоих случаях → cosine=dot.
 # --------------------------------------------------------------------------- #
 _WORD_RE = re.compile(r"[a-zA-Zа-яёА-ЯЁ0-9_]+")
 
 
+def _l2(vec: list[float]) -> list[float]:
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
 def embed(text: str, dim: int = EMBED_DIM) -> list[float]:
     """
-    Хеширующий bag-of-words эмбеддинг с L2-нормализацией. Устойчив к языку,
-    ловит лексическое пересечение (достаточно для RAG по конфигам/логам/коду).
-    Для семантики более высокого порядка — заменить на модельные эмбеддинги,
-    сохранив сигнатуру.
+    Локальный хеширующий bag-of-words эмбеддинг (детерминирован, оффлайн, ноль
+    VRAM). Ловит лексическое пересечение — достаточно для RAG по конфигам/логам/
+    коду и служит FALLBACK при недоступности модельного провайдера.
     """
     vec = [0.0] * dim
     for w in _WORD_RE.findall(text.lower()):
@@ -168,8 +175,40 @@ def embed(text: str, dim: int = EMBED_DIM) -> list[float]:
         idx = h % dim
         sign = 1.0 if (h >> 8) & 1 else -1.0
         vec[idx] += sign
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    return _l2(vec)
+
+
+def _embed_provider() -> str:
+    return os.environ.get("JARVIS_EMBED_PROVIDER", "local").strip().lower()
+
+
+async def _embed_vllm(text: str) -> Optional[list[float]]:
+    """Запросить эмбеддинг у OpenAI-совместимого vLLM /embeddings. None при сбое."""
+    import httpx
+    base = os.environ.get("JARVIS_EMBED_URL",
+                          os.environ.get("JARVIS_QWEN_URL", "http://vllm-qwen-coder:8001/v1"))
+    model = os.environ.get("JARVIS_EMBED_MODEL", "qwen-coder")
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.post(f"{base}/embeddings", json={"model": model, "input": text[:8000]})
+            r.raise_for_status()
+            vec = r.json()["data"][0]["embedding"]
+            return _l2([float(x) for x in vec])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def embed_async(text: str) -> list[float]:
+    """
+    Асинхронный эмбеддинг по активному провайдеру. Модельный провайдер (vllm) —
+    с авто-fallback на локальный при любой ошибке, чтобы ingestion/поиск никогда
+    не падали. Возвращает L2-нормализованный вектор.
+    """
+    if _embed_provider() == "vllm":
+        vec = await _embed_vllm(text)
+        if vec:
+            return vec
+    return embed(text)
 
 
 def _pack(vec: list[float]) -> bytes:
@@ -240,10 +279,11 @@ async def ingest_file(*, filename: str, data: bytes, owner_id: str = "local-admi
     for i, ch in enumerate(chunks):
         tok = _estimate_tokens(ch)
         total_tokens += tok
+        vec = await embed_async(ch)      # модельный провайдер или local-fallback
         await db.execute(
             "INSERT INTO file_chunks (id,file_id,chunk_index,content,token_count,embedding,embedding_dim) "
             "VALUES (?,?,?,?,?,?,?)",
-            (db.new_id(), fid, i, ch, tok, _pack(embed(ch)), EMBED_DIM))
+            (db.new_id(), fid, i, ch, tok, _pack(vec), len(vec)))
 
     await db.execute(
         "UPDATE file_attachments_registry SET ingest_status='ready', token_count=?, "
@@ -258,7 +298,7 @@ async def search_chunks(query: str, *, session_id: Optional[str] = None,
     Семантический поиск по чанкам (cosine). Ограничение сессией/владельцем, если
     заданы. Возвращает топ-k чанков с score и именем файла для RAG-инъекции.
     """
-    qv = embed(query)
+    qv = await embed_async(query)
     where, params = [], []
     if session_id:
         where.append("f.session_id = ?"); params.append(session_id)
@@ -281,6 +321,21 @@ async def search_chunks(query: str, *, session_id: Optional[str] = None,
                     "file_id": r["file_id"], "chunk_index": r["chunk_index"],
                     "content": r["content"]})
     return out
+
+
+async def reembed_all() -> dict[str, Any]:
+    """
+    Пересчитать эмбеддинги всех чанков активным провайдером (после смены
+    JARVIS_EMBED_PROVIDER). Идемпотентно, батчами по строкам.
+    """
+    rows = await db.query("SELECT id, content FROM file_chunks")
+    n = 0
+    for r in rows:
+        vec = await embed_async(r["content"])
+        await db.execute("UPDATE file_chunks SET embedding=?, embedding_dim=? WHERE id=?",
+                         (_pack(vec), len(vec), r["id"]))
+        n += 1
+    return {"reembedded": n, "provider": _embed_provider()}
 
 
 async def build_rag_context(query: str, *, session_id: Optional[str] = None,
