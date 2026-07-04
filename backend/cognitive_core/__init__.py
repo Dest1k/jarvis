@@ -17,8 +17,9 @@ cognitive_core — «Когнитивное ядро» JARVIS OS (production-gra
 PWA-голос) — в docs/cognitive_core_architecture.md.
 """
 
-from . import (config, db, executor, ingest, learning, maintenance,  # noqa: F401
-               models, plugins, recovery, subagents, suspend)
+from . import (config, db, executor, federation, ingest, learning,  # noqa: F401
+               maintenance, models, plugins, recovery, subagents, suspend)
 
 __all__ = ["db", "config", "models", "suspend", "plugins", "ingest",
-           "subagents", "maintenance", "learning", "executor", "recovery"]
+           "subagents", "maintenance", "learning", "executor", "recovery",
+           "federation"]

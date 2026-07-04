@@ -30,8 +30,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from cognitive_core import (config, db, ingest, learning, maintenance,
-                            models, recovery, subagents)
+from cognitive_core import (config, db, federation, ingest, learning,
+                            maintenance, models, recovery, subagents)
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -568,6 +568,27 @@ async def recovery_apply(payload: dict[str, Any]) -> JSONResponse:
 async def recovery_report() -> JSONResponse:
     """Сводный человекочитаемый отчёт о здоровье компонентов."""
     return _env(await recovery.health_report())
+
+
+# --------------------------------------------------------------------------- #
+# Федерация: обмен анонимными правилами между инстансами JARVIS
+# --------------------------------------------------------------------------- #
+@router.get("/federation/export")
+async def federation_export(limit: int = 500, node: str = "jarvis") -> JSONResponse:
+    """Собрать переносимый пакет анонимных federated-правил."""
+    return _env(await federation.export_rules(limit=limit, node=node))
+
+
+@router.post("/federation/import")
+async def federation_import(payload: dict[str, Any]) -> JSONResponse:
+    """Импортировать пакет; чужие правила проходят ЛОКАЛЬНЫЙ Critic-гейт."""
+    pack = payload.get("pack") or payload
+    res = await federation.import_rules(
+        pack, source=str(payload.get("source", "peer")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    if not res.get("ok"):
+        return _env(ok=False, error=res.get("error", "Импорт не удался."))
+    return _env(res)
 
 
 @router.post("/maintenance/sleep-cycle")
