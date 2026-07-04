@@ -446,6 +446,32 @@ async def plans_decompose(payload: dict[str, Any]) -> JSONResponse:
     return _env(res)
 
 
+async def _sandbox_runner(code: str, lang: str):
+    """Best-effort исполнение кода в sandbox-контейнере (или деградация)."""
+    try:
+        from orchestrator.tools import tool_run_code, ToolContext
+        res = await tool_run_code({"language": lang, "code": code}, ToolContext())
+        return (0 if res.get("ok") else 1), res.get("content", "")
+    except Exception as exc:  # noqa: BLE001
+        return None, f"sandbox недоступен: {exc}"
+
+
+@router.post("/plans/{plan_id}/run")
+async def run_plan(plan_id: str, payload: Optional[dict[str, Any]] = None) -> JSONResponse:
+    """Автономно прогнать план суб-агентами (Researcher→Coder/sandbox→Critic)."""
+    from cognitive_core import executor
+    payload = payload or {}
+    chat = _dispatcher_chat()
+    sandbox = _sandbox_runner if payload.get("execute", True) else None
+    report = await executor.run_plan(
+        plan_id, chat=chat, sandbox_run=sandbox,
+        autonomy_level=int(payload.get("autonomy_level", 2)),
+        session_id=str(payload.get("session_id", "executor")))
+    if not report.get("ok"):
+        return _env(ok=False, error=report.get("error", "Прогон не удался."))
+    return _env(report, state="success" if report["status"] == "done" else "processing")
+
+
 @router.get("/plans")
 async def list_plans(limit: int = 50) -> JSONResponse:
     rows = await db.query(
