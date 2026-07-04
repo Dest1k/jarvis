@@ -429,9 +429,13 @@ async def _host_exec(command: str, timeout: int = 200,
 # как бы часто ни обновляли, мост/хост не перегружаются. Семплер сам засыпает,
 # когда никто не смотрит (idle-stop), и просыпается по первому запросу.
 # --------------------------------------------------------------------------- #
+# ВАЖНО: НЕ запрашиваем power.draw/power.limit — на части драйверов/состояний GPU
+# эти поля не поддержаны, из-за чего nvidia-smi завершается НЕНУЛЕВЫМ кодом (мост
+# трактует это как ok=False), и метрика гасла, хотя util/VRAM печатались. Оставляем
+# только гарантированно доступные поля (мощность в UI и не показывается).
 GPU_QUERY = (
     "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,"
-    "temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits")
+    "temperature.gpu --format=csv,noheader,nounits")
 
 
 def _parse_gpu_csv(text: str) -> list[dict[str, Any]]:
@@ -487,18 +491,22 @@ class GpuSampler:
             res = await self._exec(self._query, timeout=15)
         except Exception as exc:  # noqa: BLE001
             res = {"ok": False, "out": str(exc)}
-        if res.get("ok"):
-            gpus = _parse_gpu_csv(res.get("out", ""))
-            if gpus:
-                self._latest = {"ok": True, "gpus": gpus}
-            else:
-                self._latest = {"ok": False, "gpus": [],
-                                "error": "nvidia-smi не вернул данных",
-                                "raw": (res.get("out") or "")[:200]}
+        # Парсим вывод НЕЗАВИСИМО от кода возврата: мост считает ok=(returncode==0),
+        # а nvidia-smi может выйти с ненулевым кодом из-за одного неподдержанного
+        # поля, при этом напечатав валидные строки util/VRAM. Опираемся на факт
+        # разбора хотя бы одного GPU, а не на ok моста.
+        out = res.get("out", "") or ""
+        gpus = _parse_gpu_csv(out)
+        if gpus:
+            self._latest = {"ok": True, "gpus": gpus}
+        elif not bridge._connected.is_set():
+            self._latest = {"ok": False, "gpus": [],
+                            "error": "RPC-мост хоста не подключён"}
         else:
-            err = ("RPC-мост хоста не подключён" if not bridge._connected.is_set()
-                   else (res.get("out") or "nvidia-smi недоступен")[:200])
-            self._latest = {"ok": False, "gpus": [], "error": err}
+            # Мост есть, но данных нет — покажем сырой вывод для диагностики.
+            self._latest = {"ok": False, "gpus": [],
+                            "error": "nvidia-smi не вернул данных о GPU",
+                            "raw": out[:300]}
         self._sampled_at = time.time()
 
     async def _loop(self) -> None:
