@@ -660,11 +660,37 @@ def cmd_freevram() -> int:
     return 0
 
 
+def _sanitize_env_file() -> None:
+    """
+    Привести wsl/.env к чистому UTF-8/LF. PowerShell `>>`/`Add-Content` по
+    умолчанию пишет UTF-16 → в файле появляются нулевые байты (\\x00) и BOM, и
+    docker compose падает: «unexpected character \\x00 in variable name». Тихо
+    чиним: срезаем BOM-ы, нулевые байты (UTF-16-паддинг ASCII) и CR.
+    """
+    if not ENV_FILE.exists():
+        return
+    raw = ENV_FILE.read_bytes()
+    boms = (b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf")
+    if b"\x00" not in raw and b"\r" not in raw and not raw.startswith(boms):
+        return  # уже чистый UTF-8/LF
+    cleaned = raw
+    for bom in boms:
+        cleaned = cleaned.replace(bom, b"")
+    cleaned = cleaned.replace(b"\x00", b"").replace(b"\r", b"")  # UTF-16 padding + CR
+    text = cleaned.decode("utf-8", errors="replace")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    ENV_FILE.write_text(text, encoding="utf-8", newline="\n")
+    info("Починил wsl/.env → чистый UTF-8/LF (частая беда PowerShell '>>'/"
+         "Add-Content). Для правки .env используйте UTF-8 или редактор в Пульте.")
+
+
 def cmd_up(profile: str | None = None) -> int:
     if not ENV_FILE.exists():
         info("Не найден wsl/.env — похоже, система ещё не установлена.")
         info("Запустите установку: python jarvis.py install")
         return 1
+    _sanitize_env_file()   # чинит UTF-16/BOM-порчу .env до любых операций с ним
     if profile:
         if not apply_profile(profile):
             return 1
