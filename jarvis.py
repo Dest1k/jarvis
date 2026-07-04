@@ -548,9 +548,16 @@ _VLLM_CAUSES = [
     (r"was killed|Killed|signal 9|exit code -9|SIGKILL",
      "Процесс убит ОС (обычно OOM-killer при загрузке весов). "
      "Снизьте GPU_UTIL/MAX_LEN или запустите без аудио (--no-audio)."),
+    (r"tie_weights|tie_word_embeddings",
+     "Сборка vLLM в образе не поддерживает tied-эмбеддинги для NVFP4/modelopt "
+     "(Gemma 4). Обновите движок: JARVIS_VLLM_IMAGE=vllm/vllm-openai:nightly в "
+     "wsl/.env → `docker pull` этого тега → `python jarvis.py up`. Обходной путь: "
+     "добавить в JARVIS_QWEN_EXTRA_ARGS '--hf-overrides {\"tie_word_embeddings\":false}' "
+     "(сработает, если чекпойнт содержит отдельный lm_head)."),
     (r"[Uu]nknown quantization|quantization.*not supported|modelopt|nvfp4|fp4",
      "Проблема с квантованием NVFP4/modelopt: версия vLLM в образе не умеет этот "
-     "формат. Обновите образ vLLM или задайте JARVIS_QWEN_QUANT_ARGS явно."),
+     "формат. Обновите образ vLLM (JARVIS_VLLM_IMAGE) или задайте "
+     "JARVIS_QWEN_QUANT_ARGS явно."),
     (r"does not exist|No such file|not a directory|Failed to load|checkpoint",
      "Модель не найдена/не докачана по пути JARVIS_QWEN_MODEL_PATH. "
      "Проверьте data/models/<...> и перекачайте профиль."),

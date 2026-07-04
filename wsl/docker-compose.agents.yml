@@ -24,7 +24,11 @@ x-gpu-reservation: &gpu-all
             capabilities: [gpu]
 
 x-vllm-base: &vllm-base
-  image: vllm/vllm-openai:latest
+  # Тег образа vLLM вынесен в env, чтобы обновлять движок БЕЗ правки файла:
+  # напр. JARVIS_VLLM_IMAGE=vllm/vllm-openai:nightly. Это важно для новейших
+  # форматов (NVFP4 Gemma 4 с tied-эмбеддингами): в старых сборках движок падает
+  # на tie_weights → NotImplementedError, свежий образ это уже умеет.
+  image: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
   restart: unless-stopped
   ipc: host                      # vLLM требует большой /dev/shm
   # Веса моделей — в EXT4 Docker-томе (jarvis-models), а НЕ в Windows bind-mount:
