@@ -384,6 +384,18 @@ async def delete_file(file_id: str, actor: str = "local-admin") -> JSONResponse:
     return _env({"deleted": file_id}, audit_id=res.get("audit_id"))
 
 
+@router.get("/rag/status")
+async def rag_status() -> JSONResponse:
+    """Активный провайдер эмбеддингов и векторный бэкенд поиска."""
+    import os as _os
+    return _env({
+        "embed_provider": _os.environ.get("JARVIS_EMBED_PROVIDER", "local"),
+        "vector_backend": ingest.vector_backend(),
+        "sqlite_vec": ingest.sqlite_vec_available(),
+        "embed_dim": ingest.EMBED_DIM,
+    })
+
+
 @router.post("/rag/reembed")
 async def rag_reembed() -> JSONResponse:
     """Пересчитать эмбеддинги всех чанков активным провайдером (после смены)."""

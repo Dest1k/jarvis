@@ -11,3 +11,5 @@ pydantic==2.10.4
 python-multipart==0.0.20
 # Парсинг веб-страниц/выдачи поиска для инструментов агента (web_fetch/web_search).
 beautifulsoup4==4.12.3
+# Векторизация поиска RAG (быстрый exact-cosine); опционально, есть Python-fallback.
+numpy<2

@@ -226,6 +226,54 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))  # оба L2-нормализованы → dot=cosine
 
 
+# Векторный бэкенд поиска: numpy (векторизованный exact-cosine, быстрый) при
+# наличии, иначе чистый Python. Опционально — sqlite-vec для ANN на больших
+# объёмах (probe безопасен: возвращает False, если расширение не собрано).
+try:
+    import numpy as _np  # noqa: N816
+except Exception:  # noqa: BLE001
+    _np = None
+
+
+def vector_backend() -> str:
+    return "numpy" if _np is not None else "python"
+
+
+def sqlite_vec_available() -> bool:
+    """Безопасная проверка доступности расширения sqlite-vec (ANN)."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(":memory:")
+        con.enable_load_extension(True)
+        try:
+            con.load_extension("vec0")
+            con.close()
+            return True
+        except Exception:  # noqa: BLE001
+            con.close()
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rank(qv: list[float], rows: list[dict[str, Any]], k: int) -> list[tuple[float, dict[str, Any]]]:
+    """Top-k по cosine. numpy-векторизация при наличии, иначе Python-цикл."""
+    # оставляем только чанки той же размерности, что и запрос
+    same = [(r, _unpack(r["embedding"])) for r in rows
+            if r["embedding"] and len(r["embedding"]) // 4 == len(qv)]
+    if not same:
+        return []
+    if _np is not None:
+        mat = _np.asarray([e for _, e in same], dtype=_np.float32)
+        q = _np.asarray(qv, dtype=_np.float32)
+        sims = mat @ q                      # оба L2-нормализованы → dot=cosine
+        idx = _np.argsort(-sims)[:k]
+        return [(float(sims[i]), same[i][0]) for i in idx]
+    scored = [(_cosine(qv, e), r) for r, e in same]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:k]
+
+
 # --------------------------------------------------------------------------- #
 # Основной вход: приём и обработка файла
 # --------------------------------------------------------------------------- #
@@ -310,13 +358,8 @@ async def search_chunks(query: str, *, session_id: Optional[str] = None,
         f"SELECT c.content, c.embedding, c.chunk_index, f.file_name, f.id AS file_id "
         f"FROM file_chunks c JOIN file_attachments_registry f ON c.file_id = f.id "
         f"{clause}", params)
-    scored: list[tuple[float, dict[str, Any]]] = []
-    for r in rows:
-        emb = _unpack(r["embedding"]) if r["embedding"] else []
-        scored.append((_cosine(qv, emb), r))
-    scored.sort(key=lambda x: x[0], reverse=True)
     out = []
-    for score, r in scored[:k]:
+    for score, r in _rank(qv, rows, k):
         out.append({"score": round(score, 4), "file_name": r["file_name"],
                     "file_id": r["file_id"], "chunk_index": r["chunk_index"],
                     "content": r["content"]})
