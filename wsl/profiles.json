@@ -187,7 +187,8 @@
         "JARVIS_QWEN_GPU_UTIL": "0.85",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-seqs 16",
+        "JARVIS_QWEN_MAX_NUM_SEQS": "16",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },

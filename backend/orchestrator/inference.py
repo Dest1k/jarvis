@@ -44,7 +44,7 @@ from typing import Any, Optional
 _MANAGED_KEYS = (
     "JARVIS_QWEN_MODEL_PATH", "JARVIS_QWEN_QUANT_ARGS", "JARVIS_QWEN_DTYPE",
     "JARVIS_QWEN_GPU_UTIL", "JARVIS_QWEN_MAX_LEN", "JARVIS_QWEN_KV_DTYPE",
-    "JARVIS_QWEN_EXTRA_ARGS", "JARVIS_ENABLE_UITARS",
+    "JARVIS_QWEN_MAX_NUM_SEQS", "JARVIS_QWEN_EXTRA_ARGS", "JARVIS_ENABLE_UITARS",
     "JARVIS_UITARS_URL", "JARVIS_UITARS_MODEL_NAME", "JARVIS_UITARS_MAX_LEN",
     "JARVIS_UITARS_COORD_MODE", "JARVIS_VISION_MODEL",
 )
@@ -67,6 +67,12 @@ def _solo_vision(max_len: str) -> dict[str, str]:
 # рестарт-цикл контейнера (полевой инцидент). Наш агент работает по собственному
 # двухфазному JSON-протоколу и в серверных парсерах не нуждается; возможные
 # <thought>-утечки reasoning в контент вычищает llm.extract_json.
+#
+# ВАЖНО: --max-num-seqs здесь БОЛЬШЕ НЕ ставим! Он задаётся отдельным ключом
+# JARVIS_QWEN_MAX_NUM_SEQS (compose подставляет ровно один раз). Если продублировать
+# его и в EXTRA_ARGS, и в базовой команде — vLLM ругается «Found duplicate keys
+# --max-num-seqs» и на строгих сборках падает на разборе аргументов (движок не
+# стартует). Один флаг — один канал.
 _GEMMA4_COMMON = "--trust-remote-code"
 
 MODES: dict[str, dict[str, Any]] = {
@@ -92,7 +98,8 @@ MODES: dict[str, dict[str, Any]] = {
             "JARVIS_QWEN_GPU_UTIL": "0.85",
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
-            "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --max-num-seqs 16",
+            "JARVIS_QWEN_MAX_NUM_SEQS": "16",   # выше конкуренция запросов (MoE быстра)
+            "JARVIS_QWEN_EXTRA_ARGS": _GEMMA4_COMMON,
             **_solo_vision("32768"),
         },
     },

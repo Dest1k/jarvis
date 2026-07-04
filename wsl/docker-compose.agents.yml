@@ -81,7 +81,7 @@ services:
       --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
       --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
       --enable-prefix-caching
-      --max-num-seqs 8
+      --max-num-seqs ${JARVIS_QWEN_MAX_NUM_SEQS:-8}
       ${JARVIS_QWEN_EXTRA_ARGS:-}
       --host 0.0.0.0
       --port 8001
