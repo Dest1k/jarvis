@@ -173,10 +173,10 @@
     }
   },
   "moe-turbo": {
-    "label": "★ v2 moe-turbo (СОЛО): Gemma-4-26B-A4B (NVFP4) — быстрый, БЕЗ UI-TARS",
+    "label": "★ v2 moe-turbo (СОЛО): Gemma-4-26B-A4B (NVFP4) — быстрый, CUDA-графы, БЕЗ UI-TARS",
     "mono": true,
-    "vram": "Веса NVFP4 ~16.5 ГБ, util 0.85 → 27.2 ГБ; + аудио ~2 = ~29 ГБ; резерв ~3 ГБ под десктоп. UI-TARS ОТКЛЮЧЁН (Gemma 4 мультимодальна — видит экран сама).",
-    "note": "Уже скачанная модель (data/models/gemma4-26b-a4b-nvfp4). Эквивалент кнопки moe-turbo в Пульте. UI-TARS не поднимается (JARVIS_ENABLE_UITARS=0) — иначе OOM на 32 ГБ.",
+    "vram": "Веса NVFP4 ~16.5 ГБ, util 0.80 → 25.6 ГБ (KV ~8.3) + CUDA-графы ~1 + аудио ~2 = ~28.6 ГБ; резерв ~3.4 ГБ под десктоп. UI-TARS ОТКЛЮЧЁН (Gemma 4 мультимодальна — видит экран сама).",
+    "note": "Уже скачанная модель (data/models/gemma4-26b-a4b-nvfp4). CUDA-графы ВКЛЮЧЕНЫ (JARVIS_QWEN_ENFORCE_EAGER пуст) — в eager при batch=1 GPU ждал CPU (35-40% загрузки). Первый старт дольше (torch.compile, кэш на томе jarvis-vllm-cache — одноразово). Если vLLM падает на захвате графов — верните JARVIS_QWEN_ENFORCE_EAGER=--enforce-eager. UI-TARS не поднимается (JARVIS_ENABLE_UITARS=0) — иначе OOM на 32 ГБ.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -184,11 +184,12 @@
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.85",
+        "JARVIS_QWEN_GPU_UTIL": "0.80",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code",
+        "JARVIS_QWEN_ENFORCE_EAGER": "",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 8192",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },

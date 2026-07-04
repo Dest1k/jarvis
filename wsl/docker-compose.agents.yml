@@ -38,6 +38,9 @@ x-vllm-base: &vllm-base
   volumes:
     - jarvis-models:/models
     - jarvis-hf:/root/.cache/huggingface
+    # Кэш torch.compile/CUDA-графов vLLM: без тома компиляция (~минуты) повторялась
+    # бы при КАЖДОМ пересоздании контейнера; с томом — одноразовая.
+    - jarvis-vllm-cache:/root/.cache/vllm
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -337,5 +340,7 @@ volumes:
     name: jarvis-models
   jarvis-hf:            # кэш HF для аудио (Whisper/Kokoro качаются в рантайме)
     name: jarvis-hf
+  jarvis-vllm-cache:    # кэш torch.compile/CUDA-графов vLLM (одноразовая компиляция)
+    name: jarvis-vllm-cache
 
 # sandbox остаётся bind-mount'ом на D: (JARVIS_DATA_DIR) — ему 9P не мешает.

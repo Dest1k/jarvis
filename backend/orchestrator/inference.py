@@ -44,7 +44,8 @@ from typing import Any, Optional
 _MANAGED_KEYS = (
     "JARVIS_QWEN_MODEL_PATH", "JARVIS_QWEN_QUANT_ARGS", "JARVIS_QWEN_DTYPE",
     "JARVIS_QWEN_GPU_UTIL", "JARVIS_QWEN_MAX_LEN", "JARVIS_QWEN_KV_DTYPE",
-    "JARVIS_QWEN_MAX_NUM_SEQS", "JARVIS_QWEN_EXTRA_ARGS", "JARVIS_ENABLE_UITARS",
+    "JARVIS_QWEN_MAX_NUM_SEQS", "JARVIS_QWEN_ENFORCE_EAGER",
+    "JARVIS_QWEN_EXTRA_ARGS", "JARVIS_ENABLE_UITARS",
     "JARVIS_UITARS_URL", "JARVIS_UITARS_MODEL_NAME", "JARVIS_UITARS_MAX_LEN",
     "JARVIS_UITARS_COORD_MODE", "JARVIS_VISION_MODEL",
 )
@@ -87,19 +88,29 @@ MODES: dict[str, dict[str, Any]] = {
             "переиспользуются между шагами ReAct без пересчёта. "
             "UI-TARS отключён — карта отдана диспетчеру. vLLM TP=1."
         ),
-        # util 0.85 (а не 0.90): оставляем ~4.8 ГБ под аудио (~2) и рабочий стол
-        # Windows (~2.8) — иначе на 32 ГБ карте десктоп/аудио голодают и падают.
-        "vram": "0.85 × 32 = 27.2 ГБ (веса ~16.5 + overhead ~0.8 + KV/префикс ~9.9); "
-                "аудио ~2.0 + резерв десктопа ~2.8 ГБ.",
+        # util 0.80: было 0.85, но CUDA-графам нужен запас VRAM на захват (полевой
+        # замер: 0.85 + аудио + десктоп = 97.9% занятости — капчур некуда класть).
+        # 0.80 освобождает ~1.6 ГБ; KV-пула по-прежнему хватает с запасом.
+        "vram": "0.80 × 32 = 25.6 ГБ (веса ~16.5 + overhead ~0.8 + KV/префикс ~8.3); "
+                "CUDA-графы ~1 + аудио ~2.0 + резерв десктопа ~2.8 ГБ.",
         "env": {
             "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
             "JARVIS_QWEN_QUANT_ARGS": "",   # NVFP4 определяется из config модели
             "JARVIS_QWEN_DTYPE": "auto",
-            "JARVIS_QWEN_GPU_UTIL": "0.85",
+            "JARVIS_QWEN_GPU_UTIL": "0.80",
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_MAX_NUM_SEQS": "16",   # выше конкуренция запросов (MoE быстра)
-            "JARVIS_QWEN_EXTRA_ARGS": _GEMMA4_COMMON,
+            # УТИЛИЗАЦИЯ: CUDA-графы ВКЛЮЧЕНЫ (ключ пуст → без --enforce-eager).
+            # В eager при batch=1 GPU ждёт запуска мелких кернелов с CPU — полевой
+            # замер давал 35-40% загрузки; графы убирают этот простой. Первый старт
+            # дольше (torch.compile), но кэш — на томе jarvis-vllm-cache, т.е.
+            # компиляция одноразовая. Если vLLM падает на захвате графов —
+            # верните JARVIS_QWEN_ENFORCE_EAGER=--enforce-eager в wsl/.env.
+            "JARVIS_QWEN_ENFORCE_EAGER": "",
+            # Префилл-бюджет: дефолтные ~2.5K токенов/шаг мелко для 5090 — длинный
+            # системный промпт агента прожёвывался кусками. 8192 ускоряет префилл.
+            "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --max-num-batched-tokens 8192",
             **_solo_vision("32768"),
         },
     },
@@ -125,7 +136,11 @@ MODES: dict[str, dict[str, Any]] = {
             "JARVIS_QWEN_GPU_UTIL": "0.75",
             "JARVIS_QWEN_MAX_LEN": "16384",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
-            "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --cpu-offload-gb 8 --swap-space 8",
+            # eager ОСТАВЛЕН: захват CUDA-графов поверх --cpu-offload-gb (DMA части
+            # весов из host-RAM) — рискованная связка; скорость решает MoE-профиль.
+            "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
+            "JARVIS_QWEN_EXTRA_ARGS": (f"{_GEMMA4_COMMON} --cpu-offload-gb 8 "
+                                       "--swap-space 8 --max-num-batched-tokens 8192"),
             **_solo_vision("16384"),
         },
     },
