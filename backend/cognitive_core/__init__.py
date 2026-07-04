@@ -18,7 +18,7 @@ PWA-голос) — в docs/cognitive_core_architecture.md.
 """
 
 from . import (config, db, executor, ingest, learning, maintenance,  # noqa: F401
-               models, plugins, subagents, suspend)
+               models, plugins, recovery, subagents, suspend)
 
 __all__ = ["db", "config", "models", "suspend", "plugins", "ingest",
-           "subagents", "maintenance", "learning", "executor"]
+           "subagents", "maintenance", "learning", "executor", "recovery"]

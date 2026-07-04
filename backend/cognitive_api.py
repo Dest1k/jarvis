@@ -31,7 +31,7 @@ from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisco
 from fastapi.responses import JSONResponse
 
 from cognitive_core import (config, db, ingest, learning, maintenance,
-                            models, subagents)
+                            models, recovery, subagents)
 
 router = APIRouter(prefix="/api/cognitive", tags=["cognitive-core"])
 
@@ -524,6 +524,52 @@ async def update_plan_task(plan_id: str, task_id: str, payload: dict[str, Any]) 
 # --------------------------------------------------------------------------- #
 # Sleep-Cycle / память: консолидация, forgetting, recall, post-mortem
 # --------------------------------------------------------------------------- #
+async def _host_runner(cmd: str):
+    """Best-effort исполнение команды починки на хосте через RPC-мост."""
+    try:
+        import server as _srv
+        res = await _srv.bridge.call("exec", {"command": cmd})
+        r = (res or {}).get("result", {}) or {}
+        out = ((r.get("stdout") or "") + (r.get("stderr") or "")).strip()
+        return r.get("returncode", 0 if res.get("ok") else 1), out or str(res.get("error", ""))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"RPC-мост недоступен: {exc}"
+
+
+@router.post("/recovery/diagnose")
+async def recovery_diagnose(payload: dict[str, Any]) -> JSONResponse:
+    """Диагностировать сбой компонента (правила + опц. LLM) → причина+фикс."""
+    res = await recovery.diagnose(
+        component=str(payload.get("component", "unknown")),
+        detail=str(payload.get("detail", "")),
+        name=str(payload.get("name", "")), svc=str(payload.get("svc", "")),
+        chat=_dispatcher_chat() if payload.get("use_llm") else None)
+    return _env(res, state="success" if res.get("matched") else "processing")
+
+
+@router.post("/recovery/apply")
+async def recovery_apply(payload: dict[str, Any]) -> JSONResponse:
+    """Применить фикс (HITL по danger vs autonomy_level; approved=true — форсить)."""
+    res = await recovery.apply_fix(
+        component=str(payload.get("component", "unknown")),
+        suggested_fix=str(payload.get("suggested_fix", "")),
+        danger=int(payload.get("danger", 1)),
+        autonomy_level=int(payload.get("autonomy_level", 1)),
+        approved=bool(payload.get("approved", False)),
+        runner=_host_runner)
+    if res.get("requires_hitl"):
+        return _env(res, ok=True, state="processing")   # ждём одобрения оператора
+    return _env(res, ok=bool(res.get("ok")),
+                state="success" if res.get("ok") else "error",
+                error=res.get("error"))
+
+
+@router.get("/recovery/report")
+async def recovery_report() -> JSONResponse:
+    """Сводный человекочитаемый отчёт о здоровье компонентов."""
+    return _env(await recovery.health_report())
+
+
 @router.post("/maintenance/sleep-cycle")
 async def run_sleep_cycle() -> JSONResponse:
     """Прогнать sleep-cycle: decay → prune → consolidate (для idle/ручного запуска)."""
