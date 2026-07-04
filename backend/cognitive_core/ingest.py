@@ -31,7 +31,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import db
+from . import db, parallel
+
+# Потолок одновременных эмбеддинг-запросов (vLLM батчит их) — переопределяемо env.
+EMBED_CONCURRENCY_KEY = "JARVIS_EMBED_CONCURRENCY"
+EMBED_CONCURRENCY_DEFAULT = 8
 
 # Корневой каталог ядра (том данных). Тот же, что у db.py/config.py.
 CORE_DIR = Path(os.environ.get("JARVIS_CORE_DIR", "./.jarvis_core"))
@@ -323,11 +327,15 @@ async def ingest_file(*, filename: str, data: bytes, owner_id: str = "local-admi
 
     await db.execute("UPDATE file_attachments_registry SET ingest_status='embedding' WHERE id=?", (fid,))
     chunks = chunk_text(text)
+    # Эмбеддинги — самая дорогая часть (сетевой round-trip к vLLM на КАЖДЫЙ чанк).
+    # Раньше считались строго по очереди; теперь — в несколько потоков (vLLM их
+    # батчит), с потолком. Запись в БД потом — последовательно (один writer SQLite).
+    limit = parallel.concurrency(EMBED_CONCURRENCY_KEY, EMBED_CONCURRENCY_DEFAULT)
+    vectors = await parallel.bounded_map(embed_async, chunks, limit=limit)
     total_tokens = 0
-    for i, ch in enumerate(chunks):
+    for i, (ch, vec) in enumerate(zip(chunks, vectors)):
         tok = _estimate_tokens(ch)
         total_tokens += tok
-        vec = await embed_async(ch)      # модельный провайдер или local-fallback
         await db.execute(
             "INSERT INTO file_chunks (id,file_id,chunk_index,content,token_count,embedding,embedding_dim) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -372,9 +380,12 @@ async def reembed_all() -> dict[str, Any]:
     JARVIS_EMBED_PROVIDER). Идемпотентно, батчами по строкам.
     """
     rows = await db.query("SELECT id, content FROM file_chunks")
+    # Параллельный пересчёт (vLLM батчит), запись в БД — последовательно.
+    limit = parallel.concurrency(EMBED_CONCURRENCY_KEY, EMBED_CONCURRENCY_DEFAULT)
+    vectors = await parallel.bounded_map(
+        lambda r: embed_async(r["content"]), rows, limit=limit)
     n = 0
-    for r in rows:
-        vec = await embed_async(r["content"])
+    for r, vec in zip(rows, vectors):
         await db.execute("UPDATE file_chunks SET embedding=?, embedding_dim=? WHERE id=?",
                          (_pack(vec), len(vec), r["id"]))
         n += 1

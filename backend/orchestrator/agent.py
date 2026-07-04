@@ -738,7 +738,16 @@ async def run_chat(session_id: str, user_text: str,
     _rag_files: list[str] = []
     await cc_bridge.log_episode(trace=_trace, session_id=session_id,
                                 entry_type="action", content=f"Запрос пользователя: {user_text}")
-    rag_text, _rag_files = await cc_bridge.rag_context(session_id, user_text)
+
+    # RAG-извлечение и декомпозиция цели НЕзависимы (оба зависят только от текста
+    # пользователя), поэтому запускаем их в ДВА потока сразу: пока «мозг» строит
+    # план, эмбеддинг-поиск по файлам идёт параллельно — экономим round-trip на
+    # старте КАЖДОГО хода вместо строгой очереди.
+    rag_task = asyncio.create_task(cc_bridge.rag_context(session_id, user_text))
+    decompose_task = (asyncio.create_task(_decompose_goal(session_id, user_text))
+                      if AUTONOMOUS_ENABLED else None)
+
+    rag_text, _rag_files = await rag_task
     if rag_text.strip():
         # Инъекция релевантных фрагментов загруженных файлов в контекст хода —
         # scratch виден и планировщику, и фазе ответа (RAG в оба конца).
@@ -754,9 +763,9 @@ async def run_chat(session_id: str, user_text: str,
     autonomous = False
     plan_list: list[str] = []
     goal = user_text
-    if AUTONOMOUS_ENABLED:
+    if decompose_task is not None:
         try:
-            info = await _decompose_goal(session_id, user_text)
+            info = await decompose_task
             autonomous, plan_list = info["autonomous"], info["plan"]
             goal = info["goal"] or user_text
         except Exception:  # noqa: BLE001

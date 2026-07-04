@@ -32,12 +32,15 @@ import re
 import time
 from typing import Any, Awaitable, Callable, Optional
 
-from . import db
+from . import db, parallel
 
 ChatFn = Callable[..., Awaitable[str]]
 
 FORMAT = "jarvis-federation"
 FORMAT_VERSION = 1
+# Потолок одновременных Critic-ревью при импорте пачки правил (vLLM батчит).
+IMPORT_CONCURRENCY_KEY = "JARVIS_FEDERATION_CONCURRENCY"
+IMPORT_CONCURRENCY_DEFAULT = 4
 
 # Регэкспы очистки PII/чувствительного при экспорте.
 _PII = [
@@ -110,6 +113,8 @@ async def import_rules(pack: dict[str, Any], *, source: str = "peer",
         "SELECT kind, title, body FROM semantic_knowledge_graph WHERE visibility='federated'")
     have: set[str] = {_content_hash(e["kind"], e["title"], e["body"]) for e in existing}
 
+    # 1) Дедуп/валидация (дёшево, последовательно) → список кандидатов.
+    candidates: list[dict[str, str]] = []
     for r in rules:
         if not isinstance(r, dict):
             continue
@@ -122,22 +127,33 @@ async def import_rules(pack: dict[str, Any], *, source: str = "peer",
         if chash in have:
             skipped += 1
             continue
-        have.add(chash)
-        # локальный Critic-гейт (правила безопасности + опц. LLM)
-        review = await subagents.critic_review(kind=kind, title=title, body=body, chat=chat)
+        have.add(chash)  # дедуп и внутри самой пачки
+        tags = list(r.get("tags") or []) + [f"federation:{source}"]
+        candidates.append({"kind": kind, "title": title, "body": body,
+                           "tags": json.dumps(tags, ensure_ascii=False)})
+
+    # 2) Локальный Critic-гейт КАЖДОГО кандидата — ПАРАЛЛЕЛЬНО (независимы, vLLM
+    #    батчит). Чужим правилам не доверяем слепо: правила безопасности + опц. LLM.
+    limit = parallel.concurrency(IMPORT_CONCURRENCY_KEY, IMPORT_CONCURRENCY_DEFAULT)
+    reviews = await parallel.bounded_map(
+        lambda c: subagents.critic_review(kind=c["kind"], title=c["title"],
+                                          body=c["body"], chat=chat),
+        candidates, limit=limit)
+
+    # 3) Запись в граф (последовательно — один writer SQLite).
+    for c, review in zip(candidates, reviews):
         status = "active" if review["verdict"] == "approved" else "rejected"
         if status == "rejected":
             rejected += 1
         else:
             imported += 1
-        tags = list(r.get("tags") or []) + [f"federation:{source}"]
         nid = db.new_id()
         await db.mutate_with_audit(
             table="semantic_knowledge_graph", row_id=nid, op="create", pk_col="id",
             sql="INSERT INTO semantic_knowledge_graph "
                 "(id,kind,title,body,tags,visibility,status,critic_verdict,critic_notes,source_trace) "
                 "VALUES (?,?,?,?,?, 'federated', ?,?,?,?)",
-            params=(nid, kind, title, body, json.dumps(tags, ensure_ascii=False),
+            params=(nid, c["kind"], c["title"], c["body"], c["tags"],
                     status, review["verdict"], review["notes"], f"federation:{source}"),
             actor="agent:federation", actor_kind="agent",
             reason=f"import from {source} ({review['verdict']})")
