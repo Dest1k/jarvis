@@ -18,6 +18,7 @@ import MonitorView from "@/components/MonitorView";
 import CognitiveView from "@/components/CognitiveView";
 import HitlGate from "@/components/HitlGate";
 import StatusBar from "@/components/StatusBar";
+import GpuMeter from "@/components/GpuMeter";
 
 type View = "chat" | "control" | "monitor" | "cognitive";
 
@@ -36,7 +37,9 @@ export default function Page() {
       <header className="topbar">
         <span className="brand">JARVIS-OS</span>
         <span style={{ color: "var(--muted)", fontSize: 13 }}>Command Center</span>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 18 }}>
+          <GpuMeter />
+          <span className="topbar-sep" />
           <StatusBar />
         </div>
       </header>

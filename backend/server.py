@@ -19,6 +19,8 @@ WebSocket-маршруты:
 REST:
     GET  /health            — проверка готовности.
     GET  /status            — сводный статус подсистем.
+    GET  /api/gpu           — телеметрия GPU/VRAM (кэш семплера, мгновенный ответ).
+    GET  /api/gpu/stream     — SSE-поток той же телеметрии (push в реальном времени).
     POST /task              — постановка задачи в агент-оркестратор.
     GET  /api/agent/memory  — состояние памяти агента.
     POST /api/agent/memory  — управление памятью (reset/flush/clear/save).
@@ -43,9 +45,9 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +287,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     bridge_task.cancel()
     mcp_task.cancel()
     try:
+        await gpu_sampler.stop()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from orchestrator.agent import stop_mcp
         await stop_mcp()
     except Exception:  # noqa: BLE001
@@ -411,6 +417,155 @@ async def _host_exec(command: str, timeout: int = 200,
     r = (res or {}).get("result", {})
     return {"ok": res.get("ok", False), "code": r.get("returncode"),
             "out": (r.get("stdout") or "") + (r.get("stderr") or "")}
+
+
+# --------------------------------------------------------------------------- #
+# ТЕЛЕМЕТРИЯ GPU/VRAM (всегда на виду в топбаре, обновление «в реальном времени»)
+#
+# Источник — nvidia-smi на ХОСТЕ через RPC-мост (GPU у Windows, backend в WSL).
+# Чтобы «обновлять максимально часто, но без напряга»: реальный опрос nvidia-smi
+# идёт фоновым семплером с ФИКСИРОВАННОЙ каденцией (JARVIS_GPU_SAMPLE_MS, по
+# умолч. 1500 мс), а клиенты читают КЭШ — сколько бы вкладок ни было открыто и
+# как бы часто ни обновляли, мост/хост не перегружаются. Семплер сам засыпает,
+# когда никто не смотрит (idle-stop), и просыпается по первому запросу.
+# --------------------------------------------------------------------------- #
+GPU_QUERY = (
+    "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,"
+    "temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits")
+
+
+def _parse_gpu_csv(text: str) -> list[dict[str, Any]]:
+    """Разобрать вывод `nvidia-smi --format=csv,noheader,nounits` в список GPU."""
+    def num(x: str) -> Optional[float]:
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None  # '[N/A]', '[Not Supported]', пустое
+
+    gpus: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            continue  # строка ошибки nvidia-smi, а не данные
+        mem_used, mem_total = num(parts[3]), num(parts[4])
+        mem_pct = (round(mem_used / mem_total * 100, 1)
+                   if mem_used is not None and mem_total else None)
+        gpus.append({
+            "index": index, "name": parts[1],
+            "util": num(parts[2]), "mem_used": mem_used, "mem_total": mem_total,
+            "mem_pct": mem_pct,
+            "temp": num(parts[5]) if len(parts) > 5 else None,
+            "power": num(parts[6]) if len(parts) > 6 else None,
+            "power_limit": num(parts[7]) if len(parts) > 7 else None,
+        })
+    return gpus
+
+
+class GpuSampler:
+    """Фоновый семплер GPU-телеметрии с кэшем и авто-засыпанием при простое."""
+
+    def __init__(self, exec_fn: Any, *, query: str = GPU_QUERY) -> None:
+        self._exec = exec_fn                       # инъекция (тестируемость)
+        self._query = query
+        self._latest: Optional[dict[str, Any]] = None
+        self._sampled_at = 0.0
+        self._task: Optional[asyncio.Task] = None
+        self._last_access = 0.0
+        ms = int(os.environ.get("JARVIS_GPU_SAMPLE_MS", "1500"))
+        self._cadence = max(0.5, ms / 1000.0)      # пол — 500 мс (защита хоста)
+        self._idle_stop = max(self._cadence * 4, 8.0)
+
+    def cadence_ms(self) -> int:
+        return int(self._cadence * 1000)
+
+    async def _sample_once(self) -> None:
+        try:
+            res = await self._exec(self._query, timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "out": str(exc)}
+        if res.get("ok"):
+            gpus = _parse_gpu_csv(res.get("out", ""))
+            if gpus:
+                self._latest = {"ok": True, "gpus": gpus}
+            else:
+                self._latest = {"ok": False, "gpus": [],
+                                "error": "nvidia-smi не вернул данных",
+                                "raw": (res.get("out") or "")[:200]}
+        else:
+            err = ("RPC-мост хоста не подключён" if not bridge._connected.is_set()
+                   else (res.get("out") or "nvidia-smi недоступен")[:200])
+            self._latest = {"ok": False, "gpus": [], "error": err}
+        self._sampled_at = time.time()
+
+    async def _loop(self) -> None:
+        try:
+            while time.time() - self._last_access < self._idle_stop:
+                await self._sample_once()
+                await asyncio.sleep(self._cadence)
+        finally:
+            self._task = None
+
+    def touch(self) -> None:
+        """Отметить интерес наблюдателя и разбудить семплер, если он спал."""
+        self._last_access = time.time()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop())
+
+    async def get(self) -> dict[str, Any]:
+        self.touch()
+        if self._latest is None:            # первый кадр — семплим синхронно
+            await self._sample_once()
+        payload = dict(self._latest or {"ok": False, "gpus": []})
+        payload["sampled_at"] = self._sampled_at
+        payload["age_ms"] = (int((time.time() - self._sampled_at) * 1000)
+                             if self._sampled_at else None)
+        payload["cadence_ms"] = self.cadence_ms()
+        return payload
+
+    async def stop(self) -> None:
+        task, self._task = self._task, None
+        if task and not task.done():
+            task.cancel()
+
+
+gpu_sampler = GpuSampler(_host_exec)
+
+
+@app.get("/api/gpu")
+async def gpu_metrics() -> JSONResponse:
+    """Мгновенный кэш GPU-телеметрии (фоновый семплер держит его свежим)."""
+    return JSONResponse(await gpu_sampler.get())
+
+
+@app.get("/api/gpu/stream")
+async def gpu_stream(request: Request) -> StreamingResponse:
+    """SSE-поток GPU-телеметрии: push с каденцией семплера, без клиентских таймеров."""
+    async def gen() -> AsyncIterator[str]:
+        gpu_sampler.touch()
+        last = ""
+        # первичный кадр — сразу, чтобы метрика не «мигала пусто»
+        first = await gpu_sampler.get()
+        yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+        try:
+            while not await request.is_disconnected():
+                await asyncio.sleep(gpu_sampler._cadence)
+                data = await gpu_sampler.get()
+                blob = json.dumps(data, ensure_ascii=False)
+                if blob != last:            # не гоняем идентичные кадры
+                    last = blob
+                    yield f"data: {blob}\n\n"
+                else:
+                    yield ": keep-alive\n\n"  # комментарий SSE (держим соединение)
+        except asyncio.CancelledError:
+            raise
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"})
 
 
 async def _update_env_vars(updates: dict[str, str]) -> None:
