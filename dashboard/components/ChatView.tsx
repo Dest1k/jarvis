@@ -9,7 +9,7 @@
  * голосовой ввод (Whisper ASR), озвучка ответов (Kokoro TTS), панель памяти,
  * аварийная остановка, создание/переключение/закрытие вкладок (localStorage).
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { JarvisSocket, JarvisMessage } from "@/lib/ws";
 
 const TARGET_SR = 16000;
@@ -37,6 +37,11 @@ interface ChatMessage {
   replyTo?: string; steps: Step[]; streaming?: boolean; error?: boolean;
 }
 interface Tab { id: string; title: string }
+interface Attach {
+  id: string; name: string; size: number;
+  status: "uploading" | "ready" | "failed";
+  percent: number; fileId?: string; chunks?: number; error?: string;
+}
 interface MemoryItem { id: string; kind: string; text: string; tags: string[] }
 interface MemoryOverview {
   summary: string; recent_count: number; longterm: MemoryItem[]; longterm_count: number;
@@ -65,6 +70,10 @@ export default function ChatView() {
   const [hydrated, setHydrated] = useState(false);
   const [input, setInput] = useState("");
   const [conn, setConn] = useState("connecting");
+  // v3: вложения чата (RAG). Каждое — со статусом/прогрессом для реактивности.
+  const [attachments, setAttachments] = useState<Attach[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [listening, setListening] = useState(false);
   const [speak, setSpeak] = useState(false);
   const [level, setLevel] = useState(0);
@@ -234,10 +243,48 @@ export default function ChatView() {
     setChats((p) => ({ ...p, [active]: [...(p[active] || []), { id, role: "user", text, steps: [] }] }));
     chatRef.current?.sendJson({ type: "user_message", text, id, session: active });
     setInput("");
+    // Готовые вложения уже проиндексированы под эту сессию (RAG подтянет их сам);
+    // убираем из стейджинга, оставляя ещё грузящиеся.
+    setAttachments((a) => a.filter((x) => x.status === "uploading"));
   };
   const cancel = () => {
     chatRef.current?.sendJson({ type: "cancel", session: active, id: workingIds.current[active] || "" });
     setWorking(active, false);
+  };
+
+  // --- вложения (RAG): загрузка с прогрессом, drag-drop, превью ---
+  const COG = "/api/core/api/cognitive";
+  const uploadFile = (file: File) => {
+    const localId = uid();
+    setAttachments((a) => [...a, { id: localId, name: file.name, size: file.size, status: "uploading", percent: 0 }]);
+    const patch = (p: Partial<Attach>) =>
+      setAttachments((a) => a.map((x) => (x.id === localId ? { ...x, ...p } : x)));
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("session_id", active);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${COG}/files/upload`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) patch({ percent: Math.round((e.loaded / e.total) * 100) });
+    };
+    xhr.onload = () => {
+      try {
+        const r = JSON.parse(xhr.responseText);
+        const rec = r?.data?.file;
+        patch({ status: rec?.ingest_status === "ready" ? "ready" : "failed",
+                fileId: rec?.id, chunks: rec?.chunk_count, error: rec?.ingest_error, percent: 100 });
+      } catch { patch({ status: "failed", error: "Некорректный ответ сервера" }); }
+    };
+    xhr.onerror = () => patch({ status: "failed", error: "Ошибка сети" });
+    xhr.send(fd);
+  };
+  const dismissAttach = (a: Attach) => {
+    setAttachments((list) => list.filter((x) => x.id !== a.id));
+    if (a.fileId) fetch(`${COG}/files/${a.fileId}`, { method: "DELETE" }).catch(() => {});
+  };
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragOver(false);
+    Array.from(e.dataTransfer.files || []).forEach(uploadFile);
   };
 
   // --- микрофон ---
@@ -317,7 +364,15 @@ export default function ChatView() {
   const activeActor = actorBySession[active] || "";
 
   return (
-    <div className="chat-wrap">
+    <div className={`chat-wrap ${dragOver ? "drag-over" : ""}`}
+         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+         onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+         onDrop={onDrop}>
+      {dragOver && (
+        <div className="drop-overlay">
+          <div className="drop-hint">📎 Отпустите файлы — прикреплю к диалогу (RAG)</div>
+        </div>
+      )}
       <div className="chat-head panel">
         <span className={`status-dot ${conn === "open" ? "ok" : "warn"}`} />
         <strong>JARVIS</strong>
@@ -365,12 +420,36 @@ export default function ChatView() {
             <p style={{ color: "var(--muted)" }}>Можно голосом — 🎤. Новый диалог — вкладка ＋.</p>
           </div>
         )}
-        {messages.map((m) => <MessageBubble key={m.id} m={m} />)}
+        {messages.map((m) => <MessageBubble key={m.id} m={m} session={active} />)}
         <div ref={bottomRef} />
       </div>
 
+      {/* Превью-карточки прикреплённых файлов (со статусом/прогрессом) */}
+      {attachments.length > 0 && (
+        <div className="attach-row">
+          {attachments.map((a) => (
+            <div key={a.id} className={`attach-card ${a.status}`} title={a.error || a.name}>
+              <span className="attach-icon">
+                {a.status === "uploading" ? "⏳" : a.status === "ready" ? "📄" : "⚠"}
+              </span>
+              <span className="attach-name">{a.name}</span>
+              {a.status === "uploading" && (
+                <span className="attach-bar"><span className="attach-fill" style={{ width: `${a.percent}%` }} /></span>
+              )}
+              {a.status === "ready" && <span className="attach-meta">✓ {a.chunks ?? 0} фрагм.</span>}
+              {a.status === "failed" && <span className="attach-meta err">ошибка</span>}
+              <button className="attach-x" onClick={() => dismissAttach(a)} title="Убрать">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {micError && <div className="mic-error">⚠ {micError}</div>}
       <div className={`chat-input panel ${listening ? "recording" : ""}`}>
+        <input ref={fileInputRef} type="file" multiple style={{ display: "none" }}
+               onChange={(e) => { Array.from(e.target.files || []).forEach(uploadFile); e.target.value = ""; }} />
+        <button className="btn attach-btn" onClick={() => fileInputRef.current?.click()}
+                title="Прикрепить файл (или перетащите в окно)">＋</button>
         <button className={`btn mic ${listening ? "recording" : ""}`}
                 onClick={() => (listening ? stopMic() : startMic())}
                 title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод: нажмите и говорите"}>
@@ -400,9 +479,20 @@ export default function ChatView() {
 }
 
 // --------------------------------------------------------------------------- //
-function MessageBubble({ m }: { m: ChatMessage }) {
+function MessageBubble({ m, session }: { m: ChatMessage; session: string }) {
   const [open, setOpen] = useState(false);
+  const [why, setWhy] = useState<{ content: string; entry_type: string }[] | null>(null);
+  const [whyBusy, setWhyBusy] = useState(false);
   const isUser = m.role === "user";
+  const explain = async () => {
+    setWhyBusy(true);
+    try {
+      const r = await fetch(`/api/core/api/cognitive/db/episodic_memory_logs?q=${encodeURIComponent(session)}&limit=8`);
+      const d = await r.json();
+      setWhy((d?.data?.rows || []).map((x: any) => ({ content: String(x.content || ""), entry_type: String(x.entry_type || "") })));
+    } catch { setWhy([]); }
+    setWhyBusy(false);
+  };
   return (
     <div className={`msg-row ${isUser ? "user" : "assistant"}`}>
       <div className={`bubble ${isUser ? "user" : "assistant"} ${m.error ? "error" : ""}`}>
@@ -429,6 +519,24 @@ function MessageBubble({ m }: { m: ChatMessage }) {
         )}
         <div className="bubble-text">{renderContent(m.text)}</div>
         {m.streaming && <span className="caret">▋</span>}
+        {!isUser && !m.streaming && m.text && (
+          <div className="why-row">
+            <button className="why-btn" onClick={explain} disabled={whyBusy}
+                    title="Показать цепочку рассуждений (эпизодическая память)">
+              {whyBusy ? "…" : "почему?"}
+            </button>
+            {why && (
+              <div className="why-panel">
+                {why.length === 0 && <div className="why-empty">Трасса пуста для этого диалога.</div>}
+                {why.map((w, i) => (
+                  <div key={i} className={`why-item why-${w.entry_type}`}>
+                    <span className="why-type">{w.entry_type}</span> {w.content.slice(0, 240)}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

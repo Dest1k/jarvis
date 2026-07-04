@@ -304,3 +304,49 @@ input:focus, textarea:focus { border-color: var(--accent); }
   flex: 1; min-height: 0; height: auto; border-radius: 0;
   background: #05080d;
 }
+
+/* --- v3: чат-вложения (RAG), drag-drop, объяснимость --- */
+.chat-wrap { position: relative; }
+.chat-wrap.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 20; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(10, 16, 24, 0.72); backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+.drop-hint {
+  font-size: 16px; color: var(--accent);
+  border: 2px dashed var(--accent); border-radius: 14px; padding: 18px 26px;
+}
+.attach-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 10px 0; }
+.attach-card {
+  display: flex; align-items: center; gap: 6px; max-width: 240px;
+  background: #0a0f16; border: 1px solid var(--border); border-radius: 10px;
+  padding: 5px 8px; font-size: 12px;
+}
+.attach-card.ready { border-color: #1f6f43; }
+.attach-card.failed { border-color: var(--danger, #7a2b2b); }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+.attach-meta { color: var(--muted); font-size: 11px; }
+.attach-meta.err { color: var(--danger, #d66); }
+.attach-bar { width: 54px; height: 4px; background: #1b2735; border-radius: 3px; overflow: hidden; }
+.attach-fill { display: block; height: 100%; background: var(--accent); transition: width .15s; }
+.attach-x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; }
+.attach-x:hover { color: var(--danger, #d66); }
+.attach-btn { font-size: 18px; }
+.why-row { margin-top: 6px; }
+.why-btn {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--muted); font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.why-btn:hover { color: var(--accent); border-color: var(--accent); }
+.why-panel {
+  margin-top: 6px; border-left: 2px solid var(--accent); padding-left: 8px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.why-item { font-size: 11.5px; color: var(--muted); }
+.why-type {
+  display: inline-block; font-size: 10px; text-transform: uppercase;
+  color: var(--accent); margin-right: 4px;
+}
+.why-empty { font-size: 11.5px; color: var(--muted); font-style: italic; }
