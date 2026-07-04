@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import Any, Awaitable, Callable, Optional
 
-from . import db
+from . import db, jsonx
 
 Runner = Callable[[str], Awaitable[tuple[Optional[int], str]]]  # cmd -> (rc, out)
 ChatFn = Callable[..., Awaitable[str]]
@@ -95,10 +95,8 @@ async def diagnose(*, component: str, detail: str, name: str = "", svc: str = ""
                  "{\"cause\":\"...\",\"suggested_fix\":\"...\",\"danger\":0..3}."},
                 {"role": "user", "content": f"Компонент: {component}\nЛог:\n{detail[:2000]}"}],
                 temperature=0.1, max_tokens=300, timeout=60)
-            import json
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                parsed = json.loads(m.group(0))
+            parsed = jsonx.first_obj(raw)
+            if parsed:
                 result.update({"matched": True, "cause": parsed.get("cause", ""),
                                "suggested_fix": parsed.get("suggested_fix", ""),
                                "danger": int(parsed.get("danger", 1)), "source": "llm"})

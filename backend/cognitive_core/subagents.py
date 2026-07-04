@@ -31,7 +31,7 @@ import re
 import time
 from typing import Any, Awaitable, Callable, Optional
 
-from . import db
+from . import db, jsonx
 
 ChatFn = Callable[..., Awaitable[str]]
 
@@ -99,9 +99,8 @@ async def critic_review(*, kind: str, title: str, body: str,
                 {"role": "user", "content": f"Тип: {kind}\nЗаголовок: {title}\nТело:\n{body}"},
             ]
             raw = await chat(messages, temperature=0.1, max_tokens=300, timeout=60)
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                parsed = json.loads(m.group(0))
+            parsed = jsonx.first_obj(raw)
+            if parsed:
                 if parsed.get("verdict") == "rejected":
                     return {"verdict": "rejected",
                             "notes": parsed.get("notes", "LLM-Critic отклонил."),
@@ -181,9 +180,9 @@ async def decompose_goal(goal: str, *, owner_id: str = "local-admin",
                 {"role": "user", "content": f"Цель: {goal}\nОриентир: {EXISTENTIAL_DIRECTIVE}"},
             ]
             raw = await chat(messages, temperature=0.2, max_tokens=800, timeout=90)
-            m = re.search(r"\[.*\]", raw, re.DOTALL)
-            if m:
-                tasks = json.loads(m.group(0))
+            arr = jsonx.first_array(raw)
+            if arr:
+                tasks = arr
         except Exception:  # noqa: BLE001
             tasks = []
 

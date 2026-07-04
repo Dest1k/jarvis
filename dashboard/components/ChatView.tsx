@@ -485,6 +485,7 @@ function MessageBubble({ m, session }: { m: ChatMessage; session: string }) {
   const [whyBusy, setWhyBusy] = useState(false);
   const isUser = m.role === "user";
   const explain = async () => {
+    if (why !== null) { setWhy(null); return; }   // повторный клик — свернуть панель
     setWhyBusy(true);
     try {
       const r = await fetch(`/api/core/api/cognitive/db/episodic_memory_logs?q=${encodeURIComponent(session)}&limit=8`);
@@ -522,8 +523,8 @@ function MessageBubble({ m, session }: { m: ChatMessage; session: string }) {
         {!isUser && !m.streaming && m.text && (
           <div className="why-row">
             <button className="why-btn" onClick={explain} disabled={whyBusy}
-                    title="Показать цепочку рассуждений (эпизодическая память)">
-              {whyBusy ? "…" : "почему?"}
+                    title="Показать/скрыть цепочку рассуждений (эпизодическая память)">
+              {whyBusy ? "…" : why !== null ? "скрыть ▲" : "почему? ▾"}
             </button>
             {why && (
               <div className="why-panel">

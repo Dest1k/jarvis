@@ -156,6 +156,18 @@ READONLY_PREFIXES = (
 )
 
 
+def _is_readonly(command: str) -> bool:
+    """Частый статусный опрос (nvidia-smi/docker ps/…) — не спамим им консоль."""
+    cmd = (command or "").strip().lower()
+    return any(cmd.startswith(p) for p in READONLY_PREFIXES)
+
+
+def _log_command(kind: str, command: str) -> None:
+    """INFO для обычных команд, DEBUG — для частых read-only опросов (телеметрия
+    GPU шлёт nvidia-smi каждые ~1.5 c; на INFO это забивало окно моста)."""
+    (log.debug if _is_readonly(command) else log.info)("%s: %s", kind, command[:300])
+
+
 def is_destructive(action: str, payload: dict[str, Any]) -> bool:
     """Определить, требует ли операция HITL-подтверждения."""
     # Явный флаг от вызывающей стороны
@@ -647,7 +659,7 @@ class WindowsHostExecutor(HostExecutor):
         if _looks_interactive(command):
             return {"returncode": 1, "stderr": _INTERACTIVE_HINT}
         command = _normalize_wsl(command)
-        log.info("Выполняю команду хоста: %s", command)
+        _log_command("Выполняю команду хоста", command)
         return await self._run(command, shell=True,
                                timeout=_effective_timeout(command, timeout))
 
@@ -955,7 +967,7 @@ class LinuxHostExecutor(HostExecutor):
     async def exec_command(self, command: str,
                            timeout: Optional[int] = None) -> dict[str, Any]:
         """Выполнить команду через bash -lc (полноценный Linux-хост)."""
-        log.info("Выполняю команду хоста (bash): %s", command)
+        _log_command("Выполняю команду хоста (bash)", command)
         return await self._run(["bash", "-lc", command], shell=False,
                                timeout=_effective_timeout(command, timeout))
 

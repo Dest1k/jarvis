@@ -279,6 +279,23 @@ services:
       - JARVIS_CORE_DIR=/data/jarvis_core
       # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).
       - JARVIS_MCP_CONFIG=/app/mcp_servers.json
+      # ВАЖНО: эти ключи ЧИТАЮТСЯ ВНУТРИ backend-контейнера, поэтому их НЕДОСТАТОЧНО
+      # положить в wsl/.env — их надо явно ПРОБРОСИТЬ сюда (иначе os.environ в
+      # контейнере их не видит). Раньше JARVIS_LIFELONG_LEARNING в .env «не работал»
+      # именно поэтому: --env-file подставляет ${VAR} в compose, но в контейнер
+      # переменная попадает только через этот блок.
+      # Самообучение (фоновый Lifelong-Learning цикл) + пауза между итерациями.
+      - JARVIS_LIFELONG_LEARNING=${JARVIS_LIFELONG_LEARNING:-0}
+      - JARVIS_LEARNING_PAUSE=${JARVIS_LEARNING_PAUSE:-30}
+      # Эмбеддинги RAG: local (оффлайн) | vllm (/v1/embeddings) + адрес/модель.
+      - JARVIS_EMBED_PROVIDER=${JARVIS_EMBED_PROVIDER:-local}
+      - JARVIS_EMBED_URL=${JARVIS_EMBED_URL:-}
+      - JARVIS_EMBED_MODEL=${JARVIS_EMBED_MODEL:-}
+      # Потолки параллелизма к «мозгу» (см. README §9) + каденция телеметрии GPU.
+      - JARVIS_PLAN_CONCURRENCY=${JARVIS_PLAN_CONCURRENCY:-4}
+      - JARVIS_EMBED_CONCURRENCY=${JARVIS_EMBED_CONCURRENCY:-8}
+      - JARVIS_FEDERATION_CONCURRENCY=${JARVIS_FEDERATION_CONCURRENCY:-4}
+      - JARVIS_GPU_SAMPLE_MS=${JARVIS_GPU_SAMPLE_MS:-1500}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

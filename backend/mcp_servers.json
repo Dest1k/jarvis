@@ -30,13 +30,13 @@
     },
     "git": {
       "command": "python", "args": ["-m", "mcp_server_git"],
-      "enabled": true,
-      "_desc": "Чтение/поиск/правки git-репозиториев (repo_path в аргументах вызова; официальный)."
+      "enabled": false,
+      "_desc": "ВЫКЛЮЧЕН: на текущем образе падал 'Connection closed' (несовместимость версий mcp/сервера при хендшейке), а возможности ДУБЛИРУЕТ нативный git_intel + windows.exec 'git ...'. Меньше инструментов в промпте — точнее выбор у локальной модели. Вернуть: enabled=true; причину смотреть `docker logs jarvis-backend | grep MCP`."
     },
     "sqlite": {
       "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/jarvis.db"],
-      "enabled": true,
-      "_desc": "Локальная БД SQLite (/data/jarvis.db): создавать таблицы, писать/читать/анализировать данные SQL-запросами (официальный). Полезно для бытовых учётов: списки, бюджет, заметки."
+      "enabled": false,
+      "_desc": "ВЫКЛЮЧЕН: падал 'Connection closed' на этом образе, а SQLite уже покрыт когнитивным ядром (граф знаний/эпизоды/планы) и MCP-memory. Бытовые учёты — через memory_save/граф. Вернуть: enabled=true + логи backend для диагностики."
     },
     "playwright": {
       "command": "npx",

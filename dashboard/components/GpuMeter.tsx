@@ -31,7 +31,6 @@ interface GpuPayload {
 }
 
 const GPU_URL = "/api/core/api/gpu";
-const GPU_STREAM_URL = "/api/core/api/gpu/stream";
 
 /** Цвет заливки по загрузке: зелёный → янтарь → красный. */
 function loadColor(pct: number | null): string {
@@ -55,61 +54,30 @@ function shortName(name: string): string {
 export default function GpuMeter() {
   const [data, setData] = useState<GpuPayload | null>(null);
   const [live, setLive] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     let alive = true;
 
-    const apply = (d: GpuPayload) => {
-      if (alive) setData(d);
-    };
-
-    const startPolling = () => {
-      if (pollRef.current) return;
-      const tick = async () => {
-        try {
-          const r = await fetch(GPU_URL, { cache: "no-store" });
-          apply((await r.json()) as GpuPayload);
-          if (alive) setLive(true);
-        } catch {
-          if (alive) setLive(false);
-        }
-      };
-      tick();
-      pollRef.current = setInterval(tick, 1500);
-    };
-
-    // Предпочитаем SSE (push сервером); при ошибке — постоянный откат на опрос.
-    if (typeof EventSource !== "undefined") {
+    // ОПРОС, а не SSE: прокси Next.js буферизует text/event-stream, из-за чего
+    // EventSource открывался без ошибки, но кадры не доходили — метрика висела
+    // «GPU —». Бэкенд кэширует замер семплера, поэтому частый опрос дёшев и
+    // надёжно проходит через тот же прокси, что и остальной REST (как StatusBar).
+    const tick = async () => {
       try {
-        const es = new EventSource(GPU_STREAM_URL);
-        esRef.current = es;
-        es.onmessage = (e) => {
-          try {
-            apply(JSON.parse(e.data) as GpuPayload);
-            if (alive) setLive(true);
-          } catch {
-            /* keep-alive/битый кадр — игнор */
-          }
-        };
-        es.onerror = () => {
-          if (alive) setLive(false);
-          es.close();
-          esRef.current = null;
-          startPolling();
-        };
+        const r = await fetch(GPU_URL, { cache: "no-store" });
+        if (!alive) return;
+        setData((await r.json()) as GpuPayload);
+        setLive(true);
       } catch {
-        startPolling();
+        if (alive) setLive(false);
       }
-    } else {
-      startPolling();
-    }
+    };
+    tick();
+    pollRef.current = setInterval(tick, 1500);
 
     return () => {
       alive = false;
-      esRef.current?.close();
-      esRef.current = null;
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;

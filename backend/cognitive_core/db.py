@@ -61,8 +61,6 @@ async def _run(fn, *args) -> Any:
 
 async def connect() -> None:
     """Открыть соединение и применить схему (идемпотентно)."""
-    global _conn
-
     def _op() -> None:
         global _conn
         if _conn is None:

@@ -62,6 +62,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, AsyncIterator, Optional
 
 from . import llm
@@ -582,6 +583,102 @@ def _normalize_plan(action: str, args: Any) -> tuple[str, dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
+# Устойчивое извлечение решения планировщика (мульти-схема + reasoning-модели)
+# --------------------------------------------------------------------------- #
+# Разные модели кладут ИМЯ инструмента и его АРГУМЕНТЫ под разными ключами
+# (наш протокол action/action_input; OpenAI function-calling name/arguments;
+# LangChain tool/tool_input и т.п.). Gemma 4 — reasoning-модель: перед JSON она
+# «думает» (иногда в тегах <think>…</think>, иногда прозой), из-за чего наивный
+# «первый {…}» ловил кусок рассуждения без action и агент падал сразу в answer —
+# то самое «llm безрукая». Здесь разбираем ВСЕ сбалансированные JSON-объекты и
+# берём последнее валидное решение любой схемы.
+_ACTION_KEYS = ("action", "tool", "tool_name", "name", "function", "action_name")
+_ARGS_KEYS = ("action_input", "input", "arguments", "tool_input", "parameters",
+              "args", "action_args", "params")
+_REASONING_RE = re.compile(
+    r"<(think|thought|thinking|reasoning|analysis)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+
+
+def _iter_json_objects(text: str) -> "list[dict[str, Any]]":
+    """Все верхнеуровневые сбалансированные {…}, которые парсятся в dict (по порядку)."""
+    out: list[dict[str, Any]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = esc = False
+        j = i
+        while j < n:
+            ch = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[i:j + 1])
+                        if isinstance(obj, dict):
+                            out.append(obj)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
+            j += 1
+        i = j + 1
+    return out
+
+
+def _coerce_plan(obj: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Привести объект любой школы к {action, action_input, thought}. None — не вызов."""
+    if not isinstance(obj, dict):
+        return None
+    # Вложенный OpenAI-стиль: {"function":{"name":…,"arguments":…}}
+    fn = obj.get("function")
+    if isinstance(fn, dict):
+        inner = _coerce_plan(fn)
+        if inner:
+            inner.setdefault("thought", str(obj.get("thought") or ""))
+            return inner
+    action = next((obj[k].strip() for k in _ACTION_KEYS
+                   if isinstance(obj.get(k), str) and obj[k].strip()), None)
+    if action is None:
+        return None
+    args: Any = next((obj[k] for k in _ARGS_KEYS if k in obj), None)
+    if args is None:  # аргументы рассыпаны прямо в объекте
+        args = {k: v for k, v in obj.items()
+                if k not in _ACTION_KEYS and k not in _ARGS_KEYS
+                and k not in ("thought", "reasoning")}
+    if isinstance(args, str):  # arguments как JSON-строка (OpenAI)
+        try:
+            parsed = json.loads(args)
+            args = parsed if isinstance(parsed, dict) else args
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {"action": action, "action_input": args,
+            "thought": str(obj.get("thought") or obj.get("reasoning") or "")}
+
+
+def _extract_plan(raw: str) -> Optional[dict[str, Any]]:
+    """Достать решение планировщика, устойчиво к схеме и reasoning-обёрткам."""
+    if not raw:
+        return None
+    plans = [p for obj in _iter_json_objects(_REASONING_RE.sub(" ", raw))
+             if (p := _coerce_plan(obj)) is not None]
+    # Последний валидный объект — это финальное решение модели (после раздумий).
+    return plans[-1] if plans else None
+
+
+# --------------------------------------------------------------------------- #
 # Фаза 1 — планировщик
 # --------------------------------------------------------------------------- #
 def _scratch_to_text(scratch: list[dict[str, Any]],
@@ -662,10 +759,15 @@ async def _plan_next(session_id: str, scratch: list[dict[str, Any]],
     messages.append({"role": "user",
                      "content": "Каков следующий шаг? Ответь только JSON."})
 
-    raw = await llm.chat(messages, temperature=0.1, max_tokens=512, timeout=120)
-    parsed = llm.extract_json(raw)
-    if not parsed or "action" not in parsed:
-        # не смогли разобрать → считаем, что пора отвечать
+    # max_tokens щедрый: Gemma 4 «думает» перед JSON — на 512 токенах JSON мог не
+    # уместиться и обрезаться (→ парс не удавался → агент сразу отвечал «безруко»).
+    raw = await llm.chat(messages, temperature=0.1, max_tokens=900, timeout=120)
+    parsed = _extract_plan(raw)
+    if parsed is None:
+        # Не нашли ни одного вызова инструмента любой схемы. ЛОГируем сырой ответ —
+        # это единственный способ увидеть, что реально выдаёт модель на этом железе.
+        log.warning("Планировщик не извлёк действие. Сырой ответ модели (400): %r",
+                    (raw or "")[:400])
         return {"action": "answer", "thought": "Перехожу к ответу."}
     return parsed
 
