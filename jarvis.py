@@ -534,6 +534,78 @@ def up_stack_sequential(skip_uitars: bool = False, with_audio: bool = True) -> N
         _compose("rm", "-f", "audio-layer")
 
 
+# Сильные сигнатуры фатальных причин падения vLLM-движка (в порядке приоритета).
+# У vLLM v1 реальная причина печатается ЗАДОЛГО до финального «Engine core
+# initialization failed. See root cause above» — её и вытаскиваем из ПОЛНОГО лога.
+_VLLM_CAUSES = [
+    (r"no kernel image is available",
+     "Сборка vLLM/torch в образе НЕ поддерживает вашу GPU (Blackwell sm_120). "
+     "Обновите образ: `docker pull vllm/vllm-openai:latest` и пересоздайте, "
+     "либо закрепите более свежий тег в docker-compose.agents.yml."),
+    (r"out of memory|CUDA out of memory|OutOfMemoryError",
+     "Нехватка VRAM (OOM). Закройте GPU-приложения, `python jarvis.py freevram`, "
+     "снизьте JARVIS_QWEN_GPU_UTIL (напр. 0.70) и/или JARVIS_QWEN_MAX_LEN (8192)."),
+    (r"was killed|Killed|signal 9|exit code -9|SIGKILL",
+     "Процесс убит ОС (обычно OOM-killer при загрузке весов). "
+     "Снизьте GPU_UTIL/MAX_LEN или запустите без аудио (--no-audio)."),
+    (r"[Uu]nknown quantization|quantization.*not supported|modelopt|nvfp4|fp4",
+     "Проблема с квантованием NVFP4/modelopt: версия vLLM в образе не умеет этот "
+     "формат. Обновите образ vLLM или задайте JARVIS_QWEN_QUANT_ARGS явно."),
+    (r"does not exist|No such file|not a directory|Failed to load|checkpoint",
+     "Модель не найдена/не докачана по пути JARVIS_QWEN_MODEL_PATH. "
+     "Проверьте data/models/<...> и перекачайте профиль."),
+    (r"duplicate keys --max-num-seqs",
+     "Дубль --max-num-seqs (устаревший .env). Пере-примените профиль: "
+     "`python jarvis.py up --profile <ваш>` — он перезапишет wsl/.env."),
+    (r"AssertionError|ValueError|RuntimeError|ImportError|ModuleNotFoundError",
+     "Исключение движка — смотрите строку выше в сохранённом полном логе."),
+]
+
+
+def _diagnose_container(name: str) -> None:
+    """Сохранить ПОЛНЫЙ лог контейнера в файл и вытащить реальную причину падения."""
+    import re
+    r = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+    full = (r.stdout or "") + (r.stderr or "")
+    lines = full.splitlines()
+
+    # Полный лог — в файл рядом с проектом (его и присылать при обращении).
+    log_path = ROOT / f"jarvis_diag_{name}.log"
+    try:
+        log_path.write_text(full, encoding="utf-8", errors="replace")
+        info(f"Полный лог {name} сохранён: {log_path}  (строк: {len(lines)})")
+    except OSError as exc:
+        info(f"Не удалось сохранить полный лог {name}: {exc}")
+
+    # Строки, похожие на ошибку/traceback (для быстрого взгляда).
+    err_rx = re.compile(r"error|traceback|exception|fail|killed|cuda|out of memory|"
+                        r"assert|raise|not supported|no kernel", re.IGNORECASE)
+    err_lines = [l for l in lines if err_rx.search(l)]
+    info(f"Хвост логов {name} (последние 150 строк):")
+    run(["docker", "logs", "--tail", "150", name])
+
+    # Вердикт: первая сматчившаяся сильная сигнатура → человекочитаемая причина.
+    verdict = None
+    for pat, hint in _VLLM_CAUSES:
+        m = next((l for l in lines if re.search(pat, l)), None)
+        if m:
+            verdict = (m.strip(), hint)
+            break
+    info("=" * 60)
+    if verdict:
+        info(f"🔎 ВЕРОЯТНАЯ ПРИЧИНА ({name}):")
+        info(f"   ↳ {verdict[0][:200]}")
+        info(f"   → {verdict[1]}")
+    elif err_lines:
+        info(f"🔎 Явной сигнатуры не нашёл. Подозрительные строки {name} (последние 15):")
+        for l in err_lines[-15:]:
+            info(f"   | {l[:200]}")
+        info(f"   Пришлите файл {log_path.name} — в нём полная причина.")
+    else:
+        info(f"🔎 Ошибок в логе {name} не видно — возможно, ещё грузит веса "
+             f"(старт vLLM небыстрый). Подождите и повторите `python jarvis.py diag`.")
+
+
 def cmd_diag() -> int:
     """
     Диагностика одним вызовом: статус/рестарты/код выхода каждого контейнера
@@ -565,11 +637,7 @@ def cmd_diag() -> int:
             troubled.append(n)
     for n in troubled:
         info("-" * 60)
-        # 150 строк, а не 40: у vLLM фатальная строка («root cause») печатается
-        # ЗАДОЛГО до финального traceback — на 40 строках её не видно (только
-        # предупреждения). 150 надёжно захватывает реальную причину падения движка.
-        info(f"Хвост логов {n} (последние 150 строк — здесь настоящая причина):")
-        run(["docker", "logs", "--tail", "150", n])
+        _diagnose_container(n)
     if not troubled:
         info("Все контейнеры стабильны. Если дашборд всё равно молчит — "
              "`python jarvis.py status` и логи RPC-моста.")
