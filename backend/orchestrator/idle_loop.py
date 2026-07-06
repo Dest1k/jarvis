@@ -164,22 +164,18 @@ class BackgroundIdleLoop:
     async def _write_report(self, branch: str, anomaly: str, klass: dict[str, Any], diagnosis: str, results: list[dict[str, Any]]) -> dict[str, Any]:
         if self.host_exec is None:
             return {"ok": False, "out": "no host_exec"}
-        report = {
-            "ts": time.time(), "branch": branch, "anomaly": anomaly,
-            "classification": klass, "diagnosis": diagnosis, "validation": results,
-        }
+        report = {"ts": time.time(), "branch": branch, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "validation": results}
         body = json.dumps(report, ensure_ascii=False, indent=2)
         b64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
         path = f"data/jarvis_core/self_heal/report_{int(time.time())}.json"
-        cmd = (
-            f'python - <<"PY"\n'
-            f'import base64, pathlib\n'
-            f'p=pathlib.Path(r"{self.repo_path}")/r"{path}"\n'
-            f'p.parent.mkdir(parents=True, exist_ok=True)\n'
-            f'p.write_bytes(base64.b64decode("{b64}"))\n'
-            f'print(p)\nPY'
+        py = (
+            "import base64,pathlib;"
+            f"p=pathlib.Path(r'{self.repo_path}')/r'{path}';"
+            "p.parent.mkdir(parents=True,exist_ok=True);"
+            f"p.write_bytes(base64.b64decode('{b64}'));"
+            "print(p)"
         )
-        wr = await self.host_exec(cmd)
+        wr = await self.host_exec(f'python -c "{py}"')
         if wr.get("ok"):
             await self.host_exec(f'git -C "{self.repo_path}" add "{path}" && git -C "{self.repo_path}" commit -m "JARVIS self-heal report: {klass.get("kind", "anomaly")}"')
         return wr
@@ -189,12 +185,7 @@ class BackgroundIdleLoop:
         diagnosis = await self._diagnose(anomaly, klass)
         self._state.last_diagnosis = diagnosis[:500]
         if not self.self_heal_enabled or self.host_exec is None:
-            await self._emit({
-                "level": "info",
-                "message": "Self-heal diagnostic completed. Set JARVIS_SELF_HEAL_ENABLE=1 to allow branch/report/test cycles.",
-                "classification": klass,
-                "diagnosis": diagnosis,
-            })
+            await self._emit({"level": "info", "message": "Self-heal diagnostic completed. Set JARVIS_SELF_HEAL_ENABLE=1 to allow branch/report/test cycles.", "classification": klass, "diagnosis": diagnosis})
             return
         branch = "fix/jarvis-auto-" + str(int(time.time()))
         steps = [
@@ -212,8 +203,5 @@ class BackgroundIdleLoop:
         report = await self._write_report(branch, anomaly, klass, diagnosis, results)
         ok = all(r.get("ok") for r in results[1:]) and report.get("ok")
         self._state.last_action = f"self-heal branch {branch}: {'ok' if ok else 'failed'}"
-        msg = (
-            f"Sir, I detected {klass['kind']} and prepared branch {branch} with a diagnostic report. Validation passed. Shall I open or merge the repair?"
-            if ok else f"Sir, I detected {klass['kind']}, but autonomous validation failed on branch {branch}."
-        )
+        msg = (f"Sir, I detected {klass['kind']} and prepared branch {branch} with a diagnostic report. Validation passed. Shall I open or merge the repair?" if ok else f"Sir, I detected {klass['kind']}, but autonomous validation failed on branch {branch}.")
         await self._emit({"level": "ok" if ok else "err", "message": msg, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "results": results, "report": report})
