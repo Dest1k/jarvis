@@ -182,7 +182,8 @@ class BackgroundIdleLoop:
         )
         wr = await self.host_exec(f'python -c "{py}"')
         if wr.get("ok"):
-            await self.host_exec(f'git -C "{self.repo_path}" add -A && git -C "{self.repo_path}" commit -m "JARVIS self-heal candidate: {klass.get("kind", "anomaly")}"')
+            kind = str(klass.get("kind", "anomaly")).replace('"', '').replace("'", "")[:60]
+            await self.host_exec(f'git -C "{self.repo_path}" add -A && git -C "{self.repo_path}" commit -m "JARVIS self-heal candidate: {kind}"')
         return wr
 
     async def _self_heal(self, anomaly: str) -> None:
