@@ -23,6 +23,16 @@ try:
 except Exception as exc:  # noqa: BLE001
     log.debug("persona patch skipped: %s", exc)
 
+# Native host tools are registered here so we do not have to rewrite the large
+# ToolRegistry implementation. They become first-class ReAct tools immediately
+# after orchestrator import.
+try:
+    from . import native_ops
+    native_ops.register(agent._registry)  # type: ignore[attr-defined]
+    log.info("Native host tools registered: native_host/native_window/native_ui")
+except Exception as exc:  # noqa: BLE001
+    log.debug("native tools registration skipped: %s", exc)
+
 _raw_reset_context = agent.reset_context
 _raw_run_chat = agent.run_chat
 
