@@ -2,29 +2,29 @@
 /**
  * page.tsx — главная страница Command Center JARVIS-OS.
  *
- * Три вкладки (по итогам рефакторинга):
- *   🛠️  Пульт управления — системные/сервисные функции (без изменений по сути).
- *   💬  Чат              — универсальный Telegram-подобный чат с агентом
- *                          (текст + голос + память + шаги выполнения).
- *   🖥️  Мониторная       — живые логи всех сервисов в одной сетке.
- *
- * Глобальный HITL-гейт остаётся поверх всего: при деструктивной команде на хосте
- * всплывает окно подтверждения оператора.
+ * Вкладки:
+ *   💬 Чат        — диалог с Core JARVIS.
+ *   🧠 Разум      — cognitive/RAG/knowledge graph.
+ *   🧭 Операции   — статус автономного runtime, MCP, GPU, инцидентов и навыков.
+ *   🛠️ Пульт      — сервисы, профили, модели, очистка.
+ *   🖥️ Мониторная — живые логи.
  */
 import { useState } from "react";
 import ControlPanel from "@/components/ControlPanel";
 import ChatView from "@/components/ChatView";
 import MonitorView from "@/components/MonitorView";
 import CognitiveView from "@/components/CognitiveView";
+import AgentOpsView from "@/components/AgentOpsView";
 import HitlGate from "@/components/HitlGate";
 import StatusBar from "@/components/StatusBar";
 import GpuMeter from "@/components/GpuMeter";
 
-type View = "chat" | "control" | "monitor" | "cognitive";
+type View = "chat" | "control" | "monitor" | "cognitive" | "ops";
 
 const NAV: { id: View; label: string }[] = [
   { id: "chat", label: "💬 Чат" },
   { id: "cognitive", label: "🧠 Разум" },
+  { id: "ops", label: "🧭 Операции" },
   { id: "control", label: "🛠️ Пульт управления" },
   { id: "monitor", label: "🖥️ Мониторная" },
 ];
@@ -56,12 +56,12 @@ export default function Page() {
         ))}
       </nav>
 
-      {/* content: чат держим всегда смонтированным (live WS/аудио), прочие — по выбору */}
       <main className="content">
         <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}>
           <ChatView />
         </div>
         {view === "cognitive" && <CognitiveView />}
+        {view === "ops" && <AgentOpsView />}
         {view === "control" && <ControlPanel />}
         {view === "monitor" && <MonitorView />}
       </main>
