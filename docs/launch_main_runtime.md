@@ -72,7 +72,20 @@ native_ui      Windows UI Automation tree/find
 
 Правило системного промпта: для процессов, служб, событий, железа и окон сначала использовать native tools, а `windows.exec/powershell` — только fallback.
 
-## 6. Проверка контекста и «почему»
+## 6. Mission autonomy
+
+Для широких задач агент получает инструмент:
+
+```text
+mission plan          создать durable project plan в cognitive DB
+mission status        показать планы/подзадачи
+mission run_role      вызвать Researcher/Coder/Critic brief, с cluster offload при наличии worker-ноды
+mission learning_tick выполнить одну безопасную итерацию lifelong learning
+```
+
+Это позволяет JARVIS вести большие цели как проект: декомпозиция → роли → проверка → память, а не пытаться удержать всю работу в одном сообщении.
+
+## 7. Проверка контекста и «почему»
 
 1. Открой dashboard.
 2. Отправь запрос, который вызывает инструменты.
@@ -82,7 +95,7 @@ native_ui      Windows UI Automation tree/find
 6. Нажми `🧹 Очистить контекст и экран`.
 7. Обнови страницу: старые `steps/why` не должны вернуться из `localStorage`.
 
-## 7. MCP и background runtime
+## 8. MCP и background runtime
 
 ```env
 JARVIS_BACKGROUND_RUNTIME=1
@@ -95,7 +108,7 @@ JARVIS_MCP_CALL_TIMEOUT=120
 
 MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers.
 
-## 8. Self-heal patch candidates
+## 9. Self-heal patch candidates
 
 Диагностика включена безопасно. Branch/report режим:
 
@@ -132,7 +145,7 @@ JARVIS_SELF_HEAL_APPLY_PATCH=1
 
 Merge/push дальше зависит от Git/HITL политики.
 
-## 9. Lifelong Learning
+## 10. Lifelong Learning
 
 ```env
 JARVIS_LIFELONG_LEARNING=1
@@ -141,7 +154,7 @@ JARVIS_LEARNING_MINE_INCIDENTS=1
 
 В простое система создаёт проверенные sysadmin-правила и превращает `resolved_incidents.json` в `incident_recipe` узлы cognitive graph после Critic-gate.
 
-## 10. Кластер по LAN / Mesh VPN
+## 11. Кластер по LAN / Mesh VPN
 
 ```env
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001/v1","model":"qwen-coder","role":"coder","transport":"lan","weight":2}]
@@ -149,7 +162,7 @@ JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001
 
 Для Tailscale/WireGuard указывай mesh IP/hostname в `base_url`.
 
-## 11. Сеть Researcher-Agent
+## 12. Сеть Researcher-Agent
 
 ```env
 JARVIS_NETWORK_RECOVERY_SERVICES=Dnscache
@@ -158,7 +171,7 @@ JARVIS_NETWORK_RECOVERY_CMD=
 
 JARVIS не меняет сетевые политики сам: оператор явно задаёт разрешённый service restart или собственный recovery hook.
 
-## 12. Диагностика после запуска
+## 13. Диагностика после запуска
 
 ```powershell
 python jarvis.py status
