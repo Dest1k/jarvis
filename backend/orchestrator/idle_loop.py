@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Background idle diagnostics loop for JARVIS.
+"""Background idle diagnostics / self-healing loop for JARVIS.
 
-Runs only after user inactivity and when GPU guard allows it. By default it is
-safe diagnostics-only. Branch/test self-healing cycles require
-JARVIS_SELF_HEAL_ENABLE=1 and still report for operator review.
+Runs only after user inactivity and when GPU guard allows it. The loop is
+safe-by-default: diagnostics run automatically, while branch/test self-healing
+requires JARVIS_SELF_HEAL_ENABLE=1. Even then it prepares evidence and a staging
+branch/report; merging remains an explicit operator/Git policy decision.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
@@ -31,6 +34,7 @@ ERROR_PATTERNS = [
     re.compile(r"Traceback \(most recent call last\)", re.I),
 ]
 
+
 @dataclass
 class IdleState:
     active: bool = False
@@ -39,7 +43,9 @@ class IdleState:
     iteration: int = 0
     last_anomaly: str = ""
     last_action: str = ""
+    last_diagnosis: str = ""
     self_heal_enabled: bool = False
+
 
 class BackgroundIdleLoop:
     def __init__(self, *, host_exec: HostExec | None, broadcast: Broadcast | None, gpu_guard: Any | None = None) -> None:
@@ -54,9 +60,10 @@ class BackgroundIdleLoop:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._active_turns = 0
+        self._seen_anomalies: set[str] = set()
 
     def status(self) -> dict[str, Any]:
-        return asdict(self._state) | {"active_turns": self._active_turns}
+        return asdict(self._state) | {"active_turns": self._active_turns, "seen_anomalies": len(self._seen_anomalies)}
 
     def mark_user_activity(self, active: bool = True) -> None:
         self._state.last_user_activity = time.time()
@@ -109,9 +116,14 @@ class BackgroundIdleLoop:
             if self.host_exec is not None:
                 anomalies = await self._scan_runtime_logs()
                 if anomalies:
-                    self._state.last_anomaly = anomalies[0]
-                    await self._emit({"level": "warn", "message": anomalies[0][:400]})
-                    await self._self_heal(anomalies[0])
+                    for anomaly in anomalies[:3]:
+                        if anomaly in self._seen_anomalies:
+                            continue
+                        self._seen_anomalies.add(anomaly)
+                        self._state.last_anomaly = anomaly
+                        await self._emit({"level": "warn", "message": anomaly[:400]})
+                        await self._self_heal(anomaly)
+                        break
                 net = await diagnose_and_optionally_recover(self.host_exec)
                 if not net.get("container_http", {}).get("ok"):
                     await self._emit({"level": "warn", "message": "Researcher network probe failed; safe recovery path evaluated.", "network": net})
@@ -121,28 +133,87 @@ class BackgroundIdleLoop:
     async def _scan_runtime_logs(self) -> list[str]:
         if self.host_exec is None:
             return []
-        cmd = "docker logs --tail 240 jarvis-backend 2>&1 && docker logs --tail 160 jarvis-vllm-qwen 2>&1"
+        cmd = "docker logs --tail 240 jarvis-backend 2>&1 && docker logs --tail 160 jarvis-vllm-qwen 2>&1 && docker logs --tail 120 jarvis-vllm-uitars 2>&1"
         res = await self.host_exec(cmd)
         text = res.get("out", "")
         return [line.strip() for line in text.splitlines() if any(p.search(line) for p in ERROR_PATTERNS)][:10]
 
+    def _classify(self, anomaly: str) -> dict[str, Any]:
+        low = anomaly.lower()
+        if "uva is not available" in low:
+            return {"kind": "cuda_uva", "severity": "high", "suggestion": "Verify CUDA_VISIBLE_DEVICES=0, CUDA_DISABLE_P2P=1, NCCL_P2P_DISABLE=1 and enforce-eager profile."}
+        if "outofmemory" in low or "out of memory" in low:
+            return {"kind": "vram_oom", "severity": "high", "suggestion": "Reduce max_model_len/gpu_util, stop optional audio/UI-TARS, flush inactive contexts."}
+        if "name or service not known" in low or "connection attempts failed" in low:
+            return {"kind": "network", "severity": "medium", "suggestion": "Run container HTTP probe and host DNS probe; apply only configured recovery hooks."}
+        if "mcp" in low:
+            return {"kind": "mcp", "severity": "medium", "suggestion": "Check mcp_servers.json absolute paths, binaries, sqlite db path and restart MCP manager."}
+        return {"kind": "traceback", "severity": "medium", "suggestion": "Inspect traceback tail, map to incidents ledger, prepare targeted patch."}
+
+    async def _diagnose(self, anomaly: str, klass: dict[str, Any]) -> str:
+        try:
+            from . import llm
+            messages = [
+                {"role": "system", "content": "Ты — Coder/SysAdmin self-heal модуль JARVIS. Дай краткий технический диагноз и безопасный план проверки. Без автослияния в main."},
+                {"role": "user", "content": f"Класс: {klass}\nАномалия:\n{anomaly}"},
+            ]
+            return (await llm.chat(messages, temperature=0.1, max_tokens=500, timeout=90)).strip()[:3000]
+        except Exception as exc:  # noqa: BLE001
+            return f"LLM diagnosis unavailable: {exc}. Suggested deterministic action: {klass.get('suggestion')}"
+
+    async def _write_report(self, branch: str, anomaly: str, klass: dict[str, Any], diagnosis: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.host_exec is None:
+            return {"ok": False, "out": "no host_exec"}
+        report = {
+            "ts": time.time(), "branch": branch, "anomaly": anomaly,
+            "classification": klass, "diagnosis": diagnosis, "validation": results,
+        }
+        body = json.dumps(report, ensure_ascii=False, indent=2)
+        b64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
+        path = f"data/jarvis_core/self_heal/report_{int(time.time())}.json"
+        cmd = (
+            f'python - <<"PY"\n'
+            f'import base64, pathlib\n'
+            f'p=pathlib.Path(r"{self.repo_path}")/r"{path}"\n'
+            f'p.parent.mkdir(parents=True, exist_ok=True)\n'
+            f'p.write_bytes(base64.b64decode("{b64}"))\n'
+            f'print(p)\nPY'
+        )
+        wr = await self.host_exec(cmd)
+        if wr.get("ok"):
+            await self.host_exec(f'git -C "{self.repo_path}" add "{path}" && git -C "{self.repo_path}" commit -m "JARVIS self-heal report: {klass.get("kind", "anomaly")}"')
+        return wr
+
     async def _self_heal(self, anomaly: str) -> None:
+        klass = self._classify(anomaly)
+        diagnosis = await self._diagnose(anomaly, klass)
+        self._state.last_diagnosis = diagnosis[:500]
         if not self.self_heal_enabled or self.host_exec is None:
-            await self._emit({"level": "info", "message": "Self-heal is diagnostic-only. Set JARVIS_SELF_HEAL_ENABLE=1 to allow branch/test cycles."})
+            await self._emit({
+                "level": "info",
+                "message": "Self-heal diagnostic completed. Set JARVIS_SELF_HEAL_ENABLE=1 to allow branch/report/test cycles.",
+                "classification": klass,
+                "diagnosis": diagnosis,
+            })
             return
         branch = "fix/jarvis-auto-" + str(int(time.time()))
         steps = [
+            f'git -C "{self.repo_path}" status --short',
             f'git -C "{self.repo_path}" checkout -B "{branch}"',
             f'python -m compileall "{self.repo_path}/backend"',
             f'cmd /c "cd /d {self.repo_path} && docker compose -f wsl/docker-compose.agents.yml --env-file wsl/.env config"',
         ]
-        results = []
+        results: list[dict[str, Any]] = []
         for cmd in steps:
             r = await self.host_exec(cmd)
-            results.append({"cmd": cmd, "ok": r.get("ok"), "out": (r.get("out") or "")[-1200:]})
-            if not r.get("ok"):
+            results.append({"cmd": cmd, "ok": r.get("ok"), "out": (r.get("out") or "")[-1600:]})
+            if not r.get("ok") and "status --short" not in cmd:
                 break
-        ok = all(r.get("ok") for r in results)
+        report = await self._write_report(branch, anomaly, klass, diagnosis, results)
+        ok = all(r.get("ok") for r in results[1:]) and report.get("ok")
         self._state.last_action = f"self-heal branch {branch}: {'ok' if ok else 'failed'}"
-        msg = (f"Sir, I detected an anomaly and prepared branch {branch}. Tests passed. Shall I open/merge the pull request?" if ok else f"Sir, I detected an anomaly, but autonomous validation failed on branch {branch}.")
-        await self._emit({"level": "ok" if ok else "err", "message": msg, "anomaly": anomaly, "results": results})
+        msg = (
+            f"Sir, I detected {klass['kind']} and prepared branch {branch} with a diagnostic report. Validation passed. Shall I open or merge the repair?"
+            if ok else f"Sir, I detected {klass['kind']}, but autonomous validation failed on branch {branch}."
+        )
+        await self._emit({"level": "ok" if ok else "err", "message": msg, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "results": results, "report": report})
