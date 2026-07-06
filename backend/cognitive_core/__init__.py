@@ -17,7 +17,19 @@ cognitive_core — «Когнитивное ядро» JARVIS OS (production-gra
 PWA-голос) — в docs/cognitive_core_architecture.md.
 """
 
-from . import (config, db, executor, federation, ingest, jsonx,  # noqa: F401
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# Persist by default inside the mounted backend data volume. Operators may still
+# override JARVIS_DB_PATH explicitly. This aligns cognitive_core, SQLite MCP and
+# dashboard DB browser on one durable database location.
+if "JARVIS_DB_PATH" not in os.environ:
+    data_memory = Path("/data/memory")
+    os.environ["JARVIS_DB_PATH"] = str(data_memory / "cognitive_core.db") if data_memory.exists() else str(Path("./.jarvis_core") / "cognitive_core.db")
+
+from . import (config, db, executor, federation, ingest, jsonx,  # noqa: E402,F401
                learning, maintenance, models, parallel, plugins, recovery,
                subagents, suspend)
 
