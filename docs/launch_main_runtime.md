@@ -104,9 +104,10 @@ JARVIS_IDLE_INTERVAL_SEC=90
 JARVIS_MCP_RESTART_SEC=20
 JARVIS_MCP_START_TIMEOUT=150
 JARVIS_MCP_CALL_TIMEOUT=120
+JARVIS_REPO_GIT_DIR=../.git
 ```
 
-MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers.
+MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers. Git MCP получает read-only `.git` mount в `/app/.git` для диагностики кода; patch/branch self-heal выполняется через RPC-мост хоста.
 
 ## 9. Self-heal patch candidates
 
@@ -128,7 +129,8 @@ JARVIS_REPO_PATH=.
 4. generate candidate unified diff into data/jarvis_core/self_heal/*.diff;
 5. run git apply --check;
 6. run compileall + docker compose config;
-7. commit report/candidate into staging branch.
+7. commit report/candidate into staging branch;
+8. return the host worktree to the original branch.
 ```
 
 По умолчанию diff НЕ применяется, только создаётся и проверяется:
@@ -152,7 +154,7 @@ JARVIS_LIFELONG_LEARNING=1
 JARVIS_LEARNING_MINE_INCIDENTS=1
 ```
 
-В простое система создаёт проверенные sysadmin-правила и превращает `resolved_incidents.json` в `incident_recipe` узлы cognitive graph после Critic-gate.
+В простое система создаёт проверенные sysadmin-правила и превращает `resolved_incidents.json` в schema-compatible `pattern`-узлы cognitive graph с тегом `incident_recipe` после Critic-gate.
 
 ## 11. Кластер по LAN / Mesh VPN
 
@@ -176,16 +178,4 @@ JARVIS не меняет сетевые политики сам: операто�
 ```powershell
 python jarvis.py status
 python jarvis.py diag
-```
-
-Dashboard:
-
-```text
-http://localhost:3000
-```
-
-Проверь вкладку:
-
-```text
-🧭 Операции
 ```
