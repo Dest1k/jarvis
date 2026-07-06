@@ -1,13 +1,14 @@
 "use client";
 /**
- * ChatView.tsx — универсальный чат с агентом JARVIS (Telegram-подобный),
- * с НЕСКОЛЬКИМИ ВКЛАДКАМИ-диалогами. Каждая вкладка — отдельная сессия
- * (session_id) со своей оперативной памятью на сервере и авто-сжатием
- * контекста при наборе критической массы.
+ * ChatView.tsx — универсальный чат с агентом JARVIS.
  *
- * Возможности: лента «пузырями», потоковый ответ, прозрачные шаги агента,
- * голосовой ввод (Whisper ASR), озвучка ответов (Kokoro TTS), панель памяти,
- * аварийная остановка, создание/переключение/закрытие вкладок (localStorage).
+ * Модель состояния:
+ * - текст сообщений — пользовательская история UI;
+ * - steps/«почему» — временный runtime trace одного хода агента;
+ * - backend ConversationManager — фактический оперативный контекст модели.
+ *
+ * Поэтому reset/flush контекста чистит не только backend-память, но и runtime
+ * trace в браузере. steps не сохраняются в localStorage.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { JarvisSocket, JarvisMessage } from "@/lib/ws";
@@ -17,9 +18,12 @@ const API = "/api/core/api/agent";
 const LS_TABS = "jarvis_tabs";
 const LS_CHATS = "jarvis_chats";
 
-// Кто сейчас работает над задачей (для визуализации «какая модель трудится»).
 const ACTORS: Record<string, { icon: string; name: string }> = {
   dispatcher: { icon: "🧠", name: "Диспетчер" },
+  researcher: { icon: "🔎", name: "Researcher" },
+  coder: { icon: "🧑‍💻", name: "Coder" },
+  sysadmin: { icon: "🛠️", name: "SysAdmin" },
+  critic: { icon: "🛡️", name: "Critic" },
   "ui-tars": { icon: "👁️", name: "UI-TARS" },
   sandbox: { icon: "📦", name: "Sandbox" },
   host: { icon: "🪟", name: "Хост" },
@@ -42,13 +46,35 @@ interface MemoryOverview {
   summary: string; recent_count: number; longterm: MemoryItem[]; longterm_count: number;
 }
 
+type ClearMode = "reset" | "flush";
+
 function uid(): string { return Math.random().toString(36).slice(2, 10); }
+
+function sanitizeMessage(raw: Partial<ChatMessage>): ChatMessage {
+  return {
+    id: String(raw.id || uid()),
+    role: raw.role === "user" ? "user" : "assistant",
+    text: String(raw.text || ""),
+    replyTo: raw.replyTo ? String(raw.replyTo) : undefined,
+    steps: [],
+    streaming: false,
+    error: Boolean(raw.error),
+  };
+}
+
+function sanitizeChats(raw: Record<string, ChatMessage[]>): Record<string, ChatMessage[]> {
+  const out: Record<string, ChatMessage[]> = {};
+  for (const [sid, list] of Object.entries(raw || {})) {
+    out[sid] = Array.isArray(list) ? list.slice(-100).map(sanitizeMessage) : [];
+  }
+  return out;
+}
 
 function loadTabs(): { tabs: Tab[]; chats: Record<string, ChatMessage[]> } {
   if (typeof window === "undefined") return { tabs: [], chats: {} };
   try {
     const tabs = JSON.parse(localStorage.getItem(LS_TABS) || "[]") as Tab[];
-    const chats = JSON.parse(localStorage.getItem(LS_CHATS) || "{}") as Record<string, ChatMessage[]>;
+    const chats = sanitizeChats(JSON.parse(localStorage.getItem(LS_CHATS) || "{}"));
     if (tabs.length) return { tabs, chats };
   } catch { /* ignore */ }
   const id = "default";
@@ -76,9 +102,8 @@ export default function ChatView() {
   const speakRef = useRef(false);
   const activeRef = useRef(active);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const workingIds = useRef<Record<string, string>>({});  // session -> last msg id
-  const msgToSession = useRef<Record<string, string>>({}); // msg id -> session
-  // mic / tts
+  const workingIds = useRef<Record<string, string>>({});
+  const msgToSession = useRef<Record<string, string>>({});
   const micCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const micProcRef = useRef<ScriptProcessorNode | null>(null);
@@ -88,13 +113,12 @@ export default function ChatView() {
   useEffect(() => { speakRef.current = speak; }, [speak]);
   useEffect(() => { activeRef.current = active; }, [active]);
 
-  // persist tabs + chats
   useEffect(() => {
     try {
       localStorage.setItem(LS_TABS, JSON.stringify(tabs));
       const slim: Record<string, ChatMessage[]> = {};
-      for (const [k, v] of Object.entries(chats)) {
-        slim[k] = v.slice(-100).map((m) => ({ ...m, steps: m.steps.slice(-12) }));
+      for (const [sid, list] of Object.entries(chats)) {
+        slim[sid] = list.slice(-100).map((m) => ({ ...m, steps: [], streaming: false }));
       }
       localStorage.setItem(LS_CHATS, JSON.stringify(slim));
     } catch { /* quota */ }
@@ -103,7 +127,24 @@ export default function ChatView() {
   const setWorking = (session: string, on: boolean) =>
     setWorkingSessions((p) => (on ? [...new Set([...p, session])] : p.filter((s) => s !== session)));
 
+  const clearSessionUiContext = useCallback((session: string, mode: ClearMode = "reset") => {
+    setChats((prev) => {
+      if (mode === "reset") return { ...prev, [session]: [] };
+      return {
+        ...prev,
+        [session]: (prev[session] || []).map((m) => ({ ...m, steps: [], streaming: false })),
+      };
+    });
+    setWorkingSessions((p) => p.filter((s) => s !== session));
+    setActorBySession((p) => ({ ...p, [session]: "" }));
+    delete workingIds.current[session];
+    for (const [msgId, sid] of Object.entries(msgToSession.current)) {
+      if (sid === session) delete msgToSession.current[msgId];
+    }
+  }, []);
+
   const upsert = useCallback((session: string, id: string, mutate: (m: ChatMessage) => void) => {
+    if (!id) return;
     setChats((prev) => {
       const list = [...(prev[session] || [])];
       let idx = list.findIndex((m) => m.role === "assistant" && m.replyTo === id);
@@ -118,28 +159,32 @@ export default function ChatView() {
     });
   }, []);
 
-  // --- WebSocket чата ---
   useEffect(() => {
-    const sessionOf = (id: string) => msgToSession.current[id] || activeRef.current;
+    const sessionOf = (id: string, explicit?: unknown) =>
+      (typeof explicit === "string" && explicit) ? explicit : (msgToSession.current[id] || activeRef.current);
+
     const sock = new JarvisSocket("/ws/chat", {
       onState: setConn,
       onJson: (msg: JarvisMessage) => {
         const id = String(msg.id ?? "");
-        const session = sessionOf(id);
+        const session = sessionOf(id, msg.session);
         if (msg.actor) setActorBySession((p) => ({ ...p, [session]: String(msg.actor) }));
         const stepActor = String(msg.actor ?? "");
         const clearActor = () => setActorBySession((p) => ({ ...p, [session]: "" }));
+
         switch (msg.type) {
           case "thought":
             upsert(session, id, (m) => m.steps.push({ kind: "thought", text: String(msg.text ?? ""), actor: stepActor }));
             break;
           case "tool_call":
             upsert(session, id, (m) => m.steps.push({
-              kind: "tool_call", tool: String(msg.tool ?? ""), actor: stepActor, text: JSON.stringify(msg.args ?? {}) }));
+              kind: "tool_call", tool: String(msg.tool ?? ""), actor: stepActor, text: JSON.stringify(msg.args ?? {}),
+            }));
             break;
           case "tool_result":
             upsert(session, id, (m) => m.steps.push({
-              kind: "tool_result", tool: String(msg.tool ?? ""), actor: stepActor, ok: Boolean(msg.ok), text: String(msg.summary ?? "") }));
+              kind: "tool_result", tool: String(msg.tool ?? ""), actor: stepActor, ok: Boolean(msg.ok), text: String(msg.summary ?? ""),
+            }));
             break;
           case "assistant_start":
             upsert(session, id, (m) => { m.streaming = true; });
@@ -150,21 +195,27 @@ export default function ChatView() {
           case "assistant_done":
             upsert(session, id, (m) => { m.streaming = false; m.text = String(msg.content ?? m.text); });
             setWorking(session, false); clearActor();
-            if (speakRef.current && session === activeRef.current && msg.content)
+            if (speakRef.current && session === activeRef.current && msg.content) {
               audioRef.current?.sendJson({ type: "speak", text: String(msg.content) });
+            }
             break;
           case "error":
             upsert(session, id, (m) => { m.streaming = false; m.error = true; m.text += `\n⚠ ${String(msg.error ?? "")}`; });
             setWorking(session, false); clearActor();
             break;
           case "cancelled":
-            upsert(session, id, (m) => { m.streaming = false; m.text += (m.text ? "\n" : "") + "⏹ Остановлено."; });
+            upsert(session, id, (m) => { m.streaming = false; m.text += (m.text ? "\n" : "") + "⏹ Остановлено."; m.steps = []; });
             setWorking(session, false); clearActor();
             break;
-          case "memory":
+          case "memory": {
+            const event = String(msg.event ?? "");
+            if (event === "reset") { clearSessionUiContext(session, "reset"); break; }
+            if (event === "flushed" || event === "summarized") clearSessionUiContext(session, "flush");
+            if (!id && !msg.session) break;
             setChats((p) => ({ ...p, [session]: [...(p[session] || []),
               { id: uid(), role: "assistant", text: `🧠 ${String(msg.text ?? "")}`, steps: [] }] }));
             break;
+          }
           default: break;
         }
       },
@@ -185,18 +236,18 @@ export default function ChatView() {
     audioRef.current = asock;
     return () => { sock.close(); asock.close(); stopMic(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [upsert]);
+  }, [upsert, clearSessionUiContext]);
 
   const messages = chats[active] || [];
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  // --- вкладки ---
   const newTab = () => {
     const id = "s_" + uid();
     setTabs((t) => [...t, { id, title: `Чат ${t.length + 1}` }]);
     setChats((c) => ({ ...c, [id]: [] }));
     setActive(id);
   };
+
   const closeTab = (id: string) => {
     setTabs((t) => {
       const left = t.filter((x) => x.id !== id);
@@ -205,11 +256,10 @@ export default function ChatView() {
       return left;
     });
     setChats((c) => { const n = { ...c }; delete n[id]; return n; });
-    // очистим серверный контекст этой сессии
+    clearSessionUiContext(id, "reset");
     chatRef.current?.sendJson({ type: "reset_context", session: id });
   };
 
-  // --- отправка / остановка ---
   const send = () => {
     const text = input.trim();
     if (!text || workingSessions.includes(active)) return;
@@ -221,12 +271,13 @@ export default function ChatView() {
     chatRef.current?.sendJson({ type: "user_message", text, id, session: active });
     setInput("");
   };
+
   const cancel = () => {
     chatRef.current?.sendJson({ type: "cancel", session: active, id: workingIds.current[active] || "" });
     setWorking(active, false);
+    clearSessionUiContext(active, "flush");
   };
 
-  // --- микрофон ---
   const startMic = async () => {
     setMicError("");
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -252,9 +303,10 @@ export default function ChatView() {
       setListening(true);
     } catch {
       setListening(false);
-      setMicError("Не удалось включить микрофон. Разрешите доступ в браузере (значок 🎤/замок в адресной строке).");
+      setMicError("Не удалось включить микрофон. Разрешите доступ в браузере.");
     }
   };
+
   const stopMic = () => {
     micProcRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -263,6 +315,7 @@ export default function ChatView() {
     setListening(false); setLevel(0);
     audioRef.current?.sendJson({ type: "end_utterance" });
   };
+
   const playTtsChunk = (buf: ArrayBuffer) => {
     if (!playCtxRef.current) {
       playCtxRef.current = new AudioContext({ sampleRate: TARGET_SR });
@@ -283,20 +336,25 @@ export default function ChatView() {
     src.start(start); playTimeRef.current = start + ab.duration;
   };
 
-  // --- память (по активной сессии) ---
   const loadMem = useCallback(async () => {
     try {
       const r = await fetch(`${API}/memory?session=${encodeURIComponent(active)}`, { cache: "no-store" });
       setMem(await r.json());
     } catch { setMem(null); }
   }, [active]);
+
   const memAction = async (action: string, extra: Record<string, unknown> = {}) => {
-    await fetch(`${API}/memory`, {
+    const r = await fetch(`${API}/memory`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, session: active, ...extra }),
     });
+    if (r.ok) {
+      if (action === "reset") clearSessionUiContext(active, "reset");
+      if (action === "flush") clearSessionUiContext(active, "flush");
+    }
     loadMem();
   };
+
   useEffect(() => { if (memOpen) loadMem(); }, [memOpen, loadMem]);
 
   const activeWorking = workingSessions.includes(active);
@@ -313,7 +371,7 @@ export default function ChatView() {
           </span>
         ) : (
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            голос, код, веб, управление ПК · память авто-сжимается
+            голос, код, веб, управление ПК · steps/«почему» очищаются вместе с контекстом
           </span>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
@@ -323,16 +381,11 @@ export default function ChatView() {
         </div>
       </div>
 
-      {/* Вкладки-диалоги */}
       <div className="tab-bar">
         {tabs.map((t) => (
-          <div key={t.id} className={`tab ${t.id === active ? "active" : ""}`}
-               onClick={() => setActive(t.id)}>
-            <span className="tab-title">
-              {t.title}{workingSessions.includes(t.id) ? " •" : ""}
-            </span>
-            <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
-                  title="Закрыть диалог">×</span>
+          <div key={t.id} className={`tab ${t.id === active ? "active" : ""}`} onClick={() => setActive(t.id)}>
+            <span className="tab-title">{t.title}{workingSessions.includes(t.id) ? " •" : ""}</span>
+            <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }} title="Закрыть диалог">×</span>
           </div>
         ))}
         <button className="tab-new" onClick={newTab} title="Новый диалог">＋</button>
@@ -359,7 +412,7 @@ export default function ChatView() {
       <div className={`chat-input panel ${listening ? "recording" : ""}`}>
         <button className={`btn mic ${listening ? "recording" : ""}`}
                 onClick={() => (listening ? stopMic() : startMic())}
-                title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод: нажмите и говорите"}>
+                title={listening ? "Идёт запись — нажмите, чтобы остановить" : "Голосовой ввод"}>
           {listening ? "⏹" : "🎤"}
         </button>
         {listening ? (
@@ -385,7 +438,6 @@ export default function ChatView() {
   );
 }
 
-// --------------------------------------------------------------------------- //
 function MessageBubble({ m }: { m: ChatMessage }) {
   const [open, setOpen] = useState(false);
   const isUser = m.role === "user";
@@ -395,15 +447,13 @@ function MessageBubble({ m }: { m: ChatMessage }) {
         {!isUser && m.steps.length > 0 && (
           <div className="steps">
             <button className="steps-toggle" onClick={() => setOpen((v) => !v)}>
-              {open ? "▾" : "▸"} JARVIS работает ({m.steps.length})
+              {open ? "▾" : "▸"} Почему / ход выполнения ({m.steps.length})
             </button>
             {open && (
               <div className="steps-body">
                 {m.steps.map((s, i) => (
                   <div key={i} className={`step ${s.kind}`}>
-                    <span className="step-actor" title={actorInfo(s.actor).name}>
-                      {actorInfo(s.actor).icon}
-                    </span>{" "}
+                    <span className="step-actor" title={actorInfo(s.actor).name}>{actorInfo(s.actor).icon}</span>{" "}
                     {s.kind === "thought" && <span>{s.text}</span>}
                     {s.kind === "tool_call" && <span>🔧 <code>{s.tool}</code> {s.text}</span>}
                     {s.kind === "tool_result" && <span>{s.ok ? "✅" : "⚠️"} <code>{s.tool}</code>: {s.text}</span>}
@@ -420,7 +470,6 @@ function MessageBubble({ m }: { m: ChatMessage }) {
   );
 }
 
-// --------------------------------------------------------------------------- //
 function MemoryPanel({
   mem, session, onClose, onAction,
 }: {
@@ -435,12 +484,18 @@ function MemoryPanel({
         <div className="mem-section">
           <strong>Оперативный контекст</strong>
           <p style={{ color: "var(--muted)", fontSize: 13, margin: "4px 0" }}>
-            Реплик в активном окне: {mem?.recent_count ?? "—"} · сжимается автоматически при наборе критической массы.
+            Реплик в активном backend-окне: {mem?.recent_count ?? "—"} · «почему» хранится отдельно как runtime trace и при reset/flush очищается.
           </p>
           {mem?.summary && <pre className="log-stream" style={{ height: "12vh" }}>{mem.summary}</pre>}
           <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-            <button className="btn" onClick={() => onAction("flush")}>📥 Сжать в сводку сейчас</button>
-            <button className="btn danger" onClick={() => onAction("reset")}>🧹 Очистить контекст</button>
+            <button className="btn" onClick={() => onAction("flush")}
+                    title="Сжать backend-контекст в summary; видимый текст останется, trace/«почему» очистится">
+              📥 Сжать в сводку и скрыть «почему»
+            </button>
+            <button className="btn danger" onClick={() => onAction("reset")}
+                    title="Полностью очистить backend-контекст и видимый диалог этой вкладки">
+              🧹 Очистить контекст и экран
+            </button>
           </div>
         </div>
         <div className="mem-section">
@@ -467,7 +522,6 @@ function MemoryPanel({
   );
 }
 
-// --------------------------------------------------------------------------- //
 function renderContent(text: string) {
   if (!text) return null;
   const parts = text.split(/```/);
