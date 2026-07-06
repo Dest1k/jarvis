@@ -88,7 +88,7 @@ JARVIS_QWEN_MAX_LEN=24576
 ## Проверочные команды
 
 ```powershell
-python scripts/smoke_check.py --skip-dashboard
+python smoke_check.py
 python jarvis.py up --profile gemma4-mono --no-audio
 python jarvis.py status
 python jarvis.py diag
