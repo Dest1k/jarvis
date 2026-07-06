@@ -11,12 +11,14 @@ git checkout main
 git pull origin main
 ```
 
-> В репозитории default branch может отличаться от `main`, поэтому checkout `main` обязателен.
+`main` теперь является default branch репозитория.
 
 ## 2. Быстрая проверка перед стартом
 
 ```powershell
 python -m compileall backend
+python backend/tests/test_native_runtime.py
+python backend/tests/test_agent_system.py
 cd dashboard
 npm install --legacy-peer-deps
 npm run build
@@ -72,7 +74,19 @@ NCCL_P2P_DISABLE=1
 
 Они держат видимой только дискретную NVIDIA GPU и отключают peer-to-peer/NCCL P2P пути, которые в WSL2/Docker могут провоцировать `RuntimeError: UVA is not available`.
 
-## 5. Проверка исправления контекста и «почему»
+## 5. Native host automation
+
+Мозг JARVIS теперь получает first-class native tools:
+
+```text
+native_host    WMI/CIM overview, processes, services, events, hardware
+native_window  Win32 HWND list/find + focus-free PostMessage text/enter
+native_ui      Windows UI Automation tree/find
+```
+
+Правило системного промпта: для процессов, служб, событий, железа и окон сначала использовать native tools, а `windows.exec/powershell` — только fallback.
+
+## 6. Проверка исправления контекста и «почему»
 
 1. Открой dashboard.
 2. Отправь запрос, который вызывает инструменты.
@@ -83,7 +97,7 @@ NCCL_P2P_DISABLE=1
 7. Текущая вкладка должна очиститься, а `episodic_memory_logs` по session id удаляются backend-обёрткой `orchestrator.reset_context`.
 8. Обнови страницу: старые `steps/why` не должны вернуться из `localStorage`.
 
-## 6. MCP и фоновый runtime
+## 7. MCP и фоновый runtime
 
 Background runtime включается лениво при первом ходе агента и проходит через `orchestrator` entrypoint:
 
@@ -105,7 +119,9 @@ JARVIS_SELF_HEAL_ENABLE=0
 $env:JARVIS_SELF_HEAL_ENABLE="1"
 ```
 
-## 7. Кластер по LAN / Mesh VPN
+При включении self-heal создаёт staging branch `fix/jarvis-auto-*`, классифицирует аномалию, пишет JSON-отчёт в `data/jarvis_core/self_heal/`, запускает `compileall` и `docker compose config`. Merge/push всё ещё зависит от Git/HITL политики.
+
+## 8. Кластер по LAN / Mesh VPN
 
 В `wsl/.env` можно добавить JSON worker-ноды:
 
@@ -119,7 +135,7 @@ JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080-tail","base_url":"http://100.x.y.z:8001/v1","model":"qwen-coder","role":"coder","transport":"tailscale","weight":2}]
 ```
 
-## 8. Сеть Researcher-Agent
+## 9. Сеть Researcher-Agent
 
 Диагностика сети работает безопасно: HTTP probe внутри контейнера + DNS probe на хосте через PowerShell. Recovery — только opt-in:
 
@@ -130,7 +146,7 @@ JARVIS_NETWORK_RECOVERY_CMD=
 
 JARVIS не меняет сетевые политики сам: оператор явно задаёт разрешённый service restart или собственный recovery hook.
 
-## 9. Диагностика после запуска
+## 10. Диагностика после запуска
 
 ```powershell
 python jarvis.py status
@@ -141,4 +157,10 @@ python jarvis.py diag
 
 ```text
 http://localhost:3000
+```
+
+Проверь вкладку:
+
+```text
+🧭 Операции
 ```
