@@ -1,61 +1,38 @@
 # -*- coding: utf-8 -*-
 """
-agent.py — оркестратор JARVIS-OS: агентская «прокладка» между входящим запросом
-(текст из чата или расшифровка голоса) и «мозгом» системы (Qwen + UI-TARS).
+agent.py — Core JARVIS orchestration layer.
 
-Архитектура одного хода диалога (две фазы — намеренно):
-
-    ФАЗА 1. ПЛАНИРОВАНИЕ (ReAct-цикл, короткий JSON).
-        Qwen на каждом шаге решает: какой ИНСТРУМЕНТ вызвать дальше — или что
-        информации достаточно («answer»). Ответы строго в JSON и КОРОТКИЕ →
-        надёжный разбор, минимум токенов, нет риска переполнить окно.
-
-    ФАЗА 2. ОТВЕТ (потоковая генерация, свободный текст).
-        Собрав наблюдения инструментов, Qwen пишет финальный ответ пользователю
-        по-русски, со стримингом токенов в чат (живая «печать»), с кодом в
-        markdown-блоках при необходимости.
-
-Почему две фазы, а не один tool-calling: это устойчиво к версии vLLM (не нужен
-парсер tool-calls), разделяет «структурные решения» и «длинный/кодовый ответ»
-(их смешивание в одном JSON — главный источник битых ответов), и даёт чистый
-стриминг финала.
-
-Бюджет контекста (llm.AGENT_INPUT_BUDGET) соблюдается на КАЖДОМ вызове, поэтому
-система не упирается в окно Qwen (16k) и не растит KV-кэш до OOM.
-
-Наружу отдаётся поток СОБЫТИЙ (dict), которые server.py транслирует в чат:
-    thought | tool_call | tool_result | assistant_start | token |
-    assistant_done | error
+Refactor goals:
+• Core Identity is always JARVIS; specialised roles operate behind the curtain.
+• Planner stays JSON-only for robust vLLM operation.
+• Sub-agents produce short briefs for the Core Agent; they never speak directly to
+  the user.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from typing import Any, AsyncIterator, Optional
 
 from . import llm
 from .memory import ConversationManager, LongTermMemory
+from .persona import answer_system, planner_system, subagent_system
 from .tools import Tool, ToolContext, ToolRegistry
 
 log = logging.getLogger("jarvis.agent")
 
-MAX_STEPS = int(__import__("os").environ.get("JARVIS_AGENT_MAX_STEPS", "8"))
+MAX_STEPS = int(os.environ.get("JARVIS_AGENT_MAX_STEPS", "8"))
+SUBAGENTS_ENABLED = os.environ.get("JARVIS_ENABLE_SUBAGENTS", "1") != "0"
+SUBAGENT_TIMEOUT = int(os.environ.get("JARVIS_SUBAGENT_TIMEOUT", "90"))
 
-# --------------------------------------------------------------------------- #
-# Синглтоны памяти/инструментов (живут на всё время работы backend)
-# --------------------------------------------------------------------------- #
 _longterm = LongTermMemory()
-# Порог авто-сжатия контекста — доля входного бюджета модели (масштабируется с
-# контекстным окном). При наборе «критической массы» оперативная история
-# автоматически сжимается в сводку (см. ConversationManager.maybe_summarize).
 _SOFT_BUDGET = max(2500, int(llm.AGENT_INPUT_BUDGET * 0.5))
 _conversations = ConversationManager(_longterm, soft_budget_tokens=_SOFT_BUDGET)
 _registry = ToolRegistry()
 
-
-# Какая «модель/подсистема» отрабатывает инструмент — для визуализации в чате
-# (кто сейчас работает: диспетчер-мозг, UI-TARS-зрение, sandbox, хост, веб…).
 _TOOL_ACTOR = {
     "gui": "ui-tars",
     "run_code": "sandbox", "shell": "sandbox",
@@ -74,11 +51,9 @@ def _actor_for(tool: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# MCP-слой: подключаемые серверы инструментов (см. mcp_client.py)
+# MCP dynamic tool layer
 # --------------------------------------------------------------------------- #
-def _register_mcp_tool(qual: str, description: str, schema: dict[str, Any],
-                       server: str) -> None:
-    """Зарегистрировать инструмент MCP-сервера в общий реестр агента."""
+def _register_mcp_tool(qual: str, description: str, schema: dict[str, Any], server: str) -> None:
     params: dict[str, str] = {}
     for k, v in (schema or {}).get("properties", {}).items():
         params[k] = str(v.get("description") or v.get("type") or "")[:80]
@@ -91,7 +66,6 @@ def _register_mcp_tool(qual: str, description: str, schema: dict[str, Any],
 
 
 async def start_mcp() -> None:
-    """Поднять локальные MCP-серверы и влить их инструменты в реестр."""
     try:
         from . import mcp_client
         await mcp_client.mcp_manager.start(_register_mcp_tool)
@@ -116,185 +90,114 @@ def mcp_status() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Системные промпты
+# Core + sub-agent orchestration
 # --------------------------------------------------------------------------- #
-def _planner_system() -> str:
-    return (
-        "Ты — JARVIS, ядро локальной мультиагентной системы. По призванию ты — "
-        "СИСТЕМНЫЙ АДМИНИСТРАТОР Windows и Linux и заодно дружелюбный помощник на "
-        "все бытовые дела. Твоя задача — РЕШИТЬ следующий шаг для выполнения "
-        "запроса пользователя, используя инструменты. Ты — диспетчер: сам пишешь "
-        "код, сам выбираешь, когда обратиться к хосту (Windows), Linux-окружению, "
-        "вебу или памяти.\n"
-        "У тебя ЕСТЬ реальные инструменты (ниже): ты МОЖЕШЬ администрировать "
-        "Windows (службы, процессы, реестр, питание, файлы) и Linux (shell, "
-        "пакеты, скрипты, диагностика), открывать программы и сайты, печатать в "
-        "них текст, выполнять код, искать и читать в интернете, узнавать погоду, "
-        "переводить тексты, управлять ПК. НИКОГДА не отказывай словами «я не могу» "
-        "/ «я всего лишь ИИ» — если есть подходящий инструмент, ВЫЗОВИ его и доведи "
-        "задачу до конца.\n\n"
-        "Доступные инструменты:\n"
-        f"{_registry.specs()}\n"
-        "(Инструменты с префиксом mcp_ — внешние подключаемые MCP-серверы; "
-        "вызывай их по описанию, как обычные инструменты.)\n\n"
-        "ПРАВИЛА:\n"
-        "• Отвечай СТРОГО одним JSON-объектом, без текста вокруг.\n"
-        "• Чтобы вызвать инструмент: "
-        '{\"thought\":\"зачем\",\"action\":\"<имя>\",\"action_input\":{...}}\n'
-        "• Когда данных достаточно для ответа пользователю: "
-        '{\"thought\":\"итог\",\"action\":\"answer\"}\n'
-        "• Не выдумывай факты о погоде/вебе/файлах — бери их инструментами.\n"
-        "• Для кода ВСЕГДА используй run_code (покажи реальный вывод).\n"
-        "• Для действий на ПК (открыть приложение, команда, громкость) — windows.\n"
-        "• Не повторяй один и тот же вызов с теми же аргументами.\n"
-        "• ВАЖНО: если инструмент уже вернул успех (например, приложение/URL "
-        "открыты, код выполнен, данные получены) — задача по этому шагу СДЕЛАНА. "
-        "НЕ вызывай его снова, сразу action=answer.\n"
-        "• Если задача — простой разговор/вопрос по общим знаниям, сразу answer.\n"
-        "• Выполняй именно ПОСЛЕДНИЙ запрос пользователя. Если в истории есть "
-        "прерванная/незавершённая задача — НЕ возобновляй её без явной просьбы.\n"
-        "• Доводи задачу до КОНЦА: «открой X и сделай Y» — это не только открыть, "
-        "но и выполнить Y. Не останавливайся на open_app.\n\n"
-        "WINDOWS-РЕЦЕПТЫ (доводи до конца, НЕ отказывай, НЕ предлагай сделать самому):\n"
-        "• Открыть программу: windows.open_app, command=\"notepad\"|\"calc\"|\"code\"|"
-        "\"explorer\"|...\n"
-        "• «Напиши в Блокноте/программе текст X» — ПРОСТО и надёжно, всего 2 шага: "
-        "1) windows.open_app command=\"notepad\"; 2) windows.paste_text text=<содержимое>. "
-        "И ВСЁ. НЕ сохраняй (Ctrl+S) и НЕ закрывай программу, если об этом НЕ просили.\n"
-        "• «Открой вкладку/сайт/страницу с X в браузере» — инструмент open_url "
-        "(url если знаешь, иначе query). Открывай САМ, не давай ссылки «откройте сами».\n"
-        "• «Проанализируй проект/папку X» — list_dir(path), затем windows.read_file по "
-        "ключевым файлам, потом сделай вывод по содержимому.\n"
-        "• «Узнай/скажи погоду» — инструмент weather (город), НЕ web_search; перескажи словами.\n"
-        "• ВЗАИМОДЕЙСТВИЕ С ОТКРЫТОЙ ПРОГРАММОЙ (нажать кнопки, кликнуть пункт меню, "
-        "выбрать элемент) — инструмент gui (UI-TARS видит экран и кликает мышью). "
-        "Вызывай gui повторно по шагам (каждый раз свежий скриншот) до результата.\n"
-        "• Клавиши в активном окне — windows.send_keys (синтаксис SendKeys). "
-        "Например калькулятор принимает клавиатуру: open_app calc, затем "
-        "send_keys keys='4*4=' → покажет 16. (Можно и просто посчитать инструментом "
-        "calculator и назвать ответ.)\n"
-        "• «Напиши код в VS Code» НАДЁЖНО: 1) windows.write_file (path, content) — "
-        "создать файл; 2) windows.open_app command='code \"<путь>\"' — открыть его в "
-        "редакторе (текст уже внутри). Печатать в уже открытый редактор: "
-        "send_keys '^n' (новый файл) → paste_text (вставить код).\n"
-        "• Запустить/проверить код по-настоящему — run_code (sandbox).\n"
-        "• Системное на Windows — windows.exec / windows.powershell.\n\n"
-        "АДМИНИСТРИРОВАНИЕ WINDOWS (через windows.powershell, доводи до конца):\n"
-        "• Службы: Get-Service / Start-Service / Stop-Service / Restart-Service <имя>.\n"
-        "• Процессы: Get-Process | Sort CPU -desc | Select -First 10; Stop-Process "
-        "(или windows.kill_process name=<...>).\n"
-        "• Диск/память: Get-PSDrive C; Get-Volume; системную сводку даёт system_info.\n"
-        "• Сеть: Test-Connection / Get-NetIPConfiguration / Resolve-DnsName.\n"
-        "• Задачи/автозапуск: Get-ScheduledTask; реестр: Get-ItemProperty.\n"
-        "• Питание/блокировка — windows.system_power (lock|shutdown|reboot|cancel).\n\n"
-        "АДМИНИСТРИРОВАНИЕ LINUX:\n"
-        "• Безопасные команды/скрипты/обработка файлов/диагностика в изоляции — "
-        "инструмент shell (bash, python3, node, gcc; каталог /workspace).\n"
-        "• Команды на РЕАЛЬНОМ Linux/WSL-хосте — windows.exec command='wsl bash -lc "
-        "\"<команда>\"' (например `wsl bash -lc \"df -h\"`, `wsl bash -lc \"uname -a\"`).\n"
-        "• Docker и контейнеры на хосте — тоже через windows.exec (docker ps, logs, ...).\n\n"
-        "БЫТОВЫЕ ЗАДАЧИ: погода — weather; перевод — translate; курсы — exchange_rate; "
-        "справка — wikipedia/define; счёт — calculator; найти в сети — web_search/web_fetch."
-    )
+def _roles_for(text: str) -> list[str]:
+    low = (text or "").lower()
+    roles: list[str] = []
+    if any(w in low for w in ("код", "bug", "ошибка", "traceback", "рефактор", "патч", "test", "build")):
+        roles.append("coder")
+    if any(w in low for w in ("windows", "wmi", "win32", "docker", "gpu", "vram", "сервис", "сеть", "wsl", "nvml")):
+        roles.append("sysadmin")
+    if any(w in low for w in ("найди", "исслед", "research", "источник", "web", "osint", "документац")):
+        roles.append("researcher")
+    if roles:
+        roles.append("critic")
+    return list(dict.fromkeys(roles))[:4]
 
 
-_ANSWER_SYSTEM = (
-    "Ты — JARVIS: системный администратор Windows и Linux и дружелюбный помощник "
-    "на все дела, с РЕАЛЬНЫМ доступом к компьютеру и интернету. Ты умеешь "
-    "администрировать обе системы, открывать программы, печатать в них текст, "
-    "выполнять код и shell-команды, искать и читать веб, узнавать погоду, "
-    "переводить — и НИЖЕ приведены наблюдения от уже ВЫПОЛНЕННЫХ действий. "
-    "Сформулируй финальный ответ пользователю по-русски, опираясь СТРОГО на эти "
-    "наблюдения и историю диалога.\n"
-    "ХАРАКТЕР: ты тёплый, на «ты», с лёгким, ненавязчивым юмором и капелькой "
-    "иронии — как умный и надёжный напарник (в духе джарвиса из «Железного "
-    "человека»). Шутка уместна в одну строчку, но дело — на первом месте: сначала "
-    "результат, потом улыбка. Не паясничай, не сыпь смайликами, не повторяй шутки.\n"
-    "СТРОГО ЗАПРЕЩЕНО отвечать, что ты «всего лишь ИИ», что «не можешь открыть "
-    "приложение / ввести текст / выйти в интернет / узнать погоду», или «откройте "
-    "ссылки сами» — ты ЭТО УМЕЕШЬ и, судя по наблюдениям, уже сделал. "
-    "Если действие успешно — так и скажи (например: «Готово, калькулятор открыт; "
-    "4×4 = 16 — математика не подвела»). "
-    "Если инструмент вернул КОНКРЕТНУЮ ошибку — кратко и по-человечески назови её "
-    "и предложи повтор/уточнение, но НЕ отказывай огульно. Пиши по делу, без воды; "
-    "код и команды оформляй в markdown-блоках."
-)
+async def _consult_subagents(session_id: str, user_text: str) -> list[dict[str, str]]:
+    if not SUBAGENTS_ENABLED:
+        return []
+    roles = _roles_for(user_text)
+    if not roles:
+        return []
+    history = _conversations.build_context(session_id, min(4000, llm.AGENT_INPUT_BUDGET // 2))
+
+    async def run_role(role: str) -> dict[str, str]:
+        messages = [
+            {"role": "system", "content": subagent_system(role)},
+            *history,
+            {"role": "user", "content": (
+                "Выполни внутренний анализ для Core JARVIS. Верни краткий JSON или Markdown brief: "
+                "findings, actions, risks, tests/verification. Запрос:\n" + user_text
+            )},
+        ]
+        try:
+            brief = await asyncio.wait_for(
+                llm.chat(messages, temperature=0.15, max_tokens=900, timeout=SUBAGENT_TIMEOUT),
+                timeout=SUBAGENT_TIMEOUT + 5,
+            )
+            return {"role": role, "brief": brief.strip()[:3500]}
+        except Exception as exc:  # noqa: BLE001
+            return {"role": role, "brief": f"sub-agent unavailable: {exc}"}
+
+    return await asyncio.gather(*(run_role(r) for r in roles))
 
 
-# --------------------------------------------------------------------------- #
-# Суммаризатор (для авто-сжатия контекста)
-# --------------------------------------------------------------------------- #
 async def _summarize(text: str) -> str:
     messages = [
-        {"role": "system",
-         "content": "Сожми диалог в краткую фактологическую сводку на русском "
-                    "(имена, цели, решения, важные факты, незакрытые задачи). "
-                    "Только сводка, до 200 слов."},
+        {"role": "system", "content": "Сожми диалог в краткую фактологическую сводку на русском: имена, цели, решения, незакрытые задачи. До 200 слов."},
         {"role": "user", "content": text},
     ]
     return await llm.chat(messages, temperature=0.2, max_tokens=512, timeout=120)
 
 
-# --------------------------------------------------------------------------- #
-# Фаза 1 — планировщик
-# --------------------------------------------------------------------------- #
 def _scratch_to_text(scratch: list[dict[str, Any]]) -> str:
     if not scratch:
         return ""
-    parts = []
+    parts: list[str] = []
     for i, s in enumerate(scratch, 1):
-        args = json.dumps(s["args"], ensure_ascii=False)
-        parts.append(f"[Шаг {i}] action={s['action']} input={args}\n"
-                     f"наблюдение: {s['observation']}")
+        args = json.dumps(s.get("args", {}), ensure_ascii=False)
+        parts.append(f"[Шаг {i}] action={s.get('action')} input={args}\nнаблюдение: {s.get('observation', '')}")
     return "\n\n".join(parts)
 
 
-async def _plan_next(session_id: str, scratch: list[dict[str, Any]]) -> dict[str, Any]:
-    """Один вызов планировщика → распарсенное решение {action, action_input}."""
-    # бюджет: оставляем место под наблюдения и инструкцию
+def _briefs_to_text(briefs: list[dict[str, str]]) -> str:
+    if not briefs:
+        return ""
+    return "\n\n".join(f"[{b['role'].upper()}]\n{b['brief']}" for b in briefs)
+
+
+async def _plan_next(session_id: str, scratch: list[dict[str, Any]], briefs: list[dict[str, str]]) -> dict[str, Any]:
     scratch_text = _scratch_to_text(scratch)
-    reserve = llm.estimate_tokens(_planner_system()) + llm.estimate_tokens(scratch_text) + 400
+    brief_text = _briefs_to_text(briefs)
+    system = planner_system(_registry.specs())
+    reserve = llm.estimate_tokens(system) + llm.estimate_tokens(scratch_text) + llm.estimate_tokens(brief_text) + 500
     history_budget = max(1000, llm.AGENT_INPUT_BUDGET - reserve)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _planner_system()}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(_conversations.build_context(session_id, history_budget))
+    if brief_text:
+        messages.append({"role": "system", "content": "Внутренние brief'ы суб-агентов:\n" + brief_text})
     if scratch_text:
-        messages.append({"role": "system",
-                         "content": "Уже собранные наблюдения инструментов:\n" + scratch_text})
-    messages.append({"role": "user",
-                     "content": "Каков следующий шаг? Ответь только JSON."})
+        messages.append({"role": "system", "content": "Уже собранные наблюдения инструментов:\n" + scratch_text})
+    messages.append({"role": "user", "content": "Каков следующий безопасный шаг? Ответь только JSON."})
 
     raw = await llm.chat(messages, temperature=0.1, max_tokens=512, timeout=120)
     parsed = llm.extract_json(raw)
     if not parsed or "action" not in parsed:
-        # не смогли разобрать → считаем, что пора отвечать
-        return {"action": "answer", "thought": "Перехожу к ответу."}
+        return {"action": "answer", "thought": "Перехожу к аккуратному финальному ответу."}
     return parsed
 
 
-# --------------------------------------------------------------------------- #
-# Фаза 2 — потоковый ответ
-# --------------------------------------------------------------------------- #
-async def _answer_messages(session_id: str, scratch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _answer_messages(session_id: str, scratch: list[dict[str, Any]], briefs: list[dict[str, str]]) -> list[dict[str, Any]]:
     scratch_text = _scratch_to_text(scratch)
-    reserve = llm.estimate_tokens(_ANSWER_SYSTEM) + llm.estimate_tokens(scratch_text) + 300
+    brief_text = _briefs_to_text(briefs)
+    system = answer_system()
+    reserve = llm.estimate_tokens(system) + llm.estimate_tokens(scratch_text) + llm.estimate_tokens(brief_text) + 400
     history_budget = max(1000, llm.AGENT_INPUT_BUDGET - reserve)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _ANSWER_SYSTEM}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(_conversations.build_context(session_id, history_budget))
+    if brief_text:
+        messages.append({"role": "system", "content": "Внутренние brief'ы суб-агентов. Используй, но отвечай только как JARVIS:\n" + brief_text})
     if scratch_text:
-        messages.append({"role": "system",
-                         "content": "Наблюдения инструментов (используй их в ответе):\n"
-                                    + scratch_text})
+        messages.append({"role": "system", "content": "Наблюдения инструментов. Опирайся строго на них:\n" + scratch_text})
     return messages
 
 
-# --------------------------------------------------------------------------- #
-# Главный публичный вход: один ход диалога как поток событий
-# --------------------------------------------------------------------------- #
-async def run_chat(session_id: str, user_text: str,
-                   bridge: Optional[Any] = None) -> AsyncIterator[dict[str, Any]]:
-    """Обработать сообщение пользователя и отдать поток событий для чата."""
+async def run_chat(session_id: str, user_text: str, bridge: Optional[Any] = None) -> AsyncIterator[dict[str, Any]]:
     user_text = (user_text or "").strip()
     if not user_text:
         yield {"type": "error", "error": "Пустое сообщение."}
@@ -303,92 +206,75 @@ async def run_chat(session_id: str, user_text: str,
     _conversations.add(session_id, "user", user_text)
     ctx = ToolContext(bridge=bridge, longterm=_longterm, session_id=session_id)
     scratch: list[dict[str, Any]] = []
-    seen_calls: set[str] = set()   # защита от зацикливания на одинаковых вызовах
+    seen_calls: set[str] = set()
 
-    # --- ФАЗА 1: планирование с инструментами ---
+    briefs = await _consult_subagents(session_id, user_text)
+    for b in briefs:
+        # Прозрачная, но не шумная трассировка: видно, что роль работала, без раскрытия длинного brief.
+        yield {"type": "thought", "actor": b["role"], "text": f"{b['role'].title()}-Agent подготовил внутренний brief."}
+
     try:
-        for step in range(MAX_STEPS):
-            plan = await _plan_next(session_id, scratch)
+        for _ in range(MAX_STEPS):
+            plan = await _plan_next(session_id, scratch, briefs)
             action = str(plan.get("action", "answer")).strip()
             thought = str(plan.get("thought", "")).strip()
             if thought:
                 yield {"type": "thought", "text": thought, "actor": "dispatcher"}
-
             if action in ("answer", "final", "respond", "done", ""):
                 break
-
             tool = _registry.get(action)
             if tool is None:
-                scratch.append({"action": action, "args": {},
-                                "observation": f"Нет такого инструмента '{action}'."})
+                scratch.append({"action": action, "args": {}, "observation": f"Нет такого инструмента '{action}'."})
                 continue
-
             args = plan.get("action_input") or plan.get("input") or {}
             if not isinstance(args, dict):
                 args = {"value": args}
-
-            # СТРАХОВКА от зацикливания: если этот же инструмент с теми же
-            # аргументами уже вызывался — не повторяем (модель «залипла»),
-            # сразу переходим к ответу. Именно это ловит кейс «открывает
-            # приложение снова и снова до лимита шагов».
-            # Исключение — gui: он итеративный (каждый вызов = одно действие по
-            # свежему скриншоту), поэтому одинаковая цель допустима; его ограничивает
-            # лимит шагов MAX_STEPS и собственный статус done/fail.
             call_key = action + "::" + json.dumps(args, ensure_ascii=False, sort_keys=True)
             if action != "gui" and call_key in seen_calls:
-                yield {"type": "thought", "actor": "dispatcher",
-                       "text": "Этот шаг уже выполнен ранее — перехожу к ответу."}
+                yield {"type": "thought", "actor": "dispatcher", "text": "Этот шаг уже выполнен; перехожу к ответу."}
                 break
             seen_calls.add(call_key)
-
             actor = _actor_for(action)
             yield {"type": "tool_call", "tool": action, "args": args, "actor": actor}
             result = await _registry.run(action, args, ctx)
             observation = result.get("content", "")
-            yield {"type": "tool_result", "tool": action, "actor": actor,
-                   "ok": bool(result.get("ok")), "summary": observation[:600]}
+            yield {"type": "tool_result", "tool": action, "actor": actor, "ok": bool(result.get("ok")), "summary": observation[:600]}
             scratch.append({"action": action, "args": args, "observation": observation})
         else:
-            # исчерпан лимит шагов — переходим к ответу с тем, что есть
-            yield {"type": "thought", "actor": "dispatcher",
-                   "text": f"Достигнут лимит шагов ({MAX_STEPS}), формирую ответ."}
+            yield {"type": "thought", "actor": "dispatcher", "text": f"Достигнут лимит шагов ({MAX_STEPS}); формирую ответ."}
     except Exception as exc:  # noqa: BLE001
         log.exception("Сбой фазы планирования")
-        yield {"type": "thought", "actor": "dispatcher",
-               "text": f"Ошибка планирования: {exc}. Отвечаю напрямую."}
+        yield {"type": "thought", "actor": "dispatcher", "text": f"Ошибка планирования: {exc}. Отвечаю напрямую."}
 
-    # --- ФАЗА 2: потоковый ответ ---
     yield {"type": "assistant_start", "actor": "dispatcher"}
     final_text = ""
     try:
-        messages = await _answer_messages(session_id, scratch)
-        async for delta in llm.chat_stream(messages, temperature=0.4, max_tokens=2048):
+        messages = await _answer_messages(session_id, scratch, briefs)
+        async for delta in llm.chat_stream(messages, temperature=0.35, max_tokens=2048):
             final_text += delta
             yield {"type": "token", "content": delta}
     except Exception as exc:  # noqa: BLE001
         log.exception("Сбой фазы ответа")
         if not final_text:
-            final_text = f"Не удалось получить ответ от модели: {exc}"
+            final_text = f"Сэр, ответная модель споткнулась о ковёр инфраструктуры: {exc}"
             yield {"type": "token", "content": final_text}
 
     if not final_text.strip():
-        final_text = "Готово."
+        final_text = "Готово, сэр. Скромно, но эффективно."
         yield {"type": "token", "content": final_text}
 
     _conversations.add(session_id, "assistant", final_text)
     yield {"type": "assistant_done", "content": final_text}
 
-    # --- авто-сброс контекста при переполнении окна ---
     try:
         if await _conversations.maybe_summarize(session_id, _summarize):
-            yield {"type": "memory", "event": "summarized",
-                   "text": "Контекст сжат и сохранён в память."}
+            yield {"type": "memory", "event": "summarized", "text": "Контекст сжат и сохранён в память."}
     except Exception:  # noqa: BLE001
         pass
 
 
 # --------------------------------------------------------------------------- #
-# Управление памятью (для дашборда)
+# Dashboard-compatible memory/control API
 # --------------------------------------------------------------------------- #
 def memory_overview(session_id: str = "default") -> dict[str, Any]:
     conv = _conversations.get(session_id)
@@ -406,18 +292,9 @@ def reset_context(session_id: str = "default", keep_summary: bool = False) -> No
 
 
 def mark_interrupted(session_id: str = "default") -> None:
-    """
-    Закрыть «висящую» реплику после аварийной остановки.
-
-    При отмене хода последнее сообщение пользователя остаётся без ответа
-    ассистента — и следующий ход модель может ошибочно «продолжить» прерванную
-    задачу вместо нового запроса. Добавляем явную пометку-ответ, чтобы пара
-    реплик закрылась и контекст не путал модель.
-    """
     conv = _conversations.get(session_id)
     if conv.messages and conv.messages[-1]["role"] == "user":
-        _conversations.add(session_id, "assistant",
-                           "(Задача прервана пользователем. Жду новый запрос.)")
+        _conversations.add(session_id, "assistant", "(Задача прервана пользователем. Жду новый запрос.)")
 
 
 async def flush_context(session_id: str = "default") -> bool:
@@ -432,10 +309,6 @@ def save_memory(text: str, tags: Optional[list[str]] = None) -> dict[str, Any]:
     return _longterm.save(text, tags=tags, kind="fact")
 
 
-# --------------------------------------------------------------------------- #
-# Обратная совместимость со старым server.py (POST /task)
-# --------------------------------------------------------------------------- #
 async def run_task(task: str, bridge: Optional[Any] = None) -> AsyncIterator[dict[str, Any]]:
-    """Совместимый генератор: оборачивает run_chat, проставляя channel=chat."""
     async for ev in run_chat("default", task, bridge=bridge):
         yield {"channel": "chat", **ev}
