@@ -1,6 +1,7 @@
 "use client";
 /**
- * StatusBar.tsx — индикатор состояния подсистем (опрос /status ядра).
+ * StatusBar.tsx — компактный индикатор состояния подсистем.
+ * Legacy service keys сохраняются как backend compatibility, но UX показывает Gemma-only терминологию.
  */
 import { useEffect, useState } from "react";
 
@@ -14,8 +15,8 @@ interface SysStatus {
 
 const LABELS: Record<keyof SysStatus, string> = {
   core: "Ядро",
-  qwen_coder: "Qwen-Coder",
-  ui_tars: "UI-TARS",
+  qwen_coder: "Gemma Core",
+  ui_tars: "Vision route",
   audio: "Аудио",
   rpc_bridge: "RPC-мост",
 };
@@ -36,10 +37,7 @@ export default function StatusBar() {
     };
     poll();
     const t = setInterval(poll, 4000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
   return (
