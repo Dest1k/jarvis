@@ -19,16 +19,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-      - name: Compile backend
-        run: python -m compileall backend
-      - name: Run native/autonomy tests
+      - name: Smoke backend/profile checks
         env:
           JARVIS_BACKGROUND_RUNTIME: '0'
           JARVIS_MEMORY_DIR: /tmp/jarvis-test-memory
           JARVIS_CORE_DIR: /tmp/jarvis-test-core
-        run: |
-          python backend/tests/test_native_runtime.py
-          python backend/tests/test_agent_system.py
+        run: python scripts/smoke_check.py --skip-dashboard --skip-compose
 
   dashboard:
     name: Dashboard build
