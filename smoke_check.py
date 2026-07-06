@@ -7,13 +7,13 @@
 
 Проверяет то, что чаще всего ломает cold-start: Python compile, автономные тесты,
 profiles.json, compose config, Docker, backend/dashboard ports, MCP config и базовые
-пути данных. Скрипт не запускает стек и не меняет систему.
+пути данных. Скрипт не запускает стек и не меняет системные сервисы; если у dashboard
+нет node_modules, он установит npm-зависимости локально.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -24,6 +24,7 @@ ENV = ROOT / "wsl" / ".env"
 COMPOSE = ROOT / "wsl" / "docker-compose.agents.yml"
 PROFILES = ROOT / "wsl" / "profiles.json"
 MCP = ROOT / "backend" / "mcp_servers.json"
+DASHBOARD = ROOT / "dashboard"
 
 
 def run(cmd: list[str] | str, *, cwd: Path | None = None, timeout: int = 180) -> tuple[bool, str]:
@@ -43,7 +44,8 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
     mark = "✓" if ok else "✖"
-    print(f"{mark} {name}{(' — ' + detail.strip().splitlines()[-1][:180]) if detail and not ok else ''}")
+    tail = detail.strip().splitlines()[-1][:180] if detail and detail.strip() else ""
+    print(f"{mark} {name}{(' — ' + tail) if tail and not ok else ''}")
     return ok
 
 
@@ -79,9 +81,11 @@ def main() -> int:
         ok, out = run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV), "config"], cwd=ROOT, timeout=120)
         failures += not check("docker compose config", ok, out)
 
-    dash_pkg = ROOT / "dashboard" / "package.json"
-    if dash_pkg.exists():
-        ok, out = run("npm run build", cwd=ROOT / "dashboard", timeout=240)
+    if (DASHBOARD / "package.json").exists():
+        if not (DASHBOARD / "node_modules").exists():
+            ok, out = run("npm install --legacy-peer-deps", cwd=DASHBOARD, timeout=420)
+            failures += not check("dashboard npm install", ok, out)
+        ok, out = run("npm run build", cwd=DASHBOARD, timeout=300)
         failures += not check("dashboard build", ok, out)
 
     check("RPC bridge port 8765", port_open(8765), "offline now; expected if stack is stopped")
