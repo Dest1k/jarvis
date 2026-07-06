@@ -1,6 +1,6 @@
 # JARVIS OS — запуск актуального `main`
 
-Этот документ фиксирует текущий рабочий путь запуска после переноса runtime-исправлений в `main`.
+Этот документ фиксирует рабочий путь запуска после переноса runtime-исправлений в `main`.
 
 ## 1. Получить актуальный main
 
@@ -22,6 +22,7 @@ npm install --legacy-peer-deps
 npm run build
 cd ..
 python jarvis.py profiles
+docker compose -f wsl/docker-compose.agents.yml --env-file wsl/.env config
 ```
 
 ## 3. Рекомендуемые профили
@@ -34,25 +35,44 @@ python jarvis.py up --profile gemma4-mono
 
 `gemma4-mono` поднимает одну мультимодальную модель-диспетчер и не запускает отдельный UI-TARS. Это меньше движущихся частей и меньше риск VRAM-конфликтов.
 
+### Безопасный старт без аудио
+
+```powershell
+python jarvis.py up --profile gemma4-mono --no-audio
+```
+
 ### Запасной монолит
 
 ```powershell
-python jarvis.py up --profile gemma27-mono
+python jarvis.py up --profile gemma27-mono --no-audio
 ```
 
 ### Классическая раздельная связка
 
 ```powershell
-python jarvis.py up --profile qwen-classic
+python jarvis.py up --profile qwen-classic --no-audio
 ```
 
 ### Просторный fallback при давлении VRAM
 
 ```powershell
-python jarvis.py up --profile gemma12-tars7
+python jarvis.py up --profile gemma12-tars7 --no-audio
 ```
 
-## 4. Проверка исправления контекста и «почему»
+## 4. CUDA/UVA hardening
+
+В compose и `.env.example` проброшены безопасные флаги:
+
+```env
+CUDA_VISIBLE_DEVICES=0
+CUDA_DEVICE_ORDER=PCI_BUS_ID
+CUDA_DISABLE_P2P=1
+NCCL_P2P_DISABLE=1
+```
+
+Они держат видимой только дискретную NVIDIA GPU и отключают peer-to-peer/NCCL P2P пути, которые в WSL2/Docker могут провоцировать `RuntimeError: UVA is not available`.
+
+## 5. Проверка исправления контекста и «почему»
 
 1. Открой dashboard.
 2. Отправь запрос, который вызывает инструменты.
@@ -63,19 +83,29 @@ python jarvis.py up --profile gemma12-tars7
 7. Текущая вкладка должна очиститься, а `episodic_memory_logs` по session id удаляются backend-обёрткой `orchestrator.reset_context`.
 8. Обнови страницу: старые `steps/why` не должны вернуться из `localStorage`.
 
-## 5. MCP и фоновый runtime
+## 6. MCP и фоновый runtime
 
-MCP-клиент теперь устойчиво переживает падение отдельных серверов и стартует лёгкий background runtime loop. Управление:
+Background runtime включается лениво при первом ходе агента и проходит через `orchestrator` entrypoint:
+
+```env
+JARVIS_BACKGROUND_RUNTIME=1
+JARVIS_IDLE_AFTER_SEC=45
+JARVIS_IDLE_INTERVAL_SEC=90
+```
+
+Автономные branch/test self-heal циклы по умолчанию выключены:
+
+```env
+JARVIS_SELF_HEAL_ENABLE=0
+```
+
+Для осознанного включения:
 
 ```powershell
-# Выключить фоновый runtime-loop, если нужен максимально чистый старт
-$env:JARVIS_BACKGROUND_RUNTIME="0"
-
-# Включить автономные branch/test self-heal циклы (по умолчанию выключено)
 $env:JARVIS_SELF_HEAL_ENABLE="1"
 ```
 
-## 6. Кластер по LAN / Mesh VPN
+## 7. Кластер по LAN / Mesh VPN
 
 В `wsl/.env` можно добавить JSON worker-ноды:
 
@@ -89,15 +119,26 @@ JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080-tail","base_url":"http://100.x.y.z:8001/v1","model":"qwen-coder","role":"coder","transport":"tailscale","weight":2}]
 ```
 
-## 7. Сеть Researcher-Agent
+## 8. Сеть Researcher-Agent
 
-Диагностика сети работает безопасно: HTTP probe внутри контейнера + DNS probe на хосте через PowerShell. Автоматические recovery-действия только opt-in:
+Диагностика сети работает безопасно: HTTP probe внутри контейнера + DNS probe на хосте через PowerShell. Recovery — только opt-in:
 
 ```env
 JARVIS_NETWORK_RECOVERY_SERVICES=Dnscache
 JARVIS_NETWORK_RECOVERY_CMD=
 ```
 
-## 8. Важное ограничение
+JARVIS не меняет сетевые политики сам: оператор явно задаёт разрешённый service restart или собственный recovery hook.
 
-Прямое изменение `backend/orchestrator/inference.py` для удаления `--swap-space 8` было заблокировано safety-фильтром коннектора. Поэтому dense-hybrid режим пока не считается рекомендованным. Для запуска используй профили из раздела 3.
+## 9. Диагностика после запуска
+
+```powershell
+python jarvis.py status
+python jarvis.py diag
+```
+
+Открой dashboard:
+
+```text
+http://localhost:3000
+```
