@@ -2,20 +2,6 @@
 """
 Пакет оркестрации JARVIS-OS — агентская «прокладка» между запросом пользователя
 (чат/голос) и «мозгом» системы (Qwen + UI-TARS).
-
-Состав:
-    fsio.py      — атомарный UTF-8/LF файловый ввод-вывод (инженерный стандарт v2.0).
-    llm.py       — клиент vLLM + бюджет контекста + извлечение JSON + ретраи.
-    memory.py    — долговременная память + менеджер оперативного контекста.
-    incidents.py — журнал решённых инцидентов (эпистемическое логирование, v2.0).
-    skills.py    — кузница навыков (рутины → CLI-скрипты + индекс, v2.0).
-    git_intel.py — Git-интеллект (разведка веток, diff-оценка, перенос, v2.0).
-    inference.py — двухрежимный инференс (MoE-турбо / dense-гибрид Gemma 4, v2.0).
-    media.py     — мультимедиа HEVC/H.265 с аппаратным ускорением (v2.0).
-    tools.py     — реестр инструментов (код, Windows, GUI, веб, git, навыки, память).
-    persona.py   — каноническая личность Core JARVIS и стиль ответов.
-    agent.py     — ReAct-оркестратор (планирование инструментами → потоковый ответ).
-    graph.py     — слой совместимости (ре-экспорт run_task/run_chat).
 """
 
 from __future__ import annotations
@@ -30,8 +16,6 @@ from . import persona
 
 log = logging.getLogger("jarvis.orchestrator")
 
-# Apply the canonical Core JARVIS personality without rewriting the large agent.py.
-# agent.py still owns the operational playbooks; persona.py owns the public style.
 try:
     agent._ANSWER_SYSTEM = persona.ANSWER_SYSTEM  # type: ignore[attr-defined]
     if hasattr(agent, "_ROLE") and persona.PERSONA_CORE not in agent._ROLE:  # type: ignore[attr-defined]
@@ -49,13 +33,6 @@ _idle_loop: Any | None = None
 
 
 async def _purge_episodic_trace(session_id: str) -> None:
-    """Очистить runtime explainability trace для вкладки.
-
-    Важно: «почему?» в dashboard берётся не из ConversationManager, а из
-    cognitive_core.episodic_memory_logs. Поэтому reset_context обязан очищать и
-    эту таблицу по session_id, иначе backend уже забыл контекст, а UI снова
-    достаёт старую трассу из БД.
-    """
     try:
         from cognitive_core import db as cc_db
         await cc_db.execute("DELETE FROM episodic_memory_logs WHERE session_id = ?", (session_id,))
@@ -88,12 +65,6 @@ def _host_exec_adapter(bridge: Any | None):
 
 
 async def ensure_background_runtime(bridge: Any | None = None) -> dict[str, Any]:
-    """Запустить безопасный background runtime-loop один раз.
-
-    Подключается лениво при первом пользовательском ходе, потому что именно тогда
-    в orchestrator есть bridge-объект. Без bridge guard/idle-loop остаются в
-    диагностическом режиме без host remediation.
-    """
     global _background_lock, _background_started, _gpu_guard, _idle_loop
     if os.environ.get("JARVIS_BACKGROUND_RUNTIME", "1") == "0":
         return {"enabled": False, "reason": "JARVIS_BACKGROUND_RUNTIME=0"}
@@ -154,12 +125,13 @@ async def run_chat(session_id: str, user_text: str, bridge: Optional[Any] = None
 
 
 async def run_task(task: str, bridge: Optional[Any] = None) -> AsyncIterator[dict[str, Any]]:
-    """Совместимый генератор: оборачивает run_chat, проставляя channel=chat."""
     async for ev in run_chat("default", task, bridge=bridge):
         yield {"channel": "chat", **ev}
 
 
 agent.reset_context = reset_context
+agent.run_chat = run_chat
+agent.run_task = run_task
 
 memory_overview = agent.memory_overview
 flush_context = agent.flush_context
