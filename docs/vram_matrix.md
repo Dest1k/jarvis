@@ -1,225 +1,95 @@
-# Матрица распределения VRAM — RTX 5090 (32 GiB)
+# Матрица VRAM — Gemma 4 runtime
 
-Точный расчёт флагов `--gpu-memory-utilization` и `--max-model-len` для текущего
-профиля **Qwen2.5-Coder-14B-AWQ + UI-TARS-2B + аудио**. Все числа — в GiB.
+JARVIS OS теперь поддерживает только два активных профиля:
 
-## Исходные данные
+| Профиль | Режим | Цель |
+|---|---|---|
+| `gemma4-mono` | eager / conservative | стабильный запуск, диагностика, self-heal validation |
+| `gemma4-turbo` | CUDA graphs / larger batching | максимальная скорость после прогрева |
 
-- Полный объём VRAM RTX 5090: **≈32.0 GiB** (значение `mem_get_info().total`).
-- `gpu_memory_utilization` в vLLM — доля **полной** памяти, которую инстанс
-  резервирует под **веса + overhead (CUDA-контекст, активации) + KV-кэш**.
-- Инстансы поднимаются **последовательно**; каждый держит свою долю, пока жив,
-  поэтому доли фактически **суммируются** и не должны давать перерасход.
-- Веса и overhead Qwen взяты **из реального лога** (`Model loading took 9.38 GiB`,
-  доступный KV при util 0.33 = 0.75 GiB → overhead = 0.33·32 − 9.38 − 0.75 ≈ 0.43).
+Оба профиля используют один мультимодальный Gemma 4 dispatcher. Отдельный GUI/vision
+vLLM-инстанс не поднимается; высвобождённая VRAM отдаётся под контекст, KV cache и
+резерв рабочего стола.
 
-## Формула KV-кэша
+## RTX 5090 / 32 GiB ориентир
 
-```
-KV(байт/токен) = 2 (K и V) · num_layers · num_kv_heads · head_dim · dtype_bytes
-KV(всего)      = KV(байт/токен) · max_model_len            (для одной max-длины)
-```
+| Потребитель | Mono | Turbo |
+|---|---:|---:|
+| Gemma 4 NVFP4 weights + runtime overhead | ~17.5 GiB | ~17.5 GiB |
+| KV cache fp8 / контекст 32k | ~8.5 GiB | ~8.0 GiB |
+| CUDA graphs | 0 GiB | ~1 GiB |
+| Audio layer, если включён | ~2 GiB | ~2 GiB |
+| Резерв Windows/driver/desktop | ~3.5-4 GiB | ~3 GiB |
 
-| Модель | layers | kv_heads | head_dim | dtype | KV/токен | KV при max_len |
-|--------|:------:|:--------:|:--------:|:-----:|:--------:|:--------------:|
-| Qwen2.5-Coder-14B | 48 | 8 | 128 | fp16 (2 Б) | **192 KiB** | 16384 → **3.00 GiB** |
-| UI-TARS-2B (Qwen2-VL-2B) | 28 | 2 | 128 | fp16 (2 Б) | **28 KiB** | 8192 → **0.22 GiB** |
+## Флаги профилей
 
-> Проверка по логу: при util 0.33 доступно 0.75 GiB KV → 0.75 GiB / 192 KiB ≈
-> 4096 токенов («estimated max model length 4064» в логе). Совпадает.
+`gemma4-mono`:
 
-## Распределение (профиль по умолчанию)
-
-| Сервис | Модель | util | веса | overhead | KV (доступно) | Бюджет = util·32 |
-|--------|--------|:----:|:----:|:--------:|:-------------:|:----------------:|
-| Диспетчер + Кодер | Qwen2.5-Coder-14B-AWQ | **0.45** | 9.38 | 0.43 | 4.59 (нужно 3.00) | **14.40** |
-| Контроллер ОС/GUI | UI-TARS-2B-SFT | **0.20** | ~4.2 | ~0.6 | ~1.6 (нужно 0.22) | **6.40** |
-| Аудио (ASR+TTS) | Whisper L-v3 + Kokoro | — | — | — | — | ~2.0 (вне vLLM) |
-| **ИТОГО занято** | | | | | | **≈22.8** |
-| **Резерв** (рабочий стол Windows, драйвер, страховка) | | | | | | **≈9.2** |
-
-```
-Шаг 1 — Qwen:      0.45 × 32 = 14.40  →  занято 14.40,  свободно 17.60
-Шаг 2 — UI-TARS:   0.20 × 32 =  6.40  →  занято 20.80,  свободно 11.20
-Шаг 3 — Audio (вне vLLM):     ≈ 2.00  →  занято 22.80,  свободно  9.20
-                                                          └──── резерв ≈ 9.2 GiB
+```env
+JARVIS_QWEN_GPU_UTIL=0.82
+JARVIS_QWEN_MAX_LEN=32768
+JARVIS_QWEN_KV_DTYPE=fp8
+JARVIS_QWEN_MAX_NUM_SEQS=8
+JARVIS_QWEN_ENFORCE_EAGER=--enforce-eager
 ```
 
-Проверка границы запуска (vLLM падает, если доступный KV < нужного для max_len):
-- Qwen: 0.45·32 − 9.38 − 0.43 = **4.59** ≥ 3.00 (16384) ✔ запас 1.6 GiB.
-- UI-TARS: 0.20·32 − 4.2 − 0.6 = **1.6** ≥ 0.22 (8192) ✔ запас огромный.
+`gemma4-turbo`:
 
-Именно нехватка этого запаса (util 0.33 → KV 0.75 < 3.00) и роняла Qwen в логах.
+```env
+JARVIS_QWEN_GPU_UTIL=0.80
+JARVIS_QWEN_MAX_LEN=32768
+JARVIS_QWEN_KV_DTYPE=fp8
+JARVIS_QWEN_MAX_NUM_SEQS=16
+JARVIS_QWEN_ENFORCE_EAGER=
+```
 
-## Контекст и батчинг
+Имена некоторых env-ключей сохранены как совместимые legacy aliases, но активная
+модель в обоих профилях — Gemma 4 dispatcher.
 
-- Qwen-Coder: `--max-model-len 16384`, `--max-num-seqs 8`, `--enable-prefix-caching`,
-  `--quantization awq_marlin`, `--enforce-eager`.
-- UI-TARS-2B: `--max-model-len 8192`, `--max-num-seqs 4` (VL-модель; дефолтного
-  лимита 1 изображение/запрос хватает — UI-TARS шлёт один скриншот на шаг).
-  Короткого контекста достаточно для парсинга состояния экрана.
+## CUDA/UVA hardening
 
-Запас ~9 GiB позволяет при желании поднять контекст Qwen до 32768
-(`JARVIS_QWEN_GPU_UTIL=0.52`, `JARVIS_QWEN_MAX_LEN=32768` → KV 6.0 GiB) прямо из
-пульта дашборда, не рискуя OOM.
+```env
+CUDA_VISIBLE_DEVICES=0
+CUDA_DEVICE_ORDER=PCI_BUS_ID
+CUDA_DISABLE_P2P=1
+NCCL_P2P_DISABLE=1
+```
+
+Эти флаги обязательны для устойчивости WSL2/Docker на дискретной NVIDIA GPU.
+
+## Тюнинг при OOM
+
+1. Запустить без аудио:
+
+```powershell
+python jarvis.py up --profile gemma4-mono --no-audio
+```
+
+2. Освободить VRAM:
+
+```powershell
+python jarvis.py freevram
+```
+
+3. Снизить `JARVIS_QWEN_GPU_UTIL`:
+
+```env
+JARVIS_QWEN_GPU_UTIL=0.78
+```
+
+4. Снизить контекст:
+
+```env
+JARVIS_QWEN_MAX_LEN=24576
+```
+
+5. Если turbo не стартует из-за graph capture, вернуться на mono.
 
 ## Проверочные команды
 
-```bash
-nvidia-smi --query-compute-apps=pid,used_memory --format=csv   # занятость по процессам
-curl -s http://localhost:8001/health && echo "  Qwen OK"
-curl -s http://localhost:8002/health && echo "  UI-TARS OK"
-curl -s http://localhost:8003/health && echo "  Audio OK"
+```powershell
+python scripts/smoke_check.py --skip-dashboard
+python jarvis.py up --profile gemma4-mono --no-audio
+python jarvis.py status
+python jarvis.py diag
 ```
-
-## Тюнинг при OOM (если рабочий стол Windows съедает много VRAM)
-
-1. Снизьте `JARVIS_QWEN_GPU_UTIL` 0.45 → 0.42 (Qwen → 13.4 GiB; KV всё ещё ≥ 3.0).
-2. Уменьшите `JARVIS_QWEN_MAX_LEN` 16384 → 12288 (KV 2.25 GiB) или 8192 (1.5 GiB).
-3. Снизьте `JARVIS_UITARS_GPU_UTIL` 0.20 → 0.16 (UI-TARS → 5.1 GiB).
-4. Полностью отключить UI-TARS: `JARVIS_ENABLE_UITARS=0`.
-
-Все параметры правятся в `wsl/.env` (в т.ч. из пульта дашборда → «Конфигурация»),
-затем «Рестарт» соответствующего сервиса.
-
----
-
-## Профили системы (диспетчер + GUI одним пресетом)
-
-Профили в [`wsl/profiles.json`](../wsl/profiles.json). Применение — кнопкой в
-Пульте (**🎛️ Профиль системы**) или `python jarvis.py up --profile <id>`.
-
-> `up --profile <id>` делает всё одной командой: пишет vLLM-параметры в `wsl/.env`,
-> **автоматически докачивает модели профиля** (`hf_downloader.py`, идемпотентно;
-> gated-модели вроде Gemma требуют токен в `hf_token.txt`), синхронизирует веса в
-> ext4-том (динамически по профилю) и поднимает стек.
-
-Served-model-name диспетчера остаётся `qwen-coder` в любом профиле — код агента
-менять не нужно. Числа ниже — **ориентировочные**.
-
-### `gemma4-mono` (РЕКОМЕНДУЕТСЯ) — единый мозг, без UI-TARS
-
-Один мультимодальный мозг **Gemma-4-26B-A4B** делает ВСЁ: планирует, пишет код И
-**сам видит экран** (`see_screen`/`gui` идут в тот же инстанс — Gemma получает
-скриншот и возвращает описание/действие). Отдельный UI-TARS не поднимается —
-лаунчер видит `mono:true` и стартует только диспетчера (сервис `vllm-ui-tars`
-остаётся виден в Пульте). Зрение/GUI маршрутизируются на диспетчер:
-`JARVIS_UITARS_URL=http://vllm-qwen-coder:8001/v1`, `JARVIS_UITARS_MODEL_NAME=qwen-coder`,
-`JARVIS_VISION_MODEL=dispatcher`, `JARVIS_ENABLE_UITARS=0`.
-
-**Справедливое распределение VRAM (32 GiB) — аудио и Gemma:**
-
-| Потребитель | Что | Память | Как считано |
-|-------------|-----|:------:|-------------|
-| Аудио (вне vLLM) | Whisper L-v3 int8_f16 + Kokoro | **~2.0** | фиксировано, гарантировано |
-| Резерв | рабочий стол Windows, драйвер, страховка | **~3.8** | не отдаём под vLLM |
-| **Gemma-4-26B-A4B** | NVFP4, KV fp8, контекст 32k | **~26.2** | `util 0.82` = 0.82·32 |
-
-```
-Gemma:   util 0.82 × 32 = 26.24  (веса ~16.5 + overhead ~1.0 + KV fp8 ~8.7)
-Audio:                    ≈ 2.00
-                          ───────
-Занято                   ≈ 28.24  →  резерв ≈ 3.76 GiB
-```
-
-Поскольку UI-TARS высвободил ~6 ГБ, они **целиком отданы Gemma**: контекст поднят
-`12288 → 32768`, KV-кэш больше → быстрее и устойчивее на длинных кодинговых
-задачах (цель — «не хуже Claude Code»). Один vLLM-инстанс ⇒ **нет кумулятивной
-возни с util** и риска «No available memory» от второй модели.
-
-`.env` профиля: `JARVIS_QWEN_GPU_UTIL=0.82`, `JARVIS_QWEN_MAX_LEN=32768`,
-`JARVIS_QWEN_KV_DTYPE=fp8`, `JARVIS_QWEN_QUANT_ARGS=` (NVFP4 определяется сам),
-`JARVIS_QWEN_DTYPE=auto`.
-
-**Если не стартует** (десктоп съел VRAM): снизьте `JARVIS_QWEN_GPU_UTIL` 0.82 → 0.78
-(Gemma → 24.96 ГБ) или `JARVIS_QWEN_MAX_LEN` 32768 → 24576 (KV меньше).
-Аудио при этом всегда сохраняет свои ~2 ГБ.
-
-### ⚠️ Главное про util при ДВУХ инстансах vLLM на одной карте
-
-В vLLM V1 `gpu_memory_utilization` ВТОРОГО инстанса (UI-TARS) — это **кумулятивный
-потолок на ВСЮ карту**, а не его «доля»:
-
-```
-доступно_под_KV(inst2) = util2 × VRAM − уже_занято(inst1 + десктоп + свои_веса)
-```
-
-Поэтому если диспетчер уже занял ~20 ГБ, а у UI-TARS util=0.20 (потолок 6.4 ГБ <
-20 ГБ занятых) → «No available memory for the cache blocks». **util второго
-инстанса должен быть ВЫШЕ первого** (покрывать всё занятое + себя). Это безопасно:
-util — потолок, не аллокация (vLLM не возьмёт больше, чем физически свободно).
-
-**И обязателен ПОСЛЕДОВАТЕЛЬНЫЙ старт**: второй инстанс должен профилировать память
-уже ПОСЛЕ полной загрузки первого (иначе он переоценит свободную память и при
-догрузке первого случится OOM). `jarvis.py up` и применение профиля поднимают
-vLLM по очереди с `--wait` и предварительно освобождают VRAM (`stop`).
-
-### `qwen-classic` (по умолчанию)
-Qwen2.5-Coder-14B-AWQ (util **0.45**) + UI-TARS-2B (util **0.75** — кумулятивно!) +
-аудио ≈ **23** ГБ, резерв ≈ **6–9**.
-
-### `gemma4-tars15` (умный, основной)
-
-| Сервис | Модель | Квант | Веса | util | Примечание |
-|--------|--------|-------|------|:----:|-----------|
-| Диспетчер | **Gemma-4-26B-A4B MoE** (`nvidia/Gemma-4-26B-A4B-NVFP4`) | NVFP4 | ~16.5 | `0.62` | MoE, активно 4B → быстро |
-| GUI/ОС | **UI-TARS-2B** (`UI-TARS-2B-SFT`) | FP16 | ~4.8 | `0.90` | кумулятивно (покрывает Gemma) |
-| Аудио | Whisper-v3 + Kokoro | — | — | — | ~2 ГБ |
-
-Физически: Gemma ~19.8 + UI-TARS ~5.6 + аудио 2 ≈ **27.4**, резерв ~**4.6**.
-Берём MoE-26B-A4B, а не dense-31B: реальный `nvidia/Gemma-4-31B-IT-NVFP4` весит
-**~30 ГБ** (эмбеддинги Gemma на словарь 256k + часть тензоров в bf16/fp8) и НЕ
-влезает. UI-TARS — лёгкий **2B** (старший 7B не помещается рядом с 16.5-ГБ Gemma;
-для 7B берите профиль `gemma12-tars7`).
-
-### `gemma12-tars7` (запасной, просторный — со взрослым UI-TARS-7B)
-
-| Сервис | Модель | Квант | Веса | util |
-|--------|--------|-------|------|:----:|
-| Диспетчер | **Gemma-4-12B** (`coolthor/gemma-4-12B-it-NVFP4A16`) | NVFP4 | ~7.7 | `0.35` |
-| GUI/ОС | **UI-TARS-1.5-7B** (`flin775/UI-TARS-1.5-7B-AWQ`) | Int4 AWQ | ~5.2 | `0.72` (кумул.) |
-| Аудио | Whisper-v3 + Kokoro | — | — | — |
-
-Физически ≈ **19–20** ГБ, резерв ~**12**. Запускается даже при занятом десктопом
-VRAM. Сюда влезает **взрослый UI-TARS-1.5-7B**, т.к. Gemma-12B компактна (~7.7 ГБ).
-
-**Низкие кванты «без фанатизма»:** NVFP4 — родной 4-бит float Blackwell (качество
-≈ bf16; для Gemma важно — **AWQ её роняет** 85.6→69.2%, NVFP4/GPTQ держат). KV-кэш
-**fp8** — разумный предел (int4-KV уже «делает модель ребёнком»). Веса 4-бит — пол.
-
-**Если не стартует (мало VRAM):** освободите видеопамять — Пульт → «🧹 Освободить
-VRAM» или `python jarvis.py freevram`, **закройте лишние вкладки браузера / отключите
-аппаратное ускорение**, затем профиль `gemma12-tars7` (он просторный). Точечно:
-поднимите util диспетчера и особенно UI-TARS, снизьте `*_MAX_LEN`.
-
-Новые env-переменные профилей: `JARVIS_QWEN_QUANT_ARGS`, `JARVIS_QWEN_DTYPE`,
-`JARVIS_QWEN_KV_DTYPE`, и аналоги `JARVIS_UITARS_*` (см. `wsl/profiles.json`).
-
----
-
-## Инференс-режимы v2.0 (Gemma 4, веса проверены на HuggingFace)
-
-Реестр — `backend/orchestrator/inference.py`; переключение — `/api/control/inference`.
-Флаги идут в vLLM через `JARVIS_QWEN_EXTRA_ARGS`.
-
-### Режим 1 — `moe-turbo` (максимум TPS)
-- Репозиторий: **`nvidia/Gemma-4-26B-A4B-NVFP4`** (база `google/gemma-4-26B-A4B-it`).
-- MoE: 25.2B всего / **3.8B активных** (8 из 128 экспертов). NVFP4 ≈ **16.5 ГБ**.
-- `--gpu-memory-utilization 0.85` → 27.2 ГБ: веса ~16.5 + overhead ~0.8 + KV/префикс ~9.9
-  (не 0.90 — оставляем ~4.8 ГБ под аудио ~2 и рабочий стол Windows, иначе они голодают).
-- `--enable-prefix-caching`, `--max-num-seqs 16`, KV fp8, UI-TARS **отключён**. vLLM TP=1.
-
-### Режим 2 — `dense-hybrid` (максимум качества, СОЛО)
-- Репозиторий: **`nvidia/Gemma-4-31B-IT-NVFP4`** (база `google/gemma-4-31B-it`, 30.7B).
-- NVFP4 ≈ **21 ГБ**. Требует `--quantization modelopt`. Мультимодальная — экран
-  видит сама, **UI-TARS не поднимается**.
-- `--gpu-memory-utilization 0.75` → 24.0 ГБ на GPU (веса-резидент ~13 + overhead ~1 +
-  KV ~10); `--cpu-offload-gb 8` держит часть весов в pinned host-RAM (DMA по PCIe 5.0),
-  `--swap-space 8` страхует KV. Аудио ~2 + резерв десктопа ~6 ГБ.
-- Оффлоад — осознанный размен VRAM на host-RAM (из 128 ГБ), **не** спасение от OOM
-  (модель и так влезает). vLLM TP=1; Gemma 4 — reasoning-модель.
-
-> Оба режима — СОЛО (`JARVIS_ENABLE_UITARS=0`, зрение → эндпоинт диспетчера):
-> на 32-ГБ карте рядом с жирной Gemma второму vLLM (UI-TARS) места нет — он
-> падал в OOM-цикле. Профили запуска в `wsl/profiles.json`: `moe-turbo` и
-> `dense-hybrid` (`python jarvis.py up --profile <id>`).
