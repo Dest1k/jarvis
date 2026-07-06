@@ -1,5 +1,5 @@
 {
-  "_comment": "MCP-серверы JARVIS-OS. Клиент устойчиво переживает падение отдельных серверов и перезапускает MCP run-loop; поэтому git/sqlite снова включены. Если локальная модель тонет в инструментах, выключайте лишнее здесь.",
+  "_comment": "MCP-серверы JARVIS-OS. Клиент устойчиво переживает падение отдельных серверов и перезапускает MCP run-loop; поэтому optional-серверы могут быть offline без падения backend.",
   "mcpServers": {
     "fetch": {
       "command": "python", "args": ["-m", "mcp_server_fetch"],
@@ -30,12 +30,12 @@
     "git": {
       "command": "python", "args": ["-m", "mcp_server_git", "--repository", "/app"],
       "enabled": true,
-      "_desc": "Git MCP для фоновой диагностики и self-healing branch/test циклов. Если /app не является git worktree, сервер останется offline, но MCP-клиент не уронит backend."
+      "_desc": "Git MCP для read-only диагностики /app. В compose можно смонтировать .git в /app/.git; self-heal patch/branch-операции выполняются безопаснее через RPC-мост хоста."
     },
     "sqlite": {
-      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/memory/cognitive_core.db"],
+      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/jarvis_core/cognitive_core.db"],
       "enabled": true,
-      "_desc": "SQLite MCP к постоянной БД когнитивного ядра. При другом JARVIS_DB_PATH скорректируйте путь или оставьте как optional offline."
+      "_desc": "SQLite MCP к постоянной БД когнитивного ядра (JARVIS_CORE_DIR=/data/jarvis_core)."
     },
     "playwright": {
       "command": "npx",
