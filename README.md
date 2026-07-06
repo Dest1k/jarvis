@@ -1,466 +1,184 @@
 # JARVIS-OS
 
-**Самособирающаяся локальная мультиагентная система-ассистент** для Windows 11 и
-Linux (WSL2 / нативный Linux). Полностью офлайн: два-в-одном «мозга» на vLLM,
-кросс-платформенное управление хостом, живой веб-дашборд и **когнитивное ядро** —
-персистентная память, база знаний, самообучение и автономное исполнение планов.
+Локальная автономная агентская система для Windows 11 / WSL2 / Docker с единым
+Gemma 4 dispatcher, когнитивным ядром, mission planning, native host tools,
+background self-heal, RAG, lifelong learning и web Command Center.
 
-> JARVIS — это не чат-обёртка над LLM. Это **операционный агент**: он видит экран,
-> кликает мышью, рулит службами/файлами/реестром, пишет и запускает код, ходит в
-> веб, помнит контекст между сессиями, учится на своих инцидентах и умеет
-> декомпозировать цель в план и прогнать его суб-агентами — с человеком в контуре
-> (HITL) на всём опасном.
+JARVIS — это не чат-обёртка над LLM. Это операционный агент: он ведёт цели как
+проекты, вызывает внутренние роли Researcher/Coder/Critic, работает с хостом через
+native-first инструменты, анализирует собственные инциденты и готовит проверяемые
+repair candidates.
 
----
+## Быстрый старт
 
-## Оглавление
+```powershell
+cd D:\jarvis
+git fetch origin
+git checkout main
+git pull origin main
 
-1. [Что это и как устроено](#1-что-это-и-как-устроено)
-2. [Целевое оборудование](#2-целевое-оборудование)
-3. [Быстрый старт](#3-быстрый-старт)
-4. [Профили запуска (какой «мозг» поднять)](#4-профили-запуска)
-5. [Состав репозитория](#5-состав-репозитория)
-6. [Когнитивное ядро — что даёт база данных](#6-когнитивное-ядро)
-7. [Способности агента (инструменты)](#7-способности-агента)
-8. [Дашборд — четыре вкладки](#8-дашборд)
-9. [Параллелизм и утилизация vLLM](#9-параллелизм)
-10. [Режим самообучения](#10-режим-самообучения)
-11. [Справочник по конфигурации (env)](#11-справочник-по-конфигурации)
-12. [REST/WS API](#12-rest-ws-api)
-13. [Безопасность](#13-безопасность)
-14. [Диагностика и типовые проблемы](#14-диагностика)
-
----
-
-## 1. Что это и как устроено
-
-JARVIS работает в **двух топологиях** (задаётся профилем запуска):
-
-- **СОЛО (v2, рекомендуется для 5090):** один мультимодальный мозг **Gemma 4**
-  (MoE `moe-turbo` или плотная `dense-hybrid`) делает всё — рассуждает, пишет код,
-  **видит экран сам** и управляет GUI. Отдельная vision-модель не поднимается —
-  вся VRAM отдана диспетчеру и KV-кэшу.
-- **Раздельная (классика):** **диспетчер** (Qwen-Coder / Gemma) рассуждает и рулит
-  ОС, а **GUI-актуатор «UI-TARS»** — отдельные «глаза и руки». Оркестратор
-  автоматически передаёт цель TARS, когда командой не вышло.
-
-Ключевой принцип обоих режимов: **не вышло командой — тыкаем визуально.** Мост
-управления хостом кросс-платформенный (Windows: PowerShell + user32; Linux:
-xdotool/ydotool/scrot/xclip) — контракт один, агент ведёт себя одинаково.
-
-### Слои системы
-
-```
-┌──────────────────── WINDOWS / LINUX HOST (нативно) ─────────────────────┐
-│  windows_rpc_bridge.py  →  защищённый WS-демон (токен), хуки ОС,          │
-│                            HITL-гейт на деструктив, git-автоматика        │
-│  jarvis.py              →  единый лаунчер: up/stop/status/diag/profiles   │
-└───────────────────────────────┬──────────────────────────────────────────┘
-                                 │ WebSocket (localhost, токен)
-┌───────────────────────────────┴──────────── WSL2 / Docker ───────────────┐
-│  backend/server.py (FastAPI)  →  ядро: WS чата/аудио/десктопа, Пульт,     │
-│                                  телеметрия GPU, роутер когнитивного ядра  │
-│  orchestrator/ (агент)        →  ReAct-цикл: план инструментами → ответ;   │
-│                                  26 инструментов + MCP; самокоррекция      │
-│  cognitive_core/ (SQLite)     →  память, знания, RAG, аудит, планы,        │
-│                                  восстановление, федерация, самообучение   │
-│  ┌──────────── vLLM (NVIDIA Container Toolkit) ───────────────────────┐   │
-│  │  диспетчер (:8001)  · [опц.] UI-TARS (:8002)  · аудио (:8003)       │   │
-│  │  sandbox — изолированное исполнение кода                            │   │
-│  └────────────────────────────────────────────────────────────────────┘   │
-└───────────────────────────────┬──────────────────────────────────────────┘
-                                 │ WebSocket / SSE (стриминг)
-┌───────────────────────────────┴──────────────── БРАУЗЕР ──────────────────┐
-│  dashboard/ (Next.js 15, :3000) — Command Center, ЧЕТЫРЕ вкладки +          │
-│  всегда видимая телеметрия GPU/VRAM в топбаре + PWA-компаньон на телефон    │
-└────────────────────────────────────────────────────────────────────────────┘
+python scripts/smoke_check.py --skip-dashboard
+python jarvis.py up --profile gemma4-mono --no-audio
 ```
 
-**Порты:** `8000` ядро · `8001` диспетчер · `8002` UI-TARS · `8003` аудио ·
-`3000` дашборд · `8765` RPC-мост · `5901` VNC · `1234` LM Studio (bootstrap).
+Открыть dashboard:
 
----
-
-## 2. Целевое оборудование
-
-| Компонент | Спецификация |
-|-----------|--------------|
-| CPU | Intel Core Ultra 9 285K (24 ядра) |
-| RAM | 128 ГБ DDR5 (до 96 ГБ в WSL2 через `.wslconfig`; используется под CPU-оффлоад Gemma) |
-| GPU | NVIDIA RTX 5090 (32 ГБ VRAM, Blackwell / sm_120) |
-| ОС | Windows 11 + WSL2 (Ubuntu 24.04) + Docker Desktop, **или** нативный Linux |
-
-Система масштабируется вниз: профили `qwen-classic`, `gemma12-tars7` рассчитаны на
-меньшую VRAM. Матрица распределения памяти — [`docs/vram_matrix.md`](docs/vram_matrix.md).
-
----
-
-## 3. Быстрый старт
-
-```bash
-# 0. Токен HuggingFace (один раз) — скопируйте пример и вставьте токен
-cp hf_token.txt.example hf_token.txt   # затем впишите свой hf_...
-
-# 1. Установка окружения (проверки, .wslconfig, Docker, зависимости)
-python jarvis.py install
-
-# 2. Поднять стек с выбранным профилем (см. раздел 4).
-#    Модели профиля докачаются автоматически (идемпотентно, с resume).
-python jarvis.py up --profile moe-turbo
-#    Безопасный запуск без аудио (если ASR/TTS мешает старту):
-python jarvis.py up --profile moe-turbo --no-audio
-
-# 3. Дашборд (сам сделает npm install один раз и поднимет Next.js на :3000)
-python jarvis.py dashboard
+```text
+http://localhost:3000
 ```
 
-Откройте **http://localhost:3000**.
+После стабильного запуска можно включить быстрый профиль:
 
-### Все команды лаунчера
-
-| Команда | Что делает |
-|---------|-----------|
-| `python jarvis.py up [--profile P] [--no-audio]` | Поднять весь стек (лечит Docker/WSL, поднимает RPC-мост, ждёт готовности ядра) |
-| `python jarvis.py stop` | Остановить стек |
-| `python jarvis.py status` | Статус контейнеров и портов |
-| `python jarvis.py diag` | **Диагностика:** статус/рестарты/код выхода + хвост логов проблемных контейнеров (150 строк — здесь реальная причина падения) |
-| `python jarvis.py profiles` | Список профилей запуска |
-| `python jarvis.py freevram` | Остановить GPU-контейнеры, освободить VRAM |
-| `python jarvis.py bridge` | Поднять только RPC-мост хоста |
-| `python jarvis.py dashboard` | Запустить веб-дашборд |
-| `python jarvis.py install` | Первичная установка окружения |
-
-Флаги: `--profile <id>` · `--no-audio` (не поднимать аудио-слой) ·
-`--keep-wsl-integration` (не трогать WSL-интеграцию Docker Desktop).
-
----
-
-## 4. Профили запуска
-
-Профиль = пресет «какой мозг(и) поднять + как настроить vLLM». Задаётся флагом
-`--profile` или кнопкой в Пульте. Определены в [`wsl/profiles.json`](wsl/profiles.json);
-инференс-режимы v2 — в [`orchestrator/inference.py`](backend/orchestrator/inference.py).
-
-| Профиль | Топология | Модель(и) | Когда |
-|---------|-----------|-----------|-------|
-| **`moe-turbo`** ★ | СОЛО | Gemma-4-26B-A4B NVFP4 (MoE 25.2B/3.8B актив.) | Максимум скорости на 5090. Быстрый MoE, агрессивный префикс-кэш, UI-TARS выключен |
-| **`dense-hybrid`** ★ | СОЛО | Gemma-4-31B-IT NVFP4 (плотная 30.7B) | Максимум качества. Часть весов оффлоадится в 128 ГБ RAM (`--cpu-offload-gb`) |
-| `gemma12-tars7` | Раздельная | Gemma-4-12B NVFP4 + UI-TARS-1.5-7B | Просторный вариант с отдельным зрением |
-| `gemma4-tars15` | Раздельная | Gemma-4-26B-A4B + UI-TARS-2B | MoE-диспетчер + отдельный актуатор |
-| `qwen-classic` | Раздельная | Qwen2.5-Coder-14B AWQ + UI-TARS-2B | Классика, меньше VRAM |
-| `gemma4-mono` / `gemma27-mono` | Монолит | Gemma-4-26B / Gemma-3-27B | Один мозг рулит всем |
-
-Обе v2-СОЛО модели **мультимодальны** — видят экран сами, поэтому `see_screen`/`gui`
-идут в эндпоинт диспетчера, а отдельный UI-TARS не поднимается (экономия ~5-6 ГБ VRAM).
-
-**Переключение на лету:** вкладка «🛠️ Пульт» → блок инференс-режимов, или
-`python jarvis.py up --profile <id>` (перезапишет `wsl/.env` и пересоздаст контейнеры
-в правильном порядке с ожиданием готовности).
-
-> **Веса.** `moe-turbo`/`dense-hybrid` используют реальные NVFP4-кванты NVIDIA под
-> Blackwell (`nvidia/Gemma-4-26B-A4B-NVFP4`, `nvidia/Gemma-4-31B-IT-NVFP4`). Квантование
-> определяется из конфигурации модели; для dense добавляется `--quantization modelopt`.
-
----
-
-## 5. Состав репозитория
-
-```
-jarvis.py                     единый лаунчер (up/stop/status/diag/profiles/…)
-bootstrap_installer.py        нативный Windows-bootstrap (.wslconfig, перенос на D:, стек)
-install_agent.py              автономный агент-установщик на локальной LLM
-hf_downloader.py              загрузчик моделей HF (resume, sha256, ETA)
-windows_rpc_bridge.py         защищённый RPC-демон хоста: хуки ОС, HITL, git-автоматика
-wsl/
-  docker-compose.agents.yml   vLLM-инстансы, аудио-слой, sandbox
-  profiles.json               профили запуска
-  wsl_setup_orchestrator.sh   развёртывание внутри WSL2
-backend/
-  server.py                   FastAPI-ядро: WS чата/аудио/десктопа, Пульт, GPU-телеметрия
-  cognitive_api.py            REST/WS роутер когнитивного ядра (/api/cognitive/*)
-  orchestrator/               АГЕНТ (см. ниже) — «мозг» и его логика
-    agent.py                  ReAct-цикл, самокоррекция, автономный режим
-    tools.py                  26 инструментов (Windows, shell, gui, код, веб, память…)
-    llm.py                    клиент vLLM (stream/non-stream), пул на 64 соединения
-    memory.py                 файловая память + менеджер контекста (авто-суммаризация)
-    incidents.py              журнал решённых инцидентов (эпистемическая память)
-    skills.py                 «кузница навыков» — компиляция/запуск скиллов
-    git_intel.py              git-интеллект (ветки, диффы, безопасный перенос)
-    gui_agent.py              GUI-суб-агент (скриншот→действие→скриншот)
-    inference.py              реестр v2-режимов Gemma 4 (moe-turbo/dense-hybrid)
-    cc_bridge.py              мост агент ↔ когнитивное ядро (RAG, эпизоды, объяснимость)
-    mcp_client.py             подключение MCP-серверов (доп. инструменты)
-  cognitive_core/             КОГНИТИВНОЕ ЯДРО (SQLite, см. раздел 6)
-    schema.sql db.py config.py models.py
-    ingest.py subagents.py executor.py maintenance.py
-    learning.py suspend.py recovery.py federation.py plugins.py parallel.py
-dashboard/                    Next.js 15 Command Center (4 вкладки + PWA)
-  components/ChatView.tsx CognitiveView.tsx ControlPanel.tsx
-             MonitorView.tsx StatusBar.tsx GpuMeter.tsx HitlGate.tsx
-docs/
-  cognitive_core_architecture.md   полная архитектура ядра
-  vram_matrix.md                   расчёт VRAM
+```powershell
+python jarvis.py up --profile gemma4-turbo --no-audio
 ```
 
----
+И затем аудио:
 
-## 6. Когнитивное ядро
-
-> **Важно (частый вопрос): переход на «БД-рельсы» НИЧЕГО не отнял у агента.**
-> Когнитивное ядро — это **надстройка**, а не замена. Весь прежний «мозг» на месте:
-> ReAct-цикл, все 26 инструментов, файловая память, журнал инцидентов, кузница
-> навыков, git-интеллект, персона. БД добавила СВЕРХУ персистентность, знания, RAG,
-> аудит, планы и самообучение. Агент ↔ ядро связаны через `cc_bridge.py`.
-
-Когнитивное ядро (`backend/cognitive_core/`, SQLite `./.jarvis_core/cognitive_core.db`)
-даёт то, чего у файлового агента не было:
-
-| Модуль | Что делает |
-|--------|-----------|
-| `db.py` + `schema.sql` | 14 таблиц: состояние, настройки/промпты, файлы, граф знаний, эпизоды, достижения, **аудит с откатом**, здоровье, планы, RBAC. Все блокирующие операции — вне event loop (ThreadPoolExecutor) |
-| `config.py` | Приоритет конфигурации: **БД перекрывает файлы** (флаг `is_active`) — настройки/промпты правятся из дашборда без рестарта |
-| `ingest.py` | **RAG:** загрузка файла → парсинг → чанки → эмбеддинг → векторный поиск. Провайдер эмбеддингов `local` (офлайн hashing-bag) или `vllm` (`/v1/embeddings`) с авто-fallback |
-| `subagents.py` | Суб-агенты Researcher/Coder/**Critic** + декомпозиция цели в план. Critic — двухслойный шлюз безопасности (детерминированные правила + опц. LLM) |
-| `executor.py` | **Автономный исполнитель планов:** волновой планировщик уважает `depends_on`, независимые задачи гонит параллельно, прогресс в `project_tasks` + эпизоды |
-| `maintenance.py` | Затухание/подкрепление памяти, консолидация, **пост-мортем** инцидентов, `sleep_cycle` |
-| `learning.py` + `suspend.py` | **Самообучение** (см. раздел 10) с zero-latency приостановкой при активности пользователя |
-| `recovery.py` | **Recovery-Agent:** по traceback/health определяет причину и чинит (apt/pip/restart) с HITL по `autonomy_level` |
-| `federation.py` | Обмен **анонимными** правилами между инстансами: экспорт с вырезанием PII, импорт через локальный Critic |
-| `plugins.py` | Горячие плагины-навыки с Critic-валидацией и HITL по danger |
-| `parallel.py` | Утилита ограниченного параллелизма (см. раздел 9) |
-
-Управление — вкладка «🧠 Разум» и REST `/api/cognitive/*` (раздел 12).
-
----
-
-## 7. Способности агента
-
-Агент (`orchestrator/`) работает **самокорректирующимся ReAct-циклом**: планирует
-действие → вызывает инструмент → анализирует наблюдение (traceback = телеметрия, а
-не тупик) → повторяет; для сложной цели включается **автономный режим** с
-план-чеклистом, повышенным потолком шагов и самопроверкой достижения цели.
-
-**26 встроенных инструментов** (+ любые MCP-серверы):
-
-- **Хост/ОС:** `windows` (гл. инструмент админа: exec/powershell, службы, реестр,
-  процессы, файлы, установка winget, `open_app`, `paste_text`, `send_keys`,
-  скриншот, питание), `shell` (Linux-sandbox), `run_code` (python/bash/cpp/c/js).
-- **Зрение и GUI:** `gui` (визуально довести задачу до конца), `see_screen`,
-  `screen_record`.
-- **Веб/данные:** `web_fetch`, `web_search`, `http_request`, `wikipedia`, `weather`,
-  `exchange_rate`, `translate`, `define`, `open_url`.
-- **Память:** `memory_save`, `memory_search`, `list_memory`.
-- **Навыки/git/утилиты:** `skill_compile`/`skill_list`/`skill_run`, `git_intel`,
-  `calculator`, `now`, `system_info`, `list_dir`, `log`.
-
-Опасные операции на хосте проходят **HITL-гейт** (подтверждение оператора).
-
----
-
-## 8. Дашборд
-
-Command Center на Next.js 15 (`http://localhost:3000`), **четыре вкладки** + всегда
-видимая телеметрия GPU/VRAM в топбаре:
-
-- **💬 Чат** — Telegram-подобный: текст + голос (ASR/TTS), живые шаги агента,
-  память, RAG-вложения файлов (drag-drop + превью), кнопка «почему?» (объяснимость
-  из эпизодов).
-- **🧠 Разум** — когнитивный поток: граф знаний, эпизоды, аудит с откатом, планы,
-  состояние самообучения, здоровье.
-- **🛠️ Пульт** — сервисы (start/stop/restart), GPU/VRAM, модели, **переключение
-  инференс-режимов/профилей**, LM Studio, редактор конфига, чистильщик Docker.
-- **🖥️ Мониторная** — живые логи всех контейнеров в одной сетке.
-
-**Телеметрия GPU/VRAM** (`GpuMeter`) — бары загрузки GPU и VRAM с цветом
-зелёный→янтарь→красный, температура, индикатор live/poll. Обновление в реальном
-времени через SSE (сервер сам пушит с каденцией семплера), с откатом на опрос.
-Источник — `nvidia-smi` на хосте через RPC-мост; фоновый семплер кэширует данные,
-поэтому частота обновления не грузит систему (`JARVIS_GPU_SAMPLE_MS`).
-
-**PWA** — мобильный компаньон с голосовым вводом и пушами.
-
----
-
-## 9. Параллелизм
-
-vLLM батчит одновременные запросы (continuous batching), поэтому JARVIS шлёт в «мозг»
-**независимую** работу в 2+ потока, а не строго по очереди. Клиент `llm.py` держит пул
-на 64 соединения; узким местом была клиентская сериализация — она убрана там, где это
-корректно, и сохранена в цепочке ReAct «мысль→действие→наблюдение» (она по природе
-последовательна).
-
-| Точка | Поведение | Потолок (env) |
-|-------|-----------|---------------|
-| Исполнитель планов | Волна независимых задач (deps=done) идёт параллельно | `JARVIS_PLAN_CONCURRENCY` (4) |
-| Эмбеддинг файлов | Все чанки эмбеддятся параллельно, запись в SQLite — последовательно | `JARVIS_EMBED_CONCURRENCY` (8) |
-| Федерация | Critic-ревью пачки правил параллельно (безопасность сохранена) | `JARVIS_FEDERATION_CONCURRENCY` (4) |
-| Старт хода агента | RAG-поиск и декомпозиция цели идут в два потока | — |
-| Сессии/запросы | Разные сессии исполняются конкурентно (пер-сессионные локи) | — |
-| vLLM (диспетчер) | Число одновременных последовательностей | `JARVIS_QWEN_MAX_NUM_SEQS` |
-
-Больше потолки → выше утилизация, но выше нагрузка на KV-кэш/VRAM. Дефолты безопасны.
-Утилита — `cognitive_core/parallel.py` (`bounded_map`, порядок результатов сохранён).
-
-### Почему в одиночном диалоге GPU не на 90%
-
-Это в основном НЕ баг. Обычный чат — это **batch=1**: авторегрессивный декодинг одной
-последовательности упирается в пропускную способность памяти, а не в вычислители;
-90% вы видите при батч-нагрузке (много параллельных запросов) — её создают
-исполнитель планов, суб-агенты и несколько сессий, но не один диалог.
-
-Но один конфиг-фактор реально ест скорость: **`--enforce-eager`** выключает
-CUDA-графы, и в eager каждый мелкий kernel запускается Python'ом отдельно — при
-batch=1 GPU заметную долю времени ЖДЁТ CPU (полевой замер: 35–40% утилизации).
-
-**Профиль `moe-turbo` теперь включает CUDA-графы сам** (`JARVIS_QWEN_ENFORCE_EAGER`
-пуст, util 0.85→0.80 ради запаса VRAM на захват, `--max-num-batched-tokens 8192`
-для быстрого префилла). Первый старт дольше (torch.compile), но кэш компиляции
-лежит на томе `jarvis-vllm-cache` — это одноразовая плата. Применить:
-`python jarvis.py up --profile moe-turbo`.
-
-Откат (если vLLM падает на захвате графов — sm_120 свежая архитектура):
-```bash
-# wsl/.env
-JARVIS_QWEN_ENFORCE_EAGER=--enforce-eager
-```
-`dense-hybrid` остаётся в eager намеренно: захват графов поверх `--cpu-offload-gb`
-(DMA весов из host-RAM) — рискованная связка.
-
----
-
-## 10. Режим самообучения
-
-**Lifelong Learning** (`learning.py`) — фоновый цикл, который **в простое** сам гоняет
-`sleep_cycle`: пост-мортем разбор инцидентов + консолидация памяти (затухание слабого,
-подкрепление полезного). При активности пользователя цикл **мгновенно приостанавливается**
-(zero-latency suspend: чекпоинт + освобождение VRAM/KV под ваш запрос) и возобновляется
-после.
-
-- **По умолчанию ВЫКЛЮЧЕН.** Включение — в `wsl/.env`:
-  ```bash
-  JARVIS_LIFELONG_LEARNING=1
-  JARVIS_LEARNING_PAUSE=30      # пауза между итерациями, сек
-  ```
-  затем `python jarvis.py up` (или пересоздать backend). В логах ядра:
-  `Lifelong Learning: фоновый цикл запущен`.
-- Статус — вкладка «🧠 Разум» и `GET /api/core/api/cognitive/state`.
-- Включайте, если хотите дообучение в фоне между сессиями; оставьте `0` для чисто
-  реактивного ассистента.
-
----
-
-## 11. Справочник по конфигурации
-
-Все переменные живут в `wsl/.env` (генерируется, правится из Пульта или руками).
-Ниже — ключевые группы.
-
-### Модели и vLLM (диспетчер)
-| Переменная | Назначение | Пример |
-|-----------|-----------|--------|
-| `JARVIS_QWEN_MODEL_PATH` | Путь к модели диспетчера в контейнере | `/models/gemma4-26b-a4b-nvfp4` |
-| `JARVIS_QWEN_QUANT_ARGS` | Аргумент квантования (пусто = авто из конфига) | `--quantization modelopt` |
-| `JARVIS_QWEN_DTYPE` | Тип данных | `auto` / `half` |
-| `JARVIS_QWEN_GPU_UTIL` | Доля VRAM устройства под инстанс | `0.85` |
-| `JARVIS_QWEN_MAX_LEN` | Контекстное окно | `32768` |
-| `JARVIS_QWEN_KV_DTYPE` | Тип KV-кэша | `fp8` / `auto` |
-| `JARVIS_QWEN_MAX_NUM_SEQS` | Одновременных последовательностей в батче | `16` |
-| `JARVIS_QWEN_EXTRA_ARGS` | Доп. флаги vLLM (**без** `--max-num-seqs`!) | `--trust-remote-code --cpu-offload-gb 8` |
-| `JARVIS_QWEN_ENFORCE_EAGER` | Пусто = включить CUDA-графы (быстрее, больше VRAM) | `--enforce-eager` |
-| `JARVIS_VLLM_IMAGE` | Тег образа vLLM (обновление движка без правки compose) | `vllm/vllm-openai:nightly` |
-
-Аналогичный набор `JARVIS_UITARS_*` — для GUI-модели. Модель зрения переключается
-через `JARVIS_VISION_URL` / `JARVIS_VISION_MODEL`.
-
-### Подсистемы
-| Переменная | Назначение | По умолчанию |
-|-----------|-----------|--------------|
-| `JARVIS_ENABLE_UITARS` | Поднимать ли UI-TARS (0 в СОЛО-режимах) | `1` |
-| `JARVIS_ENABLE_AUDIO` | Поднимать ли аудио-слой (0 = `--no-audio`) | `1` |
-| `JARVIS_LLM_RETRIES` | Ретраи неблокирующих LLM-вызовов | `3` |
-
-### Когнитивное ядро
-| Переменная | Назначение | По умолчанию |
-|-----------|-----------|--------------|
-| `JARVIS_DB_PATH` / `JARVIS_CORE_DIR` | Путь к БД / каталогу ядра | `./.jarvis_core/…` |
-| `JARVIS_LIFELONG_LEARNING` | Самообучение вкл/выкл | `0` |
-| `JARVIS_LEARNING_PAUSE` | Пауза цикла обучения, сек | `30` |
-| `JARVIS_EMBED_PROVIDER` | Провайдер эмбеддингов | `local` / `vllm` |
-| `JARVIS_EMBED_URL` / `JARVIS_EMBED_MODEL` | Эндпоинт/имя модели эмбеддингов (для `vllm`) | — |
-
-### Производительность (параллелизм и телеметрия)
-| Переменная | Назначение | По умолчанию |
-|-----------|-----------|--------------|
-| `JARVIS_PLAN_CONCURRENCY` | Задач плана в волне | `4` |
-| `JARVIS_EMBED_CONCURRENCY` | Эмбеддинг-запросов разом | `8` |
-| `JARVIS_FEDERATION_CONCURRENCY` | Critic-ревью импорта разом | `4` |
-| `JARVIS_GPU_SAMPLE_MS` | Каденция опроса nvidia-smi для телеметрии, мс (пол 500) | `1500` |
-
----
-
-## 12. REST/WS API
-
-Дашборд ходит в ядро через прокси Next.js: `/api/core/<путь>` → `backend/<путь>`.
-
-**Ядро (`backend/server.py`):**
-`GET /health` · `GET /status` · `GET /api/gpu` (кэш телеметрии) ·
-`GET /api/gpu/stream` (SSE) · `POST /task` · `GET|POST /api/agent/memory` ·
-`GET /api/agent/{mcp,incidents,skills}` · `/api/control/*` (сервисы, GPU, модели,
-профили, инференс-режимы, чистильщик) · WS `/ws/{chat,deploy,audio,desktop,hitl}`.
-
-**Когнитивное ядро (`backend/cognitive_api.py`, `/api/cognitive/*`):**
-`settings` · `graph` (CRUD + версии) · `audit` + `rollback` · `db` (браузер таблиц) ·
-`state` · `health` · WS `stream` · `files/upload` + `list` + `delete` ·
-`rag/search` + `reembed` · `critic/review` · `knowledge/commit` ·
-`plans/decompose` + `{id}/run` + `tasks` · `maintenance/{sleep-cycle,recall,reinforce,post-mortem}` ·
-`recovery/{diagnose,apply,report}` · `federation/{export,import}`.
-
----
-
-## 13. Безопасность
-
-- **HITL-гейт.** Деструктивные операции на хосте (rm/rmdir, форматирование, питание,
-  реестр) требуют явного подтверждения оператора через `/ws/hitl`. Автономность
-  регулируется `autonomy_level` пользователя vs `danger_level` операции.
-- **Critic — жёсткий предохранитель.** Двухслойный (детерминированные правила +
-  опц. LLM) блокирует катастрофу **безусловно**: `rm -rf /`, `mkfs`, `dd of=/dev/*`,
-  fork-бомбы, `curl|bash`, `shutdown`, `reg delete HKLM` и др. Ни один навык/правило
-  не попадает в граф знаний как активный без прохождения Critic.
-- **Федерация анонимна.** Экспорт вырезает PII (IP, e-mail, пути, токены, хосты);
-  импортированные правила недоверенны по умолчанию — проходят локальный Critic и при
-  блокировке сохраняются как `rejected`, не активируясь.
-- **RPC-мост** — токен-хендшейк, изоляция; агент не может сам выставить флаг
-  «уже подтверждено».
-- **Аудит с откатом** — каждое изменение графа/настроек пишется со снимком
-  before/after и откатывается (`/api/cognitive/audit/rollback`).
-
-Система выполняет привилегированные операции на хосте. Используйте на своей машине,
-осознанно, и держите RPC-мост доступным только локально.
-
----
-
-## 14. Диагностика
-
-**Первый шаг при любом сбое:**
-```bash
-python jarvis.py diag       # статус, рестарты, код выхода + хвост логов проблемных
+```powershell
+python jarvis.py up --profile gemma4-turbo
 ```
 
-| Симптом | Причина / решение |
-|---------|-------------------|
-| **Мозги не стартуют**, `Engine core initialization failed` | Настоящая причина печатается в логе vLLM **до** финального traceback. `python jarvis.py diag` сам сохранит полный лог и назовёт причину. Частые: неполная докачка весов; нехватка VRAM; несовместимая версия vLLM |
-| `NotImplementedError` в `tie_weights` (Gemma 4 + NVFP4) | Сборка vLLM в образе не умеет tied-эмбеддинги для NVFP4/modelopt. **Обновите движок:** `JARVIS_VLLM_IMAGE=vllm/vllm-openai:nightly` в `wsl/.env` → `docker pull vllm/vllm-openai:nightly` → `python jarvis.py up`. Обход: в `JARVIS_QWEN_EXTRA_ARGS` добавить `--hf-overrides {"tie_word_embeddings":false}` (если чекпойнт содержит отдельный `lm_head`). Внимание: `dense-hybrid` (тоже Gemma 4) упрётся в то же — лечится так же |
-| `Found duplicate keys --max-num-seqs` | Исправлено: флаг идёт одним каналом (`JARVIS_QWEN_MAX_NUM_SEQS`). Пере-примените профиль: `python jarvis.py up --profile moe-turbo` (перезапишет стар. `.env`) |
-| `CUDA out of memory` / OOM-цикл | `python jarvis.py freevram`, снизьте `GPU_UTIL`/`MAX_LEN`, или `--no-audio`; в СОЛО-режимах убедитесь `JARVIS_ENABLE_UITARS=0` |
-| Docker/WSL падает (`0x800703e3`) | Лаунчер сам глушит нестабильную WSL-интеграцию Docker Desktop. Разово: `python jarvis.py up` (лечит и рестартит) |
-| `ECONNREFUSED 127.0.0.1:8000` | Ядро ещё не поднялось или упало — `python jarvis.py diag`, смотрите логи backend |
-| `unexpected character "\x00" in variable name` (docker compose) | `wsl/.env` испорчен UTF-16 (PowerShell `>>`/`Add-Content` пишет UTF-16!). `python jarvis.py up` теперь чинит его сам (UTF-8/LF). Правьте `.env` только в UTF-8 или через редактор в Пульте |
-| Аудио мешает старту (нет libsndfile/espeak/PortAudio) | `python jarvis.py up --no-audio` |
-| GPU-метрика показывает «GPU —» | Телеметрия идёт через RPC-мост (`nvidia-smi` на хосте). Если мост поднят, а метрика пустая — посмотрите сырой ответ: `curl http://127.0.0.1:8000/api/gpu` (поле `raw`/`error`). Метрика устойчива к ненулевому коду возврата nvidia-smi (неподдержанные поля). Нет моста → `python jarvis.py bridge` |
+## Активные профили
 
-**Recovery-Agent** внутри ядра умеет диагностировать типовые сбои автоматически и
-предлагать/применять починку с HITL: `POST /api/cognitive/recovery/diagnose`.
+В `wsl/profiles.json` оставлены только два профиля:
 
----
+| Profile | Назначение |
+|---|---|
+| `gemma4-mono` | стабильный cold-start, eager mode, диагностика и baseline |
+| `gemma4-turbo` | максимальная скорость, CUDA graphs, прогретый runtime |
 
-*JARVIS-OS — референс-каркас production-уровня. Перед боевым использованием проверьте
-каждый компонент в своём окружении и изучите раздел «Безопасность».*
+Оба профиля используют одну мультимодальную Gemma 4 как единый dispatcher для
+диалога, кода, vision reasoning, GUI intent и agent orchestration. Отдельный
+GUI-движок больше не является частью активного runtime.
+
+## Основные команды
+
+```powershell
+python jarvis.py profiles
+python jarvis.py up --profile gemma4-mono --no-audio
+python jarvis.py up --profile gemma4-turbo --no-audio
+python jarvis.py status
+python jarvis.py diag
+python jarvis.py freevram
+python jarvis.py stop
+```
+
+Проверка без запуска vLLM:
+
+```powershell
+python scripts/smoke_check.py
+```
+
+## Архитектура
+
+```text
+Windows host
+  └─ windows_rpc_bridge.py  token RPC, HITL, native host operations
+
+Docker / WSL2
+  ├─ backend/server.py      FastAPI, WS, GPU telemetry, cognitive API
+  ├─ orchestrator/          Core JARVIS, ReAct tools, missions, self-heal
+  ├─ cognitive_core/        SQLite WAL, RAG, plans, audit, learning
+  ├─ vLLM dispatcher        Gemma 4, OpenAI-compatible API on :8001
+  ├─ audio-layer            optional ASR/TTS on :8003
+  └─ sandbox                isolated code execution
+
+Dashboard :3000
+  ├─ Chat
+  ├─ Cognitive/RAG
+  ├─ Agent Operations Center
+  ├─ Control Panel
+  └─ Monitor
+```
+
+## Core principles
+
+- **Core identity first:** пользователь всегда общается с JARVIS; роли работают за кулисами.
+- **Mission autonomy:** большие цели превращаются в durable project plans.
+- **Native-first host control:** WMI/CIM, Win32 HWND и UI Automation до CLI fallback.
+- **Observable autonomy:** runtime, MCP, cluster, GPU, missions и incidents видны в `🧭 Операции`.
+- **Self-heal with guardrails:** диагностика и patch candidates автоматически, merge/apply — по политике.
+- **Lifelong learning:** resolved incidents превращаются в проверенные knowledge patterns.
+- **Gemma-only runtime:** активные профили используют Gemma 4 dispatcher.
+
+## Mission autonomy
+
+В чате можно просить:
+
+```text
+JARVIS, оформи это как mission plan: <цель>
+JARVIS, выполни следующий runnable шаг mission
+JARVIS, покажи mission status
+JARVIS, сделай learning_tick по результату
+```
+
+Инструмент `mission` поддерживает:
+
+```text
+plan          создать project plan
+execute       выполнить следующую runnable-задачу
+status        показать планы и задачи
+run_role      вызвать Researcher/Coder/Critic
+learning_tick выполнить одну итерацию обучения
+```
+
+## Self-heal
+
+Безопасный режим:
+
+```env
+JARVIS_SELF_HEAL_ENABLE=1
+JARVIS_SELF_HEAL_APPLY_PATCH=0
+JARVIS_REPO_PATH=.
+```
+
+JARVIS сканирует логи, классифицирует аномалии, создаёт staging branch,
+генерирует `.diff`, запускает `git apply --check`, `compileall` и compose config,
+пишет report/candidate в `data/jarvis_core/self_heal/` и возвращает worktree на
+исходную ветку.
+
+Применение diff внутри staging branch включается отдельно:
+
+```env
+JARVIS_SELF_HEAL_APPLY_PATCH=1
+```
+
+## Lifelong learning
+
+```env
+JARVIS_LIFELONG_LEARNING=1
+JARVIS_LEARNING_MINE_INCIDENTS=1
+```
+
+В простое система создаёт sysadmin/assistant правила и превращает resolved
+incidents в schema-compatible `pattern` узлы cognitive graph с тегом
+`incident_recipe` после Critic-gate.
+
+## LAN / Mesh cluster
+
+```env
+JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001/v1","model":"dispatcher","role":"coder","transport":"lan","weight":2}]
+```
+
+Sub-agent role briefs могут уходить на worker-ноды. Это agent-level offload, не
+model/tensor splitting.
+
+## Документация
+
+- [`docs/launch_main_runtime.md`](docs/launch_main_runtime.md) — запуск и режимы.
+- [`docs/performance.md`](docs/performance.md) — производительность Gemma 4 runtime.
+- [`wsl/profiles.json`](wsl/profiles.json) — два активных профиля.
+
+## Проверка после запуска
+
+```powershell
+python jarvis.py status
+python jarvis.py diag
+```
+
+В dashboard проверь вкладку:
+
+```text
+🧭 Операции
+```
