@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 type AnyJson = Record<string, unknown>;
 
@@ -12,7 +12,7 @@ async function getJson(path: string): Promise<AnyJson> {
   return await r.json();
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({ title, children }: { title: string; children: ReactNode }) {
   return <div className="panel" style={{ padding: 14, minHeight: 120 }}><h3 style={{ marginTop: 0 }}>{title}</h3>{children}</div>;
 }
 
