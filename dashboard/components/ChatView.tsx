@@ -9,14 +9,24 @@ const LS_CHATS = "jarvis_chats";
 const TARGET_SR = 16000;
 
 const ACTORS: Record<string, { icon: string; name: string }> = {
-  dispatcher: { icon: "🧠", name: "Диспетчер" }, researcher: { icon: "🔎", name: "Researcher" },
+  dispatcher: { icon: "🧠", name: "Core" }, researcher: { icon: "🔎", name: "Researcher" },
   coder: { icon: "🧑‍💻", name: "Coder" }, sysadmin: { icon: "🛠️", name: "SysAdmin" },
-  critic: { icon: "🛡️", name: "Critic" }, "ui-tars": { icon: "👁️", name: "UI-TARS" },
-  sandbox: { icon: "📦", name: "Sandbox" }, host: { icon: "🪟", name: "Хост" },
-  web: { icon: "🌐", name: "Веб" }, memory: { icon: "💾", name: "Память" },
-  local: { icon: "⚡", name: "Локально" }, mcp: { icon: "🧩", name: "MCP" },
+  critic: { icon: "🛡️", name: "Critic" }, "ui-tars": { icon: "👁️", name: "Vision" },
+  sandbox: { icon: "📦", name: "Sandbox" }, host: { icon: "🪟", name: "Host" },
+  web: { icon: "🌐", name: "Web" }, memory: { icon: "💾", name: "Memory" },
+  local: { icon: "⚡", name: "Local" }, mcp: { icon: "🧩", name: "MCP" }, mission: { icon: "🧭", name: "Mission" },
 };
 const actorInfo = (a?: string) => ACTORS[a || ""] || { icon: "•", name: a || "" };
+
+const SUGGESTIONS = [
+  "Оформи это как mission plan: ",
+  "Проведи диагностику JARVIS и предложи улучшения",
+  "Сделай self-heal check и объясни результат",
+  "Разложи задачу на шаги, риски и план реализации",
+  "Проверь систему через native Windows tools",
+];
+
+const uid = () => Math.random().toString(36).slice(2, 10);
 
 type StepKind = "thought" | "tool_call" | "tool_result";
 interface Step { kind: StepKind; text: string; tool?: string; ok?: boolean; actor?: string }
@@ -27,12 +37,12 @@ interface MemoryItem { id: string; kind: string; text: string; tags: string[] }
 interface MemoryOverview { summary: string; recent_count: number; longterm: MemoryItem[]; longterm_count: number; incidents?: unknown[]; skills?: unknown[] }
 interface WhyItem { content: string; entry_type: string }
 
-const uid = () => Math.random().toString(36).slice(2, 10);
 const cleanMsg = (m: Partial<ChatMessage>): ChatMessage => ({
   id: String(m.id || uid()), role: m.role === "user" ? "user" : "assistant",
   text: String(m.text || ""), replyTo: m.replyTo ? String(m.replyTo) : undefined,
   steps: [], streaming: false, error: Boolean(m.error),
 });
+
 function loadTabs(): { tabs: Tab[]; chats: Record<string, ChatMessage[]> } {
   if (typeof window === "undefined") return { tabs: [], chats: {} };
   try {
@@ -101,13 +111,16 @@ export default function ChatView() {
     for (const [id, sid] of Object.entries(msgToSession.current)) if (sid === session) delete msgToSession.current[id];
     bump(session);
   }, []);
+
   const upsert = useCallback((session: string, id: string, mut: (m: ChatMessage) => void) => {
     if (!id) return;
     setChats((p) => {
       const list = [...(p[session] || [])];
       let i = list.findIndex((m) => m.role === "assistant" && m.replyTo === id);
       if (i === -1) { list.push({ id: uid(), role: "assistant", text: "", replyTo: id, steps: [], streaming: true }); i = list.length - 1; }
-      const copy = { ...list[i], steps: [...list[i].steps] }; mut(copy); list[i] = copy;
+      const copy = { ...list[i], steps: [...list[i].steps] };
+      mut(copy);
+      list[i] = copy;
       return { ...p, [session]: list };
     });
   }, []);
@@ -157,6 +170,7 @@ export default function ChatView() {
   const closeTab = (id: string) => { setTabs((t) => { const left = t.filter((x) => x.id !== id); if (!left.length) { setActive("default"); return [{ id: "default", title: "Чат 1" }]; } if (active === id) setActive(left[0].id); return left; }); setChats((c) => { const n = { ...c }; delete n[id]; return n; }); clearUI(id, "reset"); chatRef.current?.sendJson({ type: "reset_context", session: id }); };
   const send = () => { const text = input.trim(); if (!text || workingSessions.includes(active)) return; const id = uid(); msgToSession.current[id] = active; workingIds.current[active] = id; setWorking(active, true); setChats((p) => ({ ...p, [active]: [...(p[active] || []), { id, role: "user", text, steps: [] }] })); chatRef.current?.sendJson({ type: "user_message", text, id, session: active }); setInput(""); setAttachments((a) => a.filter((x) => x.status === "uploading")); };
   const cancel = () => { chatRef.current?.sendJson({ type: "cancel", session: active, id: workingIds.current[active] || "" }); setWorking(active, false); clearUI(active, "flush"); };
+  const prime = (text: string) => { setInput(text); setTimeout(() => document.querySelector<HTMLTextAreaElement>(".chat-input textarea")?.focus(), 0); };
 
   const uploadFile = (file: File) => {
     const id = uid(); setAttachments((a) => [...a, { id, name: file.name, size: file.size, status: "uploading", percent: 0 }]);
@@ -169,6 +183,7 @@ export default function ChatView() {
   };
   const dismissAttach = (a: Attach) => { setAttachments((list) => list.filter((x) => x.id !== a.id)); if (a.fileId) fetch(`${COG}/files/${a.fileId}`, { method: "DELETE" }).catch(() => {}); };
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); setDragOver(false); Array.from(e.dataTransfer.files || []).forEach(uploadFile); };
+
   const startMic = async () => { setMicError(""); try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); micStreamRef.current = stream; const ctx = new AudioContext({ sampleRate: 48000 }); micCtxRef.current = ctx; const src = ctx.createMediaStreamSource(stream); const proc = ctx.createScriptProcessor(4096, 1, 1); micProcRef.current = proc; proc.onaudioprocess = (e) => { const inp = e.inputBuffer.getChannelData(0); let sum = 0; for (let i = 0; i < inp.length; i++) sum += inp[i] * inp[i]; setLevel(Math.min(1, Math.sqrt(sum / inp.length) * 4)); audioRef.current?.sendBinary(downsampleToPcm16(inp, ctx.sampleRate, TARGET_SR).buffer as ArrayBuffer); }; src.connect(proc); proc.connect(ctx.destination); setListening(true); } catch { setListening(false); setMicError("Не удалось включить микрофон. Разрешите доступ в браузере."); } };
   const stopMic = () => { micProcRef.current?.disconnect(); micStreamRef.current?.getTracks().forEach((t) => t.stop()); micCtxRef.current?.close().catch(() => {}); micProcRef.current = null; micStreamRef.current = null; setListening(false); setLevel(0); audioRef.current?.sendJson({ type: "end_utterance" }); };
   const playTtsChunk = (buf: ArrayBuffer) => { if (!playCtxRef.current) { playCtxRef.current = new AudioContext({ sampleRate: TARGET_SR }); playTimeRef.current = playCtxRef.current.currentTime; } const ctx = playCtxRef.current; let pcm = new Int16Array(buf); const head = new Uint8Array(buf.slice(0, 4)); if (head[0] === 0x52 && head[1] === 0x49) pcm = new Int16Array(buf.slice(44)); if (!pcm.length) return; const f32 = new Float32Array(pcm.length); for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768; const ab = ctx.createBuffer(1, f32.length, TARGET_SR); ab.getChannelData(0).set(f32); const src = ctx.createBufferSource(); src.buffer = ab; src.connect(ctx.destination); const start = Math.max(ctx.currentTime, playTimeRef.current); src.start(start); playTimeRef.current = start + ab.duration; };
@@ -179,18 +194,37 @@ export default function ChatView() {
   const activeWorking = workingSessions.includes(active);
   const activeActor = actorBySession[active] || "";
   const activeEpoch = epoch[active] || 0;
+  const ready = conn === "open";
+
   return (
     <div className={`chat-wrap ${dragOver ? "drag-over" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }} onDrop={onDrop}>
-      {dragOver && <div className="drop-overlay"><div className="drop-hint">📎 Отпустите файлы — прикреплю к диалогу (RAG)</div></div>}
-      <div className="chat-head panel"><span className={`status-dot ${conn === "open" ? "ok" : "warn"}`} /><strong>JARVIS</strong>{activeWorking && activeActor ? <span className={`actor-badge actor-${activeActor}`}><span className="actor-spin" /> Работает: {actorInfo(activeActor).icon} {actorInfo(activeActor).name}</span> : <span style={{ fontSize: 12, color: "var(--muted)" }}>голос, код, веб, управление ПК · контекст и «почему» синхронизированы</span>}<div style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className={`btn ${speak ? "primary" : ""}`} onClick={() => setSpeak((v) => !v)} title="Озвучивать ответы (TTS)">🔊</button><button className="btn" onClick={() => setMemOpen(true)} title="Память">🧠 Память</button></div></div>
+      {dragOver && <div className="drop-overlay"><div className="drop-hint">📎 Отпустите файлы — подключу к памяти диалога</div></div>}
+      <div className="jarvis-hero panel">
+        <div className={`jarvis-orb ${activeWorking ? "thinking" : ""}`}><span /></div>
+        <div className="jarvis-hero-copy">
+          <div className="eyebrow">JARVIS CORE · GEMMA 4</div>
+          <h2>{activeWorking ? "Выполняю задачу, сэр." : "Готов к работе."}</h2>
+          <p>{activeWorking && activeActor ? `Сейчас активен ${actorInfo(activeActor).name}. Я сохраню контекст, проверю риски и верну аккуратный результат.` : "Сформулируйте цель обычными словами — я превращу её в план, инструменты и проверяемый результат."}</p>
+        </div>
+        <div className="jarvis-hero-actions">
+          <span className={`pill ${ready ? "ok" : "warn"}`}>{ready ? "online" : "connecting"}</span>
+          <button className={`btn ${speak ? "primary" : ""}`} onClick={() => setSpeak((v) => !v)} title="Озвучивать ответы">🔊 Voice</button>
+          <button className="btn" onClick={() => setMemOpen(true)} title="Память">🧠 Memory</button>
+        </div>
+      </div>
       <div className="tab-bar">{tabs.map((t) => <div key={t.id} className={`tab ${t.id === active ? "active" : ""}`} onClick={() => setActive(t.id)}><span className="tab-title">{t.title}{workingSessions.includes(t.id) ? " •" : ""}</span><span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }} title="Закрыть диалог">×</span></div>)}<button className="tab-new" onClick={newTab} title="Новый диалог">＋</button></div>
-      <div className="chat-feed">{messages.length === 0 && <div className="chat-hello"><p>Привет! Я JARVIS. Спросите что угодно:</p><ul><li>«Какая погода завтра в Москве?»</li><li>«Открой блокнот и напиши hello world на C++»</li><li>«Спарси заголовки с example.com»</li><li>«Открой страницу с погодой в браузере»</li></ul><p style={{ color: "var(--muted)" }}>Можно голосом — 🎤. Новый диалог — вкладка ＋.</p></div>}{messages.map((m) => <MessageBubble key={`${m.id}:${activeEpoch}`} m={m} session={active} epoch={activeEpoch} />)}<div ref={bottomRef} /></div>
+      <div className="chat-feed">{messages.length === 0 && <EmptyState onPick={prime} />}{messages.map((m) => <MessageBubble key={`${m.id}:${activeEpoch}`} m={m} session={active} epoch={activeEpoch} />)}<div ref={bottomRef} /></div>
       {attachments.length > 0 && <div className="attach-row">{attachments.map((a) => <div key={a.id} className={`attach-card ${a.status}`} title={a.error || a.name}><span className="attach-icon">{a.status === "uploading" ? "⏳" : a.status === "ready" ? "📄" : "⚠"}</span><span className="attach-name">{a.name}</span>{a.status === "uploading" && <span className="attach-bar"><span className="attach-fill" style={{ width: `${a.percent}%` }} /></span>}{a.status === "ready" && <span className="attach-meta">✓ {a.chunks ?? 0} фрагм.</span>}{a.status === "failed" && <span className="attach-meta err">ошибка</span>}<button className="attach-x" onClick={() => dismissAttach(a)} title="Убрать">×</button></div>)}</div>}
       {micError && <div className="mic-error">⚠ {micError}</div>}
-      <div className={`chat-input panel ${listening ? "recording" : ""}`}><input ref={fileInputRef} type="file" multiple style={{ display: "none" }} onChange={(e) => { Array.from(e.target.files || []).forEach(uploadFile); e.target.value = ""; }} /><button className="btn attach-btn" onClick={() => fileInputRef.current?.click()} title="Прикрепить файл">＋</button><button className={`btn mic ${listening ? "recording" : ""}`} onClick={() => (listening ? stopMic() : startMic())}>{listening ? "⏹" : "🎤"}</button>{listening ? <div className="rec-banner"><span className="rec-dot" /><span className="rec-text">Идёт запись — говорите… Нажмите ⏹, чтобы остановить.</span><div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div></div> : <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Сообщение JARVIS…  (или 🎤 для голоса)" rows={1} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />}{activeWorking ? <button className="btn danger send" onClick={cancel}>⏹</button> : <button className="btn primary send" onClick={send} disabled={listening}>➤</button>}</div>
+      <div className="prompt-strip">{SUGGESTIONS.map((s) => <button key={s} className="prompt-chip" onClick={() => prime(s)}>{s.replace(": ", "")}</button>)}</div>
+      <div className={`chat-input panel ${listening ? "recording" : ""}`}><input ref={fileInputRef} type="file" multiple style={{ display: "none" }} onChange={(e) => { Array.from(e.target.files || []).forEach(uploadFile); e.target.value = ""; }} /><button className="btn attach-btn" onClick={() => fileInputRef.current?.click()} title="Прикрепить файл">＋</button><button className={`btn mic ${listening ? "recording" : ""}`} onClick={() => (listening ? stopMic() : startMic())}>{listening ? "⏹" : "🎤"}</button>{listening ? <div className="rec-banner"><span className="rec-dot" /><span className="rec-text">Слушаю. Говорите спокойно — я соберу мысль в задачу.</span><div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div></div> : <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Сообщение JARVIS… например: оформи это как mission plan" rows={1} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />}{activeWorking ? <button className="btn danger send" onClick={cancel}>⏹</button> : <button className="btn primary send" onClick={send} disabled={listening}>➤</button>}</div>
       {memOpen && <MemoryPanel mem={mem} session={active} onClose={() => setMemOpen(false)} onAction={memAction} />}
     </div>
   );
+}
+
+function EmptyState({ onPick }: { onPick: (s: string) => void }) {
+  return <div className="chat-hello cinematic"><div className="hello-orb"><span /></div><div className="eyebrow">Премиальный режим ассистента</div><h2>Что строим сегодня?</h2><p>Можно дать цель целиком: я разложу её на mission plan, подключу роли, проверю риски и сохраню полезные выводы в память.</p><div className="hello-grid">{SUGGESTIONS.slice(0, 4).map((s) => <button key={s} className="hello-card" onClick={() => onPick(s)}>{s}</button>)}</div><p className="hello-foot">Файлы можно просто перетащить сюда — подключу их к RAG-контексту.</p></div>;
 }
 
 function MessageBubble({ m, session, epoch }: { m: ChatMessage; session: string; epoch: number }) {
