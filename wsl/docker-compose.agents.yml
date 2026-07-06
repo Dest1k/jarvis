@@ -1,17 +1,5 @@
 # =============================================================================
 #  docker-compose.agents.yml — контейнеризованный стек JARVIS-OS.
-#
-#  Сервисы:
-#    vllm-qwen-coder : Qwen2.5-Coder-14B-Instruct-AWQ  (диспетчер + кодер)  ~14.4 ГБ
-#    vllm-ui-tars    : UI-TARS-2B-SFT                   (контроллер GUI/ОС)  ~6.4 ГБ
-#    audio-layer     : Faster-Whisper Large-v3 + Kokoro (ASR + TTS)          ~2 ГБ
-#    sandbox         : изолированная среда исполнения кода кодер-агента
-#    backend         : FastAPI-ядро (server.py)
-#
-#  ТОЧНЫЙ бюджет VRAM на RTX 5090 (32 GiB): Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0
-#  = 22.8 GiB → резерв ~9.2 GiB (рабочий стол Windows, драйвер). Доли gpu_util —
-#  от ПОЛНОЙ памяти; инстансы vLLM поднимаются последовательно, каждый держит
-#  свою долю под (веса + overhead + KV-кэш). Расчёт — в bootstrap_installer.py.
 # =============================================================================
 
 x-gpu-reservation: &gpu-all
@@ -24,29 +12,23 @@ x-gpu-reservation: &gpu-all
             capabilities: [gpu]
 
 x-vllm-base: &vllm-base
-  # Тег образа vLLM вынесен в env, чтобы обновлять движок БЕЗ правки файла:
-  # напр. JARVIS_VLLM_IMAGE=vllm/vllm-openai:nightly. Это важно для новейших
-  # форматов (NVFP4 Gemma 4 с tied-эмбеддингами): в старых сборках движок падает
-  # на tie_weights → NotImplementedError, свежий образ это уже умеет.
   image: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
   restart: unless-stopped
-  ipc: host                      # vLLM требует большой /dev/shm
-  # Веса моделей — в EXT4 Docker-томе (jarvis-models), а НЕ в Windows bind-mount:
-  # bind-mount монтируется как 9P, и mmap safetensors по 9P крашит vLLM при
-  # загрузке. Том наполняет bootstrap (копирует из data/models). Том физически
-  # на D: (диск Docker перенесён на D:\jarvis\docker). Кэш HF остаётся bind'ом.
+  ipc: host
   volumes:
     - jarvis-models:/models
     - jarvis-hf:/root/.cache/huggingface
-    # Кэш torch.compile/CUDA-графов vLLM: без тома компиляция (~минуты) повторялась
-    # бы при КАЖДОМ пересоздании контейнера; с томом — одноразовая.
     - jarvis-vllm-cache:/root/.cache/vllm
   environment:
     - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
     - NVIDIA_VISIBLE_DEVICES=0
-    # Модель — локальная (/models/...). OFFLINE: transformers НЕ должен дёргать
-    # HuggingFace Hub и трактовать локальный путь как repo-id (это и роняло vLLM).
+    # CUDA/UVA hardening for WSL2/Docker/Blackwell: hide non-NVIDIA/iGPU paths
+    # and disable peer-to-peer paths that can trigger `RuntimeError: UVA is not available`.
+    - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    - CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
+    - CUDA_DISABLE_P2P=${CUDA_DISABLE_P2P:-1}
+    - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
     - HF_HUB_OFFLINE=1
     - TRANSFORMERS_OFFLINE=1
     - HF_HUB_ENABLE_HF_TRANSFER=0
@@ -54,30 +36,9 @@ x-vllm-base: &vllm-base
   <<: *gpu-all
 
 services:
-  # ---------------------------------------------------------------------------
-  # 1. Диспетчер + Кодер-агент — Qwen2.5-Coder-14B (Int4 AWQ), ~14.4 ГБ VRAM
-  #    util 0.45 → 14.4 ГБ: веса 9.38 + overhead 0.43 + KV 4.59 (для 16384 нужно
-  #    ровно 3.00 ГБ → есть запас 1.6 ГБ). KV/токен = 192 KiB (48 слоёв, 8 KV-голов).
-  # ---------------------------------------------------------------------------
   vllm-qwen-coder:
     <<: *vllm-base
     container_name: jarvis-vllm-qwen
-    # Модель берётся из ЛОКАЛЬНОГО пути /models/qwen-coder (его наполняет
-    # hf_downloader на хосте). Контейнер ничего не качает на старте.
-    # --enforce-eager: пропустить torch.compile/CUDA-graph capture → старт с
-    # ~10+ мин до ~1-2 мин, меньше VRAM, обход возможных проблем компиляции под
-    # Blackwell (sm_120). Цена — инференс на ~10-15% медленнее.
-    # Квантование/тип данных — через env, чтобы можно было заменить «мозг»
-    # (диспетчер) на другую модель из Пульта: AWQ-модель оставляет дефолт,
-    # FP16-модель (например Gemma) задаёт JARVIS_QWEN_QUANT_ARGS="" (пусто) —
-    # тогда vLLM определит квантование сам/работает в fp16. Пустое значение
-    # допустимо за счёт ${VAR-default} (без двоеточия): default только если UNSET.
-    # ОПТИМИЗАЦИИ:
-    #  --enable-prefix-caching: переиспользует KV одинаковых префиксов (наш
-    #    системный промпт диспетчера повторяется на каждом шаге ReAct → ускорение).
-    #  enforce-eager: по умолчанию ВКЛ (стабильный старт на Blackwell sm_120, меньше
-    #    VRAM). Для ~10-20% ускорения декодинга включите CUDA-графы, задав в .env
-    #    JARVIS_QWEN_ENFORCE_EAGER= (пусто). Профиль gemma12-tars7 имеет запас VRAM.
     command: >
       --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder-14b}
       --served-model-name qwen-coder
@@ -94,8 +55,6 @@ services:
       --port 8001
     ports:
       - "127.0.0.1:8001:8001"
-    # healthcheck через python3 (curl в образе vLLM может отсутствовать → ложный
-    # «unhealthy»). start_period большой: загрузка весов в VRAM небыстрая.
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 20s
@@ -103,36 +62,9 @@ services:
       retries: 40
       start_period: 600s
 
-  # ---------------------------------------------------------------------------
-  # 2. Контроллер ОС/GUI — UI-TARS-2B-SFT (Qwen2-VL-2B, FP16), ~6.4 ГБ VRAM
-  #    Поднимается ПОСЛЕ Qwen, чтобы корректно учесть остаток свободной памяти.
-  #    util 0.20 → 6.4 ГБ: веса ~4.2 + overhead ~0.6 + KV ~1.6 (для 8192 нужно
-  #    всего 0.22 ГБ → запас огромный). KV/токен = 28 KiB (28 слоёв, 2 KV-головы).
-  # ---------------------------------------------------------------------------
   vllm-ui-tars:
     <<: *vllm-base
     container_name: jarvis-vllm-uitars
-    # UI-TARS — ОПЦИОНАЛЬНЫЙ модуль зрения. В МОНОЛИТНОМ профиле (mono:true) он не
-    # запускается: лаунчер (jarvis.py / применение профиля) поднимает только
-    # диспетчера, а UI-TARS останавливает/удаляет — зрение и GUI делает сам мозг.
-    # В двойных профилях лаунчер поднимает его явно по имени. Сервис остаётся в
-    # файле и виден в Пульте в любом случае.
-    # Лёгкий UI-TARS-2B вместо 7B: 2B (~4.2 ГБ FP16) комфортно живёт рядом с
-    # Qwen-14B, тогда как 7B-FP16 (~16 ГБ) не помещался втроём с аудио в 32 ГБ.
-    # Отключение — JARVIS_ENABLE_UITARS=0 (bootstrap не стартует этот сервис).
-    # Модель из локального пути /models/ui-tars (наполняет hf_downloader).
-    # Это VL-модель — vLLM сам определит архитектуру Qwen2VLForConditionalGeneration.
-    # --limit-mm-per-prompt НЕ задаём: в vLLM 0.23 он требует JSON-значение
-    # (json.loads), а в строке compose оно ломается при разбиении аргументов.
-    # Дефолт (1 изображение на запрос) и так соответствует работе UI-TARS
-    # (один скриншот на шаг).
-    # Модель/квантование/тип/контекст/KV — через env, чтобы профиль мог поднять
-    # UI-TARS до старшей версии (1.5-7B в AWQ/GPTQ). Пустой JARVIS_UITARS_QUANT_ARGS
-    # (по умолчанию) → vLLM сам определит квантование из конфига модели.
-    # ОПТИМИЗАЦИИ (важно для GUI-цикла TARS): --enable-prefix-caching сильно
-    # ускоряет повторные шаги — системный промпт UI-TARS на каждом шаге один и
-    # тот же, кэш KV переиспользуется (платим только за новый скриншот). CUDA-графы
-    # тоже переключаются через JARVIS_UITARS_ENFORCE_EAGER= (пусто) при запасе VRAM.
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
       --served-model-name ui-tars
@@ -148,9 +80,6 @@ services:
       --port 8002
     ports:
       - "127.0.0.1:8002:8002"
-    # Порядок (qwen → ui-tars) обеспечивается поэтапным запуском в bootstrap,
-    # поэтому здесь service_started (а не service_healthy) — чтобы plain
-    # `docker compose up` не блокировался немо на healthcheck.
     depends_on:
       vllm-qwen-coder:
         condition: service_started
@@ -161,14 +90,10 @@ services:
       retries: 40
       start_period: 300s
 
-  # ---------------------------------------------------------------------------
-  # 3. Аудио-слой — Faster-Whisper Large-v3 (ASR) + Kokoro TTS, ~2 ГБ VRAM
-  # ---------------------------------------------------------------------------
   audio-layer:
     build:
       context: ../backend
       dockerfile: Dockerfile.audio
-      # База — образ vLLM (torch/CUDA уже внутри → не качаем повторно)
       args:
         JARVIS_VLLM_IMAGE: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
         PIP_INDEX_URL: ${JARVIS_PIP_INDEX_URL:-https://pypi.org/simple}
@@ -176,9 +101,6 @@ services:
     container_name: jarvis-audio
     restart: unless-stopped
     <<: *gpu-all
-    # v2.0: приоритетная изоляция аудио-потоков (SYS_NICE) и закрепление весов
-    # ASR/TTS в RAM (IPC_LOCK + снятый memlock), чтобы голос не заикался под
-    # нагрузкой и веса не уходили в своп при давлении KV-кэша основной LLM.
     cap_add:
       - SYS_NICE
       - IPC_LOCK
@@ -191,19 +113,18 @@ services:
       - WHISPER_COMPUTE_TYPE=int8_float16
       - KOKORO_VOICE=af_sky
       - NVIDIA_VISIBLE_DEVICES=0
-      # Приоритет аудио-потоков (nice) и пиннинг весов в RAM (mlockall).
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
+      - CUDA_DISABLE_P2P=${CUDA_DISABLE_P2P:-1}
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
       - JARVIS_AUDIO_NICE=${JARVIS_AUDIO_NICE:--10}
       - JARVIS_AUDIO_MLOCK=${JARVIS_AUDIO_MLOCK:-1}
-      # Возобновляемая загрузка весов (Whisper/Kokoro) — см. комментарий выше
       - HF_HUB_ENABLE_HF_TRANSFER=0
       - HF_HUB_DOWNLOAD_TIMEOUT=120
     volumes:
       - jarvis-hf:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8003:8003"
-    # Аудио НЕ зависит от UI-TARS (тот опционален и может быть выключен в
-    # СОЛО-режиме). Порядок старта vLLM-инстансов обеспечивает лаунчер
-    # (jarvis.py / применение профиля), а не depends_on.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s
@@ -211,12 +132,7 @@ services:
       retries: 20
       start_period: 90s
 
-  # ---------------------------------------------------------------------------
-  # 4. Sandbox — изолированная среда исполнения кода кодер-агента.
-  #    Без проброса GPU. Сетевой доступ ограничен. ФС — только рабочий volume.
-  # ---------------------------------------------------------------------------
   sandbox:
-    # Образ с компиляторами C/C++ и Node.js (для run_code на разных языках).
     build:
       context: ../backend
       dockerfile: Dockerfile.sandbox
@@ -240,9 +156,6 @@ services:
     volumes:
       - ${JARVIS_DATA_DIR:-../data}/sandbox:/workspace
 
-  # ---------------------------------------------------------------------------
-  # 5. Backend — FastAPI-ядро (server.py). Маршрутизация WS и оркестрация.
-  # ---------------------------------------------------------------------------
   backend:
     build:
       context: ../backend
@@ -253,70 +166,54 @@ services:
     container_name: jarvis-backend
     restart: unless-stopped
     environment:
-      # URL/имена моделей ПЕРЕОПРЕДЕЛЯЕМЫ из .env — это включает МОНОЛИТНЫЙ режим:
-      # профиль может направить зрение/GUI на ТОТ ЖЕ эндпоинт, что и диспетчер
-      # (одна жирная Gemma рулит всем), не поднимая отдельный UI-TARS.
       - JARVIS_QWEN_URL=${JARVIS_QWEN_URL:-http://vllm-qwen-coder:8001/v1}
       - JARVIS_UITARS_URL=${JARVIS_UITARS_URL:-http://vllm-ui-tars:8002/v1}
       - JARVIS_AUDIO_URL=http://audio-layer:8003
-      # Аудио опционально: 0 → ядро/дашборд не пытаются к нему подключаться
-      # (безопасный fallback, если аудио крашит старт; см. --no-audio).
       - JARVIS_ENABLE_AUDIO=${JARVIS_ENABLE_AUDIO:-1}
-      # RPC-мост слушает на Windows-хосте; из WSL зеркалируется в localhost
       - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
       - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
-      # Имена served-моделей и контекстные окна — для бюджета контекста агента
-      # (чтобы не упереться в окно модели и не спровоцировать OOM по KV).
       - JARVIS_QWEN_MODEL_NAME=${JARVIS_QWEN_MODEL_NAME:-qwen-coder}
       - JARVIS_UITARS_MODEL_NAME=${JARVIS_UITARS_MODEL_NAME:-ui-tars}
       - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
       - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-8192}
-      # Кто описывает экран (see_screen): dispatcher|uitars|auto. В монолите —
-      # dispatcher (сама Gemma). Координаты GUI: absolute|normalized|auto.
       - JARVIS_VISION_MODEL=${JARVIS_VISION_MODEL:-auto}
       - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
-      # Каталог постоянной памяти агента (диалоги/сводки/факты).
       - JARVIS_MEMORY_DIR=/data/memory
-      # v2.0: ядро (журнал инцидентов, кузница навыков, медиа) — на томе данных,
-      # чтобы опыт и навыки переживали рестарт контейнера.
       - JARVIS_CORE_DIR=/data/jarvis_core
-      # MCP: конфиг подключаемых офлайн-серверов инструментов (вендорятся в образ).
       - JARVIS_MCP_CONFIG=/app/mcp_servers.json
-      # ВАЖНО: эти ключи ЧИТАЮТСЯ ВНУТРИ backend-контейнера, поэтому их НЕДОСТАТОЧНО
-      # положить в wsl/.env — их надо явно ПРОБРОСИТЬ сюда (иначе os.environ в
-      # контейнере их не видит). Раньше JARVIS_LIFELONG_LEARNING в .env «не работал»
-      # именно поэтому: --env-file подставляет ${VAR} в compose, но в контейнер
-      # переменная попадает только через этот блок.
-      # Самообучение (фоновый Lifelong-Learning цикл) + пауза между итерациями.
       - JARVIS_LIFELONG_LEARNING=${JARVIS_LIFELONG_LEARNING:-0}
       - JARVIS_LEARNING_PAUSE=${JARVIS_LEARNING_PAUSE:-30}
-      # Эмбеддинги RAG: local (оффлайн) | vllm (/v1/embeddings) + адрес/модель.
       - JARVIS_EMBED_PROVIDER=${JARVIS_EMBED_PROVIDER:-local}
       - JARVIS_EMBED_URL=${JARVIS_EMBED_URL:-}
       - JARVIS_EMBED_MODEL=${JARVIS_EMBED_MODEL:-}
-      # Потолки параллелизма к «мозгу» (см. README §9) + каденция телеметрии GPU.
       - JARVIS_PLAN_CONCURRENCY=${JARVIS_PLAN_CONCURRENCY:-4}
       - JARVIS_EMBED_CONCURRENCY=${JARVIS_EMBED_CONCURRENCY:-8}
       - JARVIS_FEDERATION_CONCURRENCY=${JARVIS_FEDERATION_CONCURRENCY:-4}
       - JARVIS_GPU_SAMPLE_MS=${JARVIS_GPU_SAMPLE_MS:-1500}
+      - JARVIS_BACKGROUND_RUNTIME=${JARVIS_BACKGROUND_RUNTIME:-1}
+      - JARVIS_IDLE_AFTER_SEC=${JARVIS_IDLE_AFTER_SEC:-45}
+      - JARVIS_IDLE_INTERVAL_SEC=${JARVIS_IDLE_INTERVAL_SEC:-90}
+      - JARVIS_SELF_HEAL_ENABLE=${JARVIS_SELF_HEAL_ENABLE:-0}
+      - JARVIS_CLUSTER_NODES=${JARVIS_CLUSTER_NODES:-[]}
+      - JARVIS_CLUSTER_TIMEOUT=${JARVIS_CLUSTER_TIMEOUT:-120}
+      - JARVIS_GPU_WARN_MEM_PCT=${JARVIS_GPU_WARN_MEM_PCT:-88}
+      - JARVIS_GPU_CRIT_MEM_PCT=${JARVIS_GPU_CRIT_MEM_PCT:-94}
+      - JARVIS_GPU_WARN_TEMP_C=${JARVIS_GPU_WARN_TEMP_C:-78}
+      - JARVIS_GPU_CRIT_TEMP_C=${JARVIS_GPU_CRIT_TEMP_C:-84}
+      - JARVIS_GPU_GUARD_SAMPLE_SEC=${JARVIS_GPU_GUARD_SAMPLE_SEC:-8}
+      - JARVIS_ALLOW_GPU_POWER_LIMIT=${JARVIS_ALLOW_GPU_POWER_LIMIT:-0}
+      - JARVIS_GPU_SAFE_POWER_LIMIT_W=${JARVIS_GPU_SAFE_POWER_LIMIT_W:-420}
+      - JARVIS_NETWORK_RECOVERY_SERVICES=${JARVIS_NETWORK_RECOVERY_SERVICES:-}
+      - JARVIS_NETWORK_RECOVERY_CMD=${JARVIS_NETWORK_RECOVERY_CMD:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # управление sandbox
-      # Каталог ~/.jarvis хоста (токен RPC-моста) пробрасывается в контейнер.
-      # JARVIS_HOME_HOST задаётся bootstrap_installer.py в wsl/.env.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${JARVIS_HOME_HOST:-~/.jarvis}:/root/.jarvis
-      # Постоянная память агента — на томе данных (переживает рестарт контейнера).
       - ${JARVIS_DATA_DIR:-../data}/memory:/data/memory
-      # Ядро v2.0: resolved_incidents.json, tools/ (навыки), media/ — на томе данных.
       - ${JARVIS_DATA_DIR:-../data}/jarvis_core:/data/jarvis_core
     ports:
       - "127.0.0.1:8000:8000"
-    # Аудио НАМЕРЕННО убрано из depends_on: аудио-слой ОПЦИОНАЛЕН и не должен
-    # быть в критическом пути. Раньше его падение/крэш-цикл (нет libsndfile/
-    # espeak/PortAudio, OOM Whisper, рассинхрон CUDA) тормозил и «ронял» весь
-    # старт стека. Теперь backend поднимается независимо; аудио — best-effort
-    # (см. --no-audio в jarvis.py и graceful-degradation в audio_layer.py).
     depends_on:
       vllm-qwen-coder:
         condition: service_started
@@ -330,17 +227,12 @@ services:
 networks:
   sandbox-net:
     driver: bridge
-    internal: true            # sandbox изолирован от внешней сети
+    internal: true
 
 volumes:
-  # EXT4-тома (быстрый mmap, без 9P). Имена фиксированы (без префикса проекта),
-  # чтобы bootstrap мог наполнять их теми же именами. Физически — на диске
-  # Docker (перенесён на D:\jarvis\docker).
-  jarvis-models:        # веса vLLM (наполняет bootstrap из data/models)
+  jarvis-models:
     name: jarvis-models
-  jarvis-hf:            # кэш HF для аудио (Whisper/Kokoro качаются в рантайме)
+  jarvis-hf:
     name: jarvis-hf
-  jarvis-vllm-cache:    # кэш torch.compile/CUDA-графов vLLM (одноразовая компиляция)
+  jarvis-vllm-cache:
     name: jarvis-vllm-cache
-
-# sandbox остаётся bind-mount'ом на D: (JARVIS_DATA_DIR) — ему 9P не мешает.
