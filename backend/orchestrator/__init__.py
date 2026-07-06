@@ -39,6 +39,30 @@ try:
 except Exception as exc:  # noqa: BLE001
     log.debug("native tools registration skipped: %s", exc)
 
+try:
+    from cognitive_core import subagents as _cc_subagents
+    from .cluster import cluster_router
+    _raw_cc_run_role = _cc_subagents.run_role
+
+    async def _cluster_run_role(role: str, task: str, *, chat: Any, context: str = "") -> dict[str, Any]:
+        if os.environ.get("JARVIS_CLUSTER_ENABLE", "1") != "0":
+            messages = [{"role": "system", "content": f"Ты — {role}-Agent JARVIS. Верни краткий рабочий brief для Core JARVIS."}]
+            if context:
+                messages.append({"role": "system", "content": "Контекст:\n" + context})
+            messages.append({"role": "user", "content": task})
+            try:
+                res = await cluster_router.offload_chat(messages, role=role, max_tokens=1200)
+                if res.get("ok"):
+                    return {"ok": True, "role": role, "content": res.get("content", ""), "node": res.get("node"), "offloaded": True}
+            except Exception as exc:  # noqa: BLE001
+                log.debug("cluster offload skipped for role=%s: %s", role, exc)
+        return await _raw_cc_run_role(role, task, chat=chat, context=context)
+
+    _cc_subagents.run_role = _cluster_run_role
+    log.info("Cognitive sub-agent cluster offload enabled.")
+except Exception as exc:  # noqa: BLE001
+    log.debug("sub-agent cluster patch skipped: %s", exc)
+
 _raw_reset_context = agent.reset_context
 _raw_run_chat = agent.run_chat
 _raw_skills_overview = agent.skills_overview
@@ -150,6 +174,7 @@ def skills_overview() -> dict[str, Any]:
     data = _raw_skills_overview()
     data["runtime"] = background_status()
     data["native_tools"] = ["native_host", "native_window", "native_ui"]
+    data["cluster"] = cluster_router.status() if "cluster_router" in globals() else None
     return data
 
 
