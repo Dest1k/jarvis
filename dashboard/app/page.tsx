@@ -1,13 +1,6 @@
 "use client";
 /**
  * page.tsx — главная страница Command Center JARVIS-OS.
- *
- * Вкладки:
- *   💬 Чат        — диалог с Core JARVIS.
- *   🧠 Разум      — cognitive/RAG/knowledge graph.
- *   🧭 Операции   — статус автономного runtime, MCP, GPU, инцидентов и навыков.
- *   🛠️ Пульт      — сервисы, профили, модели, очистка.
- *   🖥️ Мониторная — живые логи.
  */
 import { useState } from "react";
 import ControlPanel from "@/components/ControlPanel";
@@ -25,8 +18,8 @@ const NAV: { id: View; label: string }[] = [
   { id: "chat", label: "💬 Чат" },
   { id: "cognitive", label: "🧠 Разум" },
   { id: "ops", label: "🧭 Операции" },
-  { id: "control", label: "🛠️ Пульт управления" },
-  { id: "monitor", label: "🖥️ Мониторная" },
+  { id: "control", label: "🛠️ Пульт" },
+  { id: "monitor", label: "🖥️ Логи" },
 ];
 
 export default function Page() {
@@ -35,8 +28,11 @@ export default function Page() {
   return (
     <div className="app-grid">
       <header className="topbar">
-        <span className="brand">JARVIS-OS</span>
-        <span style={{ color: "var(--muted)", fontSize: 13 }}>Command Center</span>
+        <div>
+          <span className="brand">JARVIS</span>
+          <span style={{ color: "var(--muted)", fontSize: 11, letterSpacing: 1.8, marginLeft: 10 }}>GEMMA 4 COMMAND CENTER</span>
+        </div>
+        <span className="pill ok" title="Autonomy runtime is observable from the Operations tab">autonomy visible</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 18 }}>
           <GpuMeter />
           <span className="topbar-sep" />
@@ -46,20 +42,14 @@ export default function Page() {
 
       <nav className="sidebar">
         {NAV.map((n) => (
-          <button
-            key={n.id}
-            className={`nav-item ${view === n.id ? "active" : ""}`}
-            onClick={() => setView(n.id)}
-          >
+          <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => setView(n.id)}>
             {n.label}
           </button>
         ))}
       </nav>
 
       <main className="content">
-        <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}>
-          <ChatView />
-        </div>
+        <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}><ChatView /></div>
         {view === "cognitive" && <CognitiveView />}
         {view === "ops" && <AgentOpsView />}
         {view === "control" && <ControlPanel />}
