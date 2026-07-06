@@ -20,7 +20,9 @@ _NATIVE_MANDATE = (
     "NATIVE HOST API MANDATE: для системной информации, процессов, служб, событий, "
     "железа и окон сначала используй native_host/native_window/native_ui (WMI/CIM, "
     "Win32 HWND, UI Automation). windows.exec/powershell и текстовый CLI-парсинг — "
-    "fallback, только если native tool недоступен или вернул недостаточно данных."
+    "fallback, только если native tool недоступен или вернул недостаточно данных. "
+    "Для широких целей используй mission:plan/status/run_role/learning_tick, чтобы "
+    "создавать durable project plan и подключать суб-агентов, а не держать всё в одном сообщении."
 )
 
 try:
@@ -38,6 +40,13 @@ try:
     log.info("Native host tools registered: native_host/native_window/native_ui")
 except Exception as exc:  # noqa: BLE001
     log.debug("native tools registration skipped: %s", exc)
+
+try:
+    from . import mission_ops
+    mission_ops.register(agent._registry)  # type: ignore[attr-defined]
+    log.info("Mission autonomy tool registered: mission")
+except Exception as exc:  # noqa: BLE001
+    log.debug("mission tool registration skipped: %s", exc)
 
 try:
     from cognitive_core import subagents as _cc_subagents
@@ -174,6 +183,7 @@ def skills_overview() -> dict[str, Any]:
     data = _raw_skills_overview()
     data["runtime"] = background_status()
     data["native_tools"] = ["native_host", "native_window", "native_ui"]
+    data["mission_tool"] = "mission"
     data["cluster"] = cluster_router.status() if "cluster_router" in globals() else None
     return data
 
