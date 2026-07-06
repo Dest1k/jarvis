@@ -38,14 +38,14 @@ services:
     <<: *vllm-base
     container_name: jarvis-vllm-qwen
     command: >
-      --model ${JARVIS_QWEN_MODEL_PATH:-/models/qwen-coder-14b}
-      --served-model-name qwen-coder
-      --dtype ${JARVIS_QWEN_DTYPE:-half}
-      ${JARVIS_QWEN_QUANT_ARGS---quantization awq_marlin}
+      --model ${JARVIS_QWEN_MODEL_PATH:-/models/gemma4-26b-a4b-nvfp4}
+      --served-model-name ${JARVIS_QWEN_MODEL_NAME:-dispatcher}
+      --dtype ${JARVIS_QWEN_DTYPE:-auto}
+      ${JARVIS_QWEN_QUANT_ARGS-}
       ${JARVIS_QWEN_ENFORCE_EAGER---enforce-eager}
-      --max-model-len ${JARVIS_QWEN_MAX_LEN:-16384}
-      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.45}
-      --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-auto}
+      --max-model-len ${JARVIS_QWEN_MAX_LEN:-32768}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.82}
+      --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-fp8}
       --enable-prefix-caching
       --max-num-seqs ${JARVIS_QWEN_MAX_NUM_SEQS:-8}
       ${JARVIS_QWEN_EXTRA_ARGS:-}
@@ -65,7 +65,7 @@ services:
     container_name: jarvis-vllm-uitars
     command: >
       --model ${JARVIS_UITARS_MODEL_PATH:-/models/ui-tars}
-      --served-model-name ui-tars
+      --served-model-name ${JARVIS_UITARS_MODEL_NAME:-vision-route}
       --dtype ${JARVIS_UITARS_DTYPE:-half}
       ${JARVIS_UITARS_QUANT_ARGS-}
       ${JARVIS_UITARS_ENFORCE_EAGER---enforce-eager}
@@ -165,16 +165,16 @@ services:
     restart: unless-stopped
     environment:
       - JARVIS_QWEN_URL=${JARVIS_QWEN_URL:-http://vllm-qwen-coder:8001/v1}
-      - JARVIS_UITARS_URL=${JARVIS_UITARS_URL:-http://vllm-ui-tars:8002/v1}
+      - JARVIS_UITARS_URL=${JARVIS_UITARS_URL:-http://vllm-qwen-coder:8001/v1}
       - JARVIS_AUDIO_URL=http://audio-layer:8003
       - JARVIS_ENABLE_AUDIO=${JARVIS_ENABLE_AUDIO:-1}
       - JARVIS_RPC_BRIDGE_URL=ws://host.docker.internal:8765
       - JARVIS_SANDBOX_CONTAINER=jarvis-sandbox
-      - JARVIS_QWEN_MODEL_NAME=${JARVIS_QWEN_MODEL_NAME:-qwen-coder}
-      - JARVIS_UITARS_MODEL_NAME=${JARVIS_UITARS_MODEL_NAME:-ui-tars}
-      - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-16384}
-      - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-8192}
-      - JARVIS_VISION_MODEL=${JARVIS_VISION_MODEL:-auto}
+      - JARVIS_QWEN_MODEL_NAME=${JARVIS_QWEN_MODEL_NAME:-dispatcher}
+      - JARVIS_UITARS_MODEL_NAME=${JARVIS_UITARS_MODEL_NAME:-dispatcher}
+      - JARVIS_QWEN_MAX_LEN=${JARVIS_QWEN_MAX_LEN:-32768}
+      - JARVIS_UITARS_MAX_LEN=${JARVIS_UITARS_MAX_LEN:-32768}
+      - JARVIS_VISION_MODEL=${JARVIS_VISION_MODEL:-dispatcher}
       - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
       - JARVIS_MEMORY_DIR=/data/memory
       - JARVIS_CORE_DIR=/data/jarvis_core
