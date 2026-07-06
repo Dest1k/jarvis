@@ -3,8 +3,9 @@
 
 Runs only after user inactivity and when GPU guard allows it. The loop is
 safe-by-default: diagnostics run automatically, while branch/test self-healing
-requires JARVIS_SELF_HEAL_ENABLE=1. Even then it prepares evidence and a staging
-branch/report; merging remains an explicit operator/Git policy decision.
+requires JARVIS_SELF_HEAL_ENABLE=1. When enabled it can prepare an LLM-generated
+patch candidate on a staging branch; applying that candidate is additionally
+controlled by JARVIS_SELF_HEAL_APPLY_PATCH=1.
 """
 
 from __future__ import annotations
@@ -161,10 +162,14 @@ class BackgroundIdleLoop:
         except Exception as exc:  # noqa: BLE001
             return f"LLM diagnosis unavailable: {exc}. Suggested deterministic action: {klass.get('suggestion')}"
 
-    async def _write_report(self, branch: str, anomaly: str, klass: dict[str, Any], diagnosis: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _write_report(self, branch: str, anomaly: str, klass: dict[str, Any], diagnosis: str, results: list[dict[str, Any]], patch_candidate: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.host_exec is None:
             return {"ok": False, "out": "no host_exec"}
-        report = {"ts": time.time(), "branch": branch, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "validation": results}
+        report = {
+            "ts": time.time(), "branch": branch, "anomaly": anomaly,
+            "classification": klass, "diagnosis": diagnosis, "validation": results,
+            "patch_candidate": patch_candidate or {},
+        }
         body = json.dumps(report, ensure_ascii=False, indent=2)
         b64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
         path = f"data/jarvis_core/self_heal/report_{int(time.time())}.json"
@@ -177,7 +182,7 @@ class BackgroundIdleLoop:
         )
         wr = await self.host_exec(f'python -c "{py}"')
         if wr.get("ok"):
-            await self.host_exec(f'git -C "{self.repo_path}" add "{path}" && git -C "{self.repo_path}" commit -m "JARVIS self-heal report: {klass.get("kind", "anomaly")}"')
+            await self.host_exec(f'git -C "{self.repo_path}" add -A && git -C "{self.repo_path}" commit -m "JARVIS self-heal candidate: {klass.get("kind", "anomaly")}"')
         return wr
 
     async def _self_heal(self, anomaly: str) -> None:
@@ -187,21 +192,48 @@ class BackgroundIdleLoop:
         if not self.self_heal_enabled or self.host_exec is None:
             await self._emit({"level": "info", "message": "Self-heal diagnostic completed. Set JARVIS_SELF_HEAL_ENABLE=1 to allow branch/report/test cycles.", "classification": klass, "diagnosis": diagnosis})
             return
+
         branch = "fix/jarvis-auto-" + str(int(time.time()))
-        steps = [
-            f'git -C "{self.repo_path}" status --short',
-            f'git -C "{self.repo_path}" checkout -B "{branch}"',
+        results: list[dict[str, Any]] = []
+        status = await self.host_exec(f'git -C "{self.repo_path}" status --short')
+        status_out = (status.get("out") or "").strip()
+        results.append({"cmd": "git status --short", "ok": status.get("ok"), "out": status_out[-1600:]})
+        if not status.get("ok") or status_out:
+            self._state.last_action = "self-heal aborted: dirty or unavailable repo"
+            await self._emit({"level": "warn", "message": "Self-heal branch skipped: git worktree is dirty or unavailable.", "status": status_out})
+            return
+
+        checkout = await self.host_exec(f'git -C "{self.repo_path}" checkout -B "{branch}"')
+        results.append({"cmd": f"checkout -B {branch}", "ok": checkout.get("ok"), "out": (checkout.get("out") or "")[-1600:]})
+        if not checkout.get("ok"):
+            await self._emit({"level": "err", "message": f"Self-heal could not create branch {branch}.", "results": results})
+            return
+
+        patch_candidate: dict[str, Any] = {}
+        try:
+            from .patch_healer import PatchCandidateHealer
+            patch_candidate = await PatchCandidateHealer(repo_path=self.repo_path, host_exec=self.host_exec).prepare(
+                anomaly=anomaly, classification=klass, diagnosis=diagnosis)
+            results.append({"cmd": "patch_candidate", "ok": patch_candidate.get("ok"), "out": json.dumps(patch_candidate, ensure_ascii=False)[-1600:]})
+        except Exception as exc:  # noqa: BLE001
+            patch_candidate = {"ok": False, "error": str(exc)}
+            results.append({"cmd": "patch_candidate", "ok": False, "out": str(exc)})
+
+        checks = [
             f'python -m compileall "{self.repo_path}/backend"',
             f'cmd /c "cd /d {self.repo_path} && docker compose -f wsl/docker-compose.agents.yml --env-file wsl/.env config"',
         ]
-        results: list[dict[str, Any]] = []
-        for cmd in steps:
+        for cmd in checks:
             r = await self.host_exec(cmd)
             results.append({"cmd": cmd, "ok": r.get("ok"), "out": (r.get("out") or "")[-1600:]})
-            if not r.get("ok") and "status --short" not in cmd:
+            if not r.get("ok"):
                 break
-        report = await self._write_report(branch, anomaly, klass, diagnosis, results)
-        ok = all(r.get("ok") for r in results[1:]) and report.get("ok")
+
+        report = await self._write_report(branch, anomaly, klass, diagnosis, results, patch_candidate)
+        ok = all(r.get("ok") for r in results if r.get("cmd") != "patch_candidate") and bool(report.get("ok"))
         self._state.last_action = f"self-heal branch {branch}: {'ok' if ok else 'failed'}"
-        msg = (f"Sir, I detected {klass['kind']} and prepared branch {branch} with a diagnostic report. Validation passed. Shall I open or merge the repair?" if ok else f"Sir, I detected {klass['kind']}, but autonomous validation failed on branch {branch}.")
-        await self._emit({"level": "ok" if ok else "err", "message": msg, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "results": results, "report": report})
+        msg = (
+            f"Sir, I detected {klass['kind']} and prepared branch {branch} with a patch candidate/report. Validation passed. Shall I open or merge the repair?"
+            if ok else f"Sir, I detected {klass['kind']}, but autonomous validation failed on branch {branch}."
+        )
+        await self._emit({"level": "ok" if ok else "err", "message": msg, "anomaly": anomaly, "classification": klass, "diagnosis": diagnosis, "results": results, "report": report, "patch_candidate": patch_candidate})
