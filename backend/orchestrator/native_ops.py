@@ -10,7 +10,6 @@ RPC bridge, so the same HITL/security envelope still applies.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from .tools import Tool, ToolContext
@@ -44,11 +43,15 @@ def _json_ps(expr: str) -> str:
     )
 
 
+def _filter_arg(filter_text: str) -> str:
+    return f" -Filter \"{filter_text}\"" if filter_text else ""
+
+
 async def tool_native_host(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """WMI/CIM-first host administration queries."""
     action = str(args.get("action") or "overview").strip().lower()
     limit = max(1, min(int(args.get("limit", 25) or 25), 200))
-    name = str(args.get("name") or "").strip().replace("'", "''")
+    name = str(args.get("name") or "").strip().replace("'", "''").replace('"', '')
 
     if action == "overview":
         ps = _json_ps(
@@ -62,17 +65,17 @@ async def tool_native_host(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
         return await _ps(ctx, ps)
 
     if action == "processes":
-        where = f"WHERE Name LIKE '%{name}%'" if name else ""
+        filt = f"Name LIKE '%{name}%'" if name else ""
         ps = _json_ps(
-            f"Get-CimInstance Win32_Process {where} | "
+            f"Get-CimInstance Win32_Process{_filter_arg(filt)} | "
             f"Select-Object -First {limit} ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate"
         )
         return await _ps(ctx, ps)
 
     if action == "services":
-        filt = f"WHERE Name LIKE '%{name}%' OR DisplayName LIKE '%{name}%'" if name else ""
+        filt = f"Name LIKE '%{name}%' OR DisplayName LIKE '%{name}%'" if name else ""
         ps = _json_ps(
-            f"Get-CimInstance Win32_Service {filt} | "
+            f"Get-CimInstance Win32_Service{_filter_arg(filt)} | "
             f"Select-Object -First {limit} Name,DisplayName,State,StartMode,ProcessId,PathName"
         )
         return await _ps(ctx, ps)
@@ -151,7 +154,6 @@ $wins | ConvertTo-Json -Depth 4 -Compress
         text = str(args.get("text") or "")[:2000]
         if hwnd <= 0 or not text:
             return {"ok": False, "content": "Нужны hwnd и text."}
-        # WM_CHAR per character. This is focus-free but application support varies.
         cps = ",".join(str(ord(ch)) for ch in text)
         ps = _WIN32_PREFIX + f'''
 $h=[IntPtr]{hwnd}; $chars=@({cps});
@@ -176,7 +178,7 @@ $h=[IntPtr]{hwnd};
 
 
 async def tool_native_ui(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Windows UI Automation discovery. Read-only unless action is invoke and control supports InvokePattern."""
+    """Windows UI Automation discovery."""
     action = str(args.get("action") or "tree").strip().lower()
     name = str(args.get("name") or "").strip().replace("'", "''")
     limit = max(1, min(int(args.get("limit", 80) or 80), 300))
