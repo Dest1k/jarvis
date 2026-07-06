@@ -14,6 +14,7 @@ profiles.json, compose config, Docker, backend/dashboard ports, MCP config и б
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -28,10 +29,28 @@ DASHBOARD = ROOT / "dashboard"
 
 
 def run(cmd: list[str] | str, *, cwd: Path | None = None, timeout: int = 180) -> tuple[bool, str]:
+    """Run a command and decode output robustly on Russian Windows consoles.
+
+    Python 3.14 on Windows may default subprocess text decoding to cp1251, while
+    child processes in this repo emit UTF-8. Capturing bytes and decoding with
+    errors='replace' avoids reader-thread UnicodeDecodeError and mojibake.
+    """
     try:
-        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, shell=isinstance(cmd, str),
-                           capture_output=True, text=True, timeout=timeout)
-        return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
+        env = os.environ.copy()
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8:replace")
+        p = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            shell=isinstance(cmd, str),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+            timeout=timeout,
+        )
+        out = (p.stdout or b"") + (p.stderr or b"")
+        return p.returncode == 0, out.decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
@@ -42,9 +61,20 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+def _tail(detail: str) -> str:
+    return detail.strip().splitlines()[-1][:180] if detail and detail.strip() else ""
+
+
 def check(name: str, ok: bool, detail: str = "") -> bool:
     mark = "✓" if ok else "✖"
-    tail = detail.strip().splitlines()[-1][:180] if detail and detail.strip() else ""
+    tail = _tail(detail)
+    print(f"{mark} {name}{(' — ' + tail) if tail and not ok else ''}")
+    return ok
+
+
+def optional(name: str, ok: bool, detail: str = "") -> bool:
+    mark = "✓" if ok else "○"
+    tail = _tail(detail)
     print(f"{mark} {name}{(' — ' + tail) if tail and not ok else ''}")
     return ok
 
@@ -75,7 +105,7 @@ def main() -> int:
     failures += not check("agent system tests", ok, out)
 
     ok, out = run(["docker", "info"], cwd=ROOT, timeout=25)
-    check("Docker daemon", ok, "not running; jarvis.py up will try to start Docker Desktop")
+    optional("Docker daemon", ok, "not running; jarvis.py up will try to start Docker Desktop")
 
     if ENV.exists() and COMPOSE.exists():
         ok, out = run(["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV), "config"], cwd=ROOT, timeout=120)
@@ -88,9 +118,9 @@ def main() -> int:
         ok, out = run("npm run build", cwd=DASHBOARD, timeout=300)
         failures += not check("dashboard build", ok, out)
 
-    check("RPC bridge port 8765", port_open(8765), "offline now; expected if stack is stopped")
-    check("backend port 8000", port_open(8000), "offline now; expected if stack is stopped")
-    check("dashboard port 3000", port_open(3000), "offline now; expected if stack is stopped")
+    optional("RPC bridge port 8765", port_open(8765), "offline now; expected if stack is stopped")
+    optional("backend port 8000", port_open(8000), "offline now; expected if stack is stopped")
+    optional("dashboard port 3000", port_open(3000), "offline now; expected if stack is stopped")
 
     print("=" * 72)
     if failures:
