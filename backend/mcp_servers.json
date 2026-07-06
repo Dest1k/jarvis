@@ -30,10 +30,11 @@
     "git": {
       "command": "python", "args": ["-m", "mcp_server_git", "--repository", "/app"],
       "enabled": true,
-      "_desc": "Git MCP для read-only диагностики /app. В compose можно смонтировать .git в /app/.git; self-heal patch/branch-операции выполняются безопаснее через RPC-мост хоста."
+      "env": {"GIT_PYTHON_GIT_EXECUTABLE": "/usr/bin/git", "GIT_PYTHON_REFRESH": "quiet"},
+      "_desc": "Git MCP для read-only диагностики /app. .git смонтирован в /app/.git read-only; self-heal patch/branch-операции выполняются через RPC-мост хоста."
     },
     "sqlite": {
-      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/jarvis_core/cognitive_core.db"],
+      "command": "mcp-server-sqlite", "args": ["--db-path", "/data/jarvis_core/cognitive_core.db"],
       "enabled": true,
       "_desc": "SQLite MCP к постоянной БД когнитивного ядра (JARVIS_CORE_DIR=/data/jarvis_core)."
     },
