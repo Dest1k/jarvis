@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for native host tools, idle self-heal, MCP validation and patch healer.
+"""Tests for native host tools, mission autonomy, idle self-heal, MCP validation and patch healer.
 
 Run:
     python backend/tests/test_native_runtime.py
@@ -27,9 +27,11 @@ from orchestrator.mcp_client import MCPManager  # noqa: E402
 from orchestrator.patch_healer import _diff_paths, _extract_unified_diff, _safe_repo_path  # noqa: E402
 
 
-def test_native_tools_registered() -> None:
+def test_core_autonomy_tools_registered() -> None:
     names = set(agent._registry.names())  # type: ignore[attr-defined]
-    assert {"native_host", "native_window", "native_ui"}.issubset(names), names
+    assert {"native_host", "native_window", "native_ui", "mission"}.issubset(names), names
+    specs = agent._registry.specs()  # type: ignore[attr-defined]
+    assert "mission" in specs and "project plan" in specs.lower(), specs[:1000]
 
 
 def test_idle_classifier_known_incidents() -> None:
@@ -62,7 +64,7 @@ def test_patch_healer_safety() -> None:
 
 
 async def _main() -> int:
-    test_native_tools_registered()
+    test_core_autonomy_tools_registered()
     test_idle_classifier_known_incidents()
     test_mcp_validation_warnings()
     test_patch_healer_safety()
