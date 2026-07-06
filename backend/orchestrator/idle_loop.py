@@ -3,9 +3,9 @@
 
 Runs only after user inactivity and when GPU guard allows it. The loop is
 safe-by-default: diagnostics run automatically, while branch/test self-healing
-requires JARVIS_SELF_HEAL_ENABLE=1. When enabled it can prepare an LLM-generated
-patch candidate on a staging branch; applying that candidate is additionally
-controlled by JARVIS_SELF_HEAL_APPLY_PATCH=1.
+requires JARVIS_SELF_HEAL_ENABLE=1. When enabled it prepares a staging branch with
+an LLM-generated patch candidate/report and returns the operator to the original
+branch after committing the candidate.
 """
 
 from __future__ import annotations
@@ -172,10 +172,10 @@ class BackgroundIdleLoop:
         }
         body = json.dumps(report, ensure_ascii=False, indent=2)
         b64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
-        path = f"data/jarvis_core/self_heal/report_{int(time.time())}.json"
+        report_path = f"data/jarvis_core/self_heal/report_{int(time.time())}.json"
         py = (
             "import base64,pathlib;"
-            f"p=pathlib.Path(r'{self.repo_path}')/r'{path}';"
+            f"p=pathlib.Path(r'{self.repo_path}')/r'{report_path}';"
             "p.parent.mkdir(parents=True,exist_ok=True);"
             f"p.write_bytes(base64.b64decode('{b64}'));"
             "print(p)"
@@ -183,7 +183,12 @@ class BackgroundIdleLoop:
         wr = await self.host_exec(f'python -c "{py}"')
         if wr.get("ok"):
             kind = str(klass.get("kind", "anomaly")).replace('"', '').replace("'", "")[:60]
-            await self.host_exec(f'git -C "{self.repo_path}" add -A && git -C "{self.repo_path}" commit -m "JARVIS self-heal candidate: {kind}"')
+            paths = [report_path]
+            patch_path = str((patch_candidate or {}).get("patch_path") or "").strip()
+            if patch_path.startswith("data/jarvis_core/self_heal/"):
+                paths.append(patch_path)
+            quoted = " ".join(f'"{p}"' for p in paths)
+            await self.host_exec(f'git -C "{self.repo_path}" add {quoted} && git -C "{self.repo_path}" commit -m "JARVIS self-heal candidate: {kind}"')
         return wr
 
     async def _self_heal(self, anomaly: str) -> None:
@@ -196,6 +201,8 @@ class BackgroundIdleLoop:
 
         branch = "fix/jarvis-auto-" + str(int(time.time()))
         results: list[dict[str, Any]] = []
+        current = await self.host_exec(f'git -C "{self.repo_path}" rev-parse --abbrev-ref HEAD')
+        current_branch = (current.get("out") or "main").strip().splitlines()[-1] if current.get("ok") else "main"
         status = await self.host_exec(f'git -C "{self.repo_path}" status --short')
         status_out = (status.get("out") or "").strip()
         results.append({"cmd": "git status --short", "ok": status.get("ok"), "out": status_out[-1600:]})
@@ -231,6 +238,8 @@ class BackgroundIdleLoop:
                 break
 
         report = await self._write_report(branch, anomaly, klass, diagnosis, results, patch_candidate)
+        if current_branch and current_branch != "HEAD":
+            await self.host_exec(f'git -C "{self.repo_path}" checkout "{current_branch}"')
         ok = all(r.get("ok") for r in results if r.get("cmd") != "patch_candidate") and bool(report.get("ok"))
         self._state.last_action = f"self-heal branch {branch}: {'ok' if ok else 'failed'}"
         msg = (
