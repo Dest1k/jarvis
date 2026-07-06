@@ -1,54 +1,52 @@
 {
-  "_comment": "MCP-серверы JARVIS-OS — РЕАЛЬНЫЕ, проверенные пакеты (официальные modelcontextprotocol/servers + Microsoft Playwright). Все вендорятся ОФФЛАЙН в backend-образ (backend/Dockerfile) — в рантайме сеть для них не нужна. enabled=true → агент получает их инструменты под именами mcp_<server>_<tool>. ВКЛЮЧЕНО всё, что даёт реальные возможности. Выключен только 'everything' — это тестовая заглушка протокола (echo/add/printEnv), не функция: включайте при отладке MCP-слоя. Помните: каждый включённый сервер добавляет свои инструменты в промпт диспетчера (~65 при полном наборе) — если локальная модель начнёт хуже выбирать инструмент, выключите ненужные (самые тяжёлые/дублирующие: git, filesystem, memory, playwright). Хостовые операции (файлы/процессы/GUI Windows) делает RPC-мост; MCP добавляет переносимые инструменты-возможности.",
-
+  "_comment": "MCP-серверы JARVIS-OS. Клиент устойчиво переживает падение отдельных серверов и перезапускает MCP run-loop; поэтому git/sqlite снова включены. Если локальная модель тонет в инструментах, выключайте лишнее здесь.",
   "mcpServers": {
     "fetch": {
       "command": "python", "args": ["-m", "mcp_server_fetch"],
       "enabled": true,
-      "_desc": "Скачать веб-страницу и сконвертировать в markdown (официальный)."
+      "_desc": "Скачать веб-страницу и сконвертировать в markdown."
     },
     "time": {
       "command": "python", "args": ["-m", "mcp_server_time"],
       "enabled": true,
-      "_desc": "Текущее время и конвертация часовых поясов (официальный)."
+      "_desc": "Текущее время и конвертация часовых поясов."
     },
     "sequentialthinking": {
       "command": "mcp-server-sequential-thinking", "args": [],
       "enabled": true,
-      "_desc": "Структурированное пошаговое рассуждение для сложных задач (официальный)."
+      "_desc": "Структурированное пошаговое рассуждение для сложных задач."
     },
     "memory": {
       "command": "mcp-server-memory", "args": [],
       "enabled": true,
       "env": {"MEMORY_FILE_PATH": "/data/mcp-memory.json"},
-      "_desc": "Граф знаний (knowledge graph) как структурированная долговременная память (официальный). Хранилище — /data/mcp-memory.json (переживает рестарт)."
+      "_desc": "Граф знаний MCP как структурированная долговременная память."
     },
     "filesystem": {
       "command": "mcp-server-filesystem", "args": ["/data"],
       "enabled": true,
-      "_desc": "Файловые операции внутри /data (том контейнера): чтение/запись/поиск/дерево. Файлы Windows-хоста делает RPC-мост."
+      "_desc": "Файловые операции внутри /data. Файлы Windows-хоста делает RPC-мост."
     },
     "git": {
-      "command": "python", "args": ["-m", "mcp_server_git"],
-      "enabled": false,
-      "_desc": "ВЫКЛЮЧЕН: на текущем образе падал 'Connection closed' (несовместимость версий mcp/сервера при хендшейке), а возможности ДУБЛИРУЕТ нативный git_intel + windows.exec 'git ...'. Меньше инструментов в промпте — точнее выбор у локальной модели. Вернуть: enabled=true; причину смотреть `docker logs jarvis-backend | grep MCP`."
+      "command": "python", "args": ["-m", "mcp_server_git", "--repository", "/app"],
+      "enabled": true,
+      "_desc": "Git MCP для фоновой диагностики и self-healing branch/test циклов. Если /app не является git worktree, сервер останется offline, но MCP-клиент не уронит backend."
     },
     "sqlite": {
-      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/jarvis.db"],
-      "enabled": false,
-      "_desc": "ВЫКЛЮЧЕН: падал 'Connection closed' на этом образе, а SQLite уже покрыт когнитивным ядром (граф знаний/эпизоды/планы) и MCP-memory. Бытовые учёты — через memory_save/граф. Вернуть: enabled=true + логи backend для диагностики."
+      "command": "python", "args": ["-m", "mcp_server_sqlite", "--db-path", "/data/memory/cognitive_core.db"],
+      "enabled": true,
+      "_desc": "SQLite MCP к постоянной БД когнитивного ядра. При другом JARVIS_DB_PATH скорректируйте путь или оставьте как optional offline."
     },
     "playwright": {
       "command": "npx",
-      "args": ["--no-install", "@playwright/mcp", "--headless", "--isolated",
-               "--browser", "chromium", "--no-sandbox"],
+      "args": ["--no-install", "@playwright/mcp", "--headless", "--isolated", "--browser", "chromium", "--no-sandbox"],
       "enabled": true,
-      "_desc": "Управление браузером (Microsoft Playwright MCP) через accessibility-дерево — навигация, клики, ввод, извлечение данных с сайтов. Использует ВСТРОЕННЫЙ Chromium (--browser chromium), а НЕ системный chrome-канал (иначе ошибка «Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome»). --no-sandbox обязателен: контейнер работает от root. Браузер зашит в образ (Dockerfile: playwright install --with-deps chromium в PLAYWRIGHT_BROWSERS_PATH), доустановка вручную не нужна."
+      "_desc": "Управление браузером через accessibility-дерево. Chromium зашит в backend-образ."
     },
     "everything": {
       "command": "mcp-server-everything", "args": [],
       "enabled": false,
-      "_desc": "Тестовая заглушка протокола MCP (echo/add/printEnv/longRunningOperation) — НЕ функция, только для проверки, что MCP-слой жив. Включайте при отладке."
+      "_desc": "Тестовая заглушка протокола MCP — только для отладки."
     }
   }
 }
