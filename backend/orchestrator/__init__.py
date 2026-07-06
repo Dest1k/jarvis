@@ -41,6 +41,7 @@ except Exception as exc:  # noqa: BLE001
 
 _raw_reset_context = agent.reset_context
 _raw_run_chat = agent.run_chat
+_raw_skills_overview = agent.skills_overview
 
 _background_lock: asyncio.Lock | None = None
 _background_started = False
@@ -145,9 +146,17 @@ async def run_task(task: str, bridge: Optional[Any] = None) -> AsyncIterator[dic
         yield {"channel": "chat", **ev}
 
 
+def skills_overview() -> dict[str, Any]:
+    data = _raw_skills_overview()
+    data["runtime"] = background_status()
+    data["native_tools"] = ["native_host", "native_window", "native_ui"]
+    return data
+
+
 agent.reset_context = reset_context
 agent.run_chat = run_chat
 agent.run_task = run_task
+agent.skills_overview = skills_overview
 
 memory_overview = agent.memory_overview
 flush_context = agent.flush_context
@@ -155,7 +164,6 @@ clear_longterm = agent.clear_longterm
 save_memory = agent.save_memory
 incident_overview = agent.incident_overview
 clear_incidents = agent.clear_incidents
-skills_overview = agent.skills_overview
 
 __all__ = [
     "run_chat", "run_task", "memory_overview", "flush_context", "reset_context",
