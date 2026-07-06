@@ -29,36 +29,26 @@ docker compose -f wsl/docker-compose.agents.yml --env-file wsl/.env config
 
 ## 3. Рекомендуемые профили
 
-### Стабильный монолитный старт
-
 ```powershell
 python jarvis.py up --profile gemma4-mono
 ```
 
-`gemma4-mono` поднимает одну мультимодальную модель-диспетчер и не запускает отдельный UI-TARS. Это меньше движущихся частей и меньше риск VRAM-конфликтов.
-
-### Безопасный старт без аудио
+Безопасный старт без аудио:
 
 ```powershell
 python jarvis.py up --profile gemma4-mono --no-audio
 ```
 
-### Запасной монолит
-
-```powershell
-python jarvis.py up --profile gemma27-mono --no-audio
-```
-
-### Классическая раздельная связка
-
-```powershell
-python jarvis.py up --profile qwen-classic --no-audio
-```
-
-### Просторный fallback при давлении VRAM
+Fallback при VRAM/UVA:
 
 ```powershell
 python jarvis.py up --profile gemma12-tars7 --no-audio
+```
+
+Классическая раздельная связка:
+
+```powershell
+python jarvis.py up --profile qwen-classic --no-audio
 ```
 
 ## 4. CUDA/UVA hardening
@@ -74,8 +64,6 @@ NCCL_P2P_DISABLE=1
 
 ## 5. Native host automation
 
-Мозг JARVIS получает first-class native tools:
-
 ```text
 native_host    WMI/CIM overview, processes, services, events, hardware
 native_window  Win32 HWND list/find + focus-free PostMessage text/enter
@@ -84,7 +72,7 @@ native_ui      Windows UI Automation tree/find
 
 Правило системного промпта: для процессов, служб, событий, железа и окон сначала использовать native tools, а `windows.exec/powershell` — только fallback.
 
-## 6. Проверка исправления контекста и «почему»
+## 6. Проверка контекста и «почему»
 
 1. Открой dashboard.
 2. Отправь запрос, который вызывает инструменты.
@@ -92,69 +80,76 @@ native_ui      Windows UI Automation tree/find
 4. Нажми `🧠 Память` → `📥 Сжать в сводку и скрыть «почему»`.
 5. Текст ответа должен остаться, но runtime trace должен исчезнуть.
 6. Нажми `🧹 Очистить контекст и экран`.
-7. Текущая вкладка должна очиститься, а `episodic_memory_logs` по session id удаляются backend-обёрткой `orchestrator.reset_context`.
-8. Обнови страницу: старые `steps/why` не должны вернуться из `localStorage`.
+7. Обнови страницу: старые `steps/why` не должны вернуться из `localStorage`.
 
-## 7. MCP и фоновый runtime
-
-Background runtime включается лениво при первом ходе агента и проходит через `orchestrator` entrypoint:
+## 7. MCP и background runtime
 
 ```env
 JARVIS_BACKGROUND_RUNTIME=1
 JARVIS_IDLE_AFTER_SEC=45
 JARVIS_IDLE_INTERVAL_SEC=90
-```
-
-MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers:
-
-```env
 JARVIS_MCP_RESTART_SEC=20
 JARVIS_MCP_START_TIMEOUT=150
 JARVIS_MCP_CALL_TIMEOUT=120
 ```
 
-Автономные branch/test self-heal циклы по умолчанию выключены:
+MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers.
+
+## 8. Self-heal patch candidates
+
+Диагностика включена безопасно. Branch/report режим:
 
 ```env
-JARVIS_SELF_HEAL_ENABLE=0
+JARVIS_SELF_HEAL_ENABLE=1
+JARVIS_REPO_PATH=.
 ```
 
-Для осознанного включения:
+`JARVIS_REPO_PATH=.` означает рабочую директорию RPC-моста, обычно `D:\jarvis`. Не ставь `/app`, потому что self-heal git-команды выполняются на Windows-хосте через RPC-мост, а не внутри backend-контейнера.
 
-```powershell
-$env:JARVIS_SELF_HEAL_ENABLE="1"
+При включении self-heal:
+
+```text
+1. scan logs → classify anomaly;
+2. ask LLM for diagnosis;
+3. create fix/jarvis-auto-* branch;
+4. generate candidate unified diff into data/jarvis_core/self_heal/*.diff;
+5. run git apply --check;
+6. run compileall + docker compose config;
+7. commit report/candidate into staging branch.
 ```
 
-При включении self-heal создаёт staging branch `fix/jarvis-auto-*`, классифицирует аномалию, пишет JSON-отчёт в `data/jarvis_core/self_heal/`, запускает `compileall` и `docker compose config`. Merge/push зависит от Git/HITL политики.
+По умолчанию diff НЕ применяется, только создаётся и проверяется:
 
-## 8. Lifelong Learning
+```env
+JARVIS_SELF_HEAL_APPLY_PATCH=0
+```
 
-Самообучение включается отдельно:
+Для разрешения применения diff в staging branch:
+
+```env
+JARVIS_SELF_HEAL_APPLY_PATCH=1
+```
+
+Merge/push дальше зависит от Git/HITL политики.
+
+## 9. Lifelong Learning
 
 ```env
 JARVIS_LIFELONG_LEARNING=1
 JARVIS_LEARNING_MINE_INCIDENTS=1
 ```
 
-В простое система создаёт проверенные sysadmin-правила, а также превращает `resolved_incidents.json` в `incident_recipe` узлы cognitive graph после Critic-gate. При активности пользователя цикл приостанавливается, чтобы VRAM/LLM были отданы основной задаче.
+В простое система создаёт проверенные sysadmin-правила и превращает `resolved_incidents.json` в `incident_recipe` узлы cognitive graph после Critic-gate.
 
-## 9. Кластер по LAN / Mesh VPN
-
-В `wsl/.env` можно добавить JSON worker-ноды:
+## 10. Кластер по LAN / Mesh VPN
 
 ```env
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001/v1","model":"qwen-coder","role":"coder","transport":"lan","weight":2}]
 ```
 
-Для Tailscale/WireGuard указывай mesh IP/hostname в `base_url`:
+Для Tailscale/WireGuard указывай mesh IP/hostname в `base_url`.
 
-```env
-JARVIS_CLUSTER_NODES=[{"name":"laptop-5080-tail","base_url":"http://100.x.y.z:8001/v1","model":"qwen-coder","role":"coder","transport":"tailscale","weight":2}]
-```
-
-## 10. Сеть Researcher-Agent
-
-Диагностика сети работает безопасно: HTTP probe внутри контейнера + DNS probe на хосте через PowerShell. Recovery — только opt-in:
+## 11. Сеть Researcher-Agent
 
 ```env
 JARVIS_NETWORK_RECOVERY_SERVICES=Dnscache
@@ -163,14 +158,14 @@ JARVIS_NETWORK_RECOVERY_CMD=
 
 JARVIS не меняет сетевые политики сам: оператор явно задаёт разрешённый service restart или собственный recovery hook.
 
-## 11. Диагностика после запуска
+## 12. Диагностика после запуска
 
 ```powershell
 python jarvis.py status
 python jarvis.py diag
 ```
 
-Открой dashboard:
+Dashboard:
 
 ```text
 http://localhost:3000
