@@ -178,7 +178,6 @@ services:
       - JARVIS_UITARS_COORD_MODE=${JARVIS_UITARS_COORD_MODE:-auto}
       - JARVIS_MEMORY_DIR=/data/memory
       - JARVIS_CORE_DIR=/data/jarvis_core
-      # Used by host-side RPC self-heal commands. '.' means bridge working dir = project root.
       - JARVIS_REPO_PATH=${JARVIS_REPO_PATH:-.}
       - JARVIS_MCP_CONFIG=/app/mcp_servers.json
       - JARVIS_MCP_RESTART_SEC=${JARVIS_MCP_RESTART_SEC:-20}
@@ -215,6 +214,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${JARVIS_HOME_HOST:-~/.jarvis}:/root/.jarvis
+      - ${JARVIS_REPO_GIT_DIR:-../.git}:/app/.git:ro
       - ${JARVIS_DATA_DIR:-../data}/memory:/data/memory
       - ${JARVIS_DATA_DIR:-../data}/jarvis_core:/data/jarvis_core
     ports:
