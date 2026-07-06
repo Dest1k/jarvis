@@ -63,8 +63,6 @@ python jarvis.py up --profile gemma12-tars7 --no-audio
 
 ## 4. CUDA/UVA hardening
 
-В compose и `.env.example` проброшены безопасные флаги:
-
 ```env
 CUDA_VISIBLE_DEVICES=0
 CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -72,11 +70,11 @@ CUDA_DISABLE_P2P=1
 NCCL_P2P_DISABLE=1
 ```
 
-Они держат видимой только дискретную NVIDIA GPU и отключают peer-to-peer/NCCL P2P пути, которые в WSL2/Docker могут провоцировать `RuntimeError: UVA is not available`.
+Эти флаги держат видимой только дискретную NVIDIA GPU и отключают peer-to-peer/NCCL P2P пути, которые в WSL2/Docker могут провоцировать `RuntimeError: UVA is not available`.
 
 ## 5. Native host automation
 
-Мозг JARVIS теперь получает first-class native tools:
+Мозг JARVIS получает first-class native tools:
 
 ```text
 native_host    WMI/CIM overview, processes, services, events, hardware
@@ -107,6 +105,14 @@ JARVIS_IDLE_AFTER_SEC=45
 JARVIS_IDLE_INTERVAL_SEC=90
 ```
 
+MCP supervisor валидирует command/path, показывает warnings в `/api/agent/mcp` и ретраит failed servers:
+
+```env
+JARVIS_MCP_RESTART_SEC=20
+JARVIS_MCP_START_TIMEOUT=150
+JARVIS_MCP_CALL_TIMEOUT=120
+```
+
 Автономные branch/test self-heal циклы по умолчанию выключены:
 
 ```env
@@ -119,9 +125,20 @@ JARVIS_SELF_HEAL_ENABLE=0
 $env:JARVIS_SELF_HEAL_ENABLE="1"
 ```
 
-При включении self-heal создаёт staging branch `fix/jarvis-auto-*`, классифицирует аномалию, пишет JSON-отчёт в `data/jarvis_core/self_heal/`, запускает `compileall` и `docker compose config`. Merge/push всё ещё зависит от Git/HITL политики.
+При включении self-heal создаёт staging branch `fix/jarvis-auto-*`, классифицирует аномалию, пишет JSON-отчёт в `data/jarvis_core/self_heal/`, запускает `compileall` и `docker compose config`. Merge/push зависит от Git/HITL политики.
 
-## 8. Кластер по LAN / Mesh VPN
+## 8. Lifelong Learning
+
+Самообучение включается отдельно:
+
+```env
+JARVIS_LIFELONG_LEARNING=1
+JARVIS_LEARNING_MINE_INCIDENTS=1
+```
+
+В простое система создаёт проверенные sysadmin-правила, а также превращает `resolved_incidents.json` в `incident_recipe` узлы cognitive graph после Critic-gate. При активности пользователя цикл приостанавливается, чтобы VRAM/LLM были отданы основной задаче.
+
+## 9. Кластер по LAN / Mesh VPN
 
 В `wsl/.env` можно добавить JSON worker-ноды:
 
@@ -129,13 +146,13 @@ $env:JARVIS_SELF_HEAL_ENABLE="1"
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080","base_url":"http://192.168.1.50:8001/v1","model":"qwen-coder","role":"coder","transport":"lan","weight":2}]
 ```
 
-Для Tailscale/WireGuard указывай mesh IP/hostname в `base_url`, например:
+Для Tailscale/WireGuard указывай mesh IP/hostname в `base_url`:
 
 ```env
 JARVIS_CLUSTER_NODES=[{"name":"laptop-5080-tail","base_url":"http://100.x.y.z:8001/v1","model":"qwen-coder","role":"coder","transport":"tailscale","weight":2}]
 ```
 
-## 9. Сеть Researcher-Agent
+## 10. Сеть Researcher-Agent
 
 Диагностика сети работает безопасно: HTTP probe внутри контейнера + DNS probe на хосте через PowerShell. Recovery — только opt-in:
 
@@ -146,7 +163,7 @@ JARVIS_NETWORK_RECOVERY_CMD=
 
 JARVIS не меняет сетевые политики сам: оператор явно задаёт разрешённый service restart или собственный recovery hook.
 
-## 10. Диагностика после запуска
+## 11. Диагностика после запуска
 
 ```powershell
 python jarvis.py status
