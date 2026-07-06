@@ -4,6 +4,7 @@
  */
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import "./jarvis-v3.css";
 import PWARegister from "@/components/PWARegister";
 
 export const metadata: Metadata = {
