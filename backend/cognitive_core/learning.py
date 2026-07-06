@@ -7,8 +7,8 @@ learning.py — фоновый цикл «Lifelong Learning» JARVIS OS.
 делает итерации самосовершенствования, ЯКОРЯ их вокруг высокоуровневого
 системного администрирования, автоматизации и ассистент-паттернов.
 
-Одна итерация теперь обучается из двух источников:
-    1. resolved_incidents.json → проверенные рецепты ошибок превращаются в знания;
+Одна итерация обучается из двух источников:
+    1. resolved_incidents.json → проверенные рецепты ошибок превращаются в pattern-узлы;
     2. sysadmin topic rotation → Researcher/Critic генерируют новые правила.
 """
 
@@ -60,14 +60,14 @@ def _pick_topic(iteration: int) -> str:
 
 async def _already_has_incident_rule(incident_id: str) -> bool:
     row = await db.query_one(
-        "SELECT id FROM semantic_knowledge_graph WHERE kind='incident_recipe' AND source_trace=? LIMIT 1",
+        "SELECT id FROM semantic_knowledge_graph WHERE source_trace=? AND tags LIKE '%incident%' LIMIT 1",
         (incident_id,),
     )
     return row is not None
 
 
 async def _mine_incident(iteration: int, *, chat: Optional[ChatFn] = None) -> Optional[dict[str, Any]]:
-    """Превратить проверенный resolved incident в знание cognitive graph."""
+    """Превратить проверенный resolved incident в schema-compatible pattern knowledge."""
     if not MINE_INCIDENTS:
         return None
     try:
@@ -78,7 +78,6 @@ async def _mine_incident(iteration: int, *, chat: Optional[ChatFn] = None) -> Op
         return None
     if not items:
         return None
-    # Идём по ротации, чтобы не долбить один и тот же свежий incident.
     for offset in range(min(len(items), 12)):
         inc = items[(iteration + offset) % len(items)]
         inc_id = str(inc.get("id") or inc.get("signature") or "")
@@ -107,10 +106,10 @@ async def _mine_incident(iteration: int, *, chat: Optional[ChatFn] = None) -> Op
             except Exception:  # noqa: BLE001
                 pass
         committed = await subagents.commit_knowledge_if_approved(
-            kind="incident_recipe",
+            kind="pattern",
             title=f"Рецепт инцидента: {signature[:72] or inc_id}",
             body=body,
-            tags=["lifelong", "incident", "self-heal"],
+            tags=["lifelong", "incident", "self-heal", "incident_recipe"],
             source_trace=inc_id,
             chat=chat,
         )
