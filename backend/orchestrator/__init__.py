@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Пакет оркестрации JARVIS-OS — агентская «прокладка» между запросом пользователя
-(чат/голос) и «мозгом» системы (Qwen + UI-TARS).
+Пакет оркестрации JARVIS-OS — агентская прослойка между запросом пользователя,
+локальной Gemma-диспетчер моделью, инструментами, когнитивной БД и хостом.
 """
 
 from __future__ import annotations
@@ -21,8 +21,9 @@ _NATIVE_MANDATE = (
     "железа и окон сначала используй native_host/native_window/native_ui (WMI/CIM, "
     "Win32 HWND, UI Automation). windows.exec/powershell и текстовый CLI-парсинг — "
     "fallback, только если native tool недоступен или вернул недостаточно данных. "
-    "Для широких целей используй mission:plan/status/run_role/learning_tick, чтобы "
-    "создавать durable project plan и подключать суб-агентов, а не держать всё в одном сообщении."
+    "Для широких целей используй mission:plan/status/execute/run_role/learning_tick, "
+    "чтобы создавать durable project plan, исполнять runnable-задачи и подключать "
+    "суб-агентов, а не держать всё в одном сообщении."
 )
 
 try:
