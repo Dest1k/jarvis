@@ -29,25 +29,14 @@ DASHBOARD = ROOT / "dashboard"
 
 
 def run(cmd: list[str] | str, *, cwd: Path | None = None, timeout: int = 180) -> tuple[bool, str]:
-    """Run a command and decode output robustly on Russian Windows consoles.
-
-    Python 3.14 on Windows may default subprocess text decoding to cp1251, while
-    child processes in this repo emit UTF-8. Capturing bytes and decoding with
-    errors='replace' avoids reader-thread UnicodeDecodeError and mojibake.
-    """
+    """Run a command and decode output robustly on Russian Windows consoles."""
     try:
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8:replace")
         p = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            shell=isinstance(cmd, str),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-            env=env,
-            timeout=timeout,
+            cmd, cwd=str(cwd) if cwd else None, shell=isinstance(cmd, str),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, env=env, timeout=timeout,
         )
         out = (p.stdout or b"") + (p.stderr or b"")
         return p.returncode == 0, out.decode("utf-8", errors="replace")
@@ -61,21 +50,36 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def _tail(detail: str) -> str:
-    return detail.strip().splitlines()[-1][:180] if detail and detail.strip() else ""
+def _diagnostic(detail: str, max_lines: int = 40) -> str:
+    lines = (detail or "").strip().splitlines()
+    if not lines:
+        return ""
+    hot = [ln for ln in lines if any(tok in ln for tok in ("FAIL", "Traceback", "AssertionError", "Error:", "ERROR", "Exception"))]
+    selected = hot[-12:] if hot else lines[-max_lines:]
+    if hot:
+        selected += [ln for ln in lines[-12:] if ln not in selected]
+    return "\n".join(selected[-max_lines:])[:5000]
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
     mark = "✓" if ok else "✖"
-    tail = _tail(detail)
-    print(f"{mark} {name}{(' — ' + tail) if tail and not ok else ''}")
+    print(f"{mark} {name}")
+    if not ok:
+        diag = _diagnostic(detail)
+        if diag:
+            print("  └─ diagnostics:")
+            for line in diag.splitlines():
+                print("     " + line[:220])
     return ok
 
 
 def optional(name: str, ok: bool, detail: str = "") -> bool:
     mark = "✓" if ok else "○"
-    tail = _tail(detail)
-    print(f"{mark} {name}{(' — ' + tail) if tail and not ok else ''}")
+    print(f"{mark} {name}")
+    if not ok and detail:
+        tail = detail.strip().splitlines()[-1][:180] if detail.strip() else ""
+        if tail:
+            print("  └─ " + tail)
     return ok
 
 
