@@ -28,12 +28,21 @@ MCP = ROOT / "backend" / "mcp_servers.json"
 DASHBOARD = ROOT / "dashboard"
 
 
-def run(cmd: list[str] | str, *, cwd: Path | None = None, timeout: int = 180) -> tuple[bool, str]:
-    """Run a command and decode output robustly on Russian Windows consoles."""
+def run(cmd: list[str] | str, *, cwd: Path | None = None, timeout: int = 180,
+        deterministic_tests: bool = False) -> tuple[bool, str]:
+    """Run a command and decode output robustly on Russian Windows consoles.
+
+    deterministic_tests=True disables autonomous pre-decomposition for legacy unit
+    tests that use a short scripted fake planner. Real runtime autonomy remains
+    controlled by wsl/.env and normal `jarvis.py up`.
+    """
     try:
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8:replace")
+        if deterministic_tests:
+            env["JARVIS_AUTONOMOUS"] = "0"
+            env["JARVIS_BACKGROUND_RUNTIME"] = "0"
         p = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None, shell=isinstance(cmd, str),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, env=env, timeout=timeout,
@@ -102,10 +111,10 @@ def main() -> int:
     ok, out = run([sys.executable, "-m", "compileall", "backend"], cwd=ROOT, timeout=240)
     failures += not check("backend compileall", ok, out)
 
-    ok, out = run([sys.executable, "backend/tests/test_native_runtime.py"], cwd=ROOT, timeout=180)
+    ok, out = run([sys.executable, "backend/tests/test_native_runtime.py"], cwd=ROOT, timeout=180, deterministic_tests=True)
     failures += not check("native/autonomy tests", ok, out)
 
-    ok, out = run([sys.executable, "backend/tests/test_agent_system.py"], cwd=ROOT, timeout=180)
+    ok, out = run([sys.executable, "backend/tests/test_agent_system.py"], cwd=ROOT, timeout=180, deterministic_tests=True)
     failures += not check("agent system tests", ok, out)
 
     ok, out = run(["docker", "info"], cwd=ROOT, timeout=25)
