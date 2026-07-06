@@ -16,16 +16,22 @@ from . import persona
 
 log = logging.getLogger("jarvis.orchestrator")
 
+_NATIVE_MANDATE = (
+    "NATIVE HOST API MANDATE: для системной информации, процессов, служб, событий, "
+    "железа и окон сначала используй native_host/native_window/native_ui (WMI/CIM, "
+    "Win32 HWND, UI Automation). windows.exec/powershell и текстовый CLI-парсинг — "
+    "fallback, только если native tool недоступен или вернул недостаточно данных."
+)
+
 try:
     agent._ANSWER_SYSTEM = persona.ANSWER_SYSTEM  # type: ignore[attr-defined]
     if hasattr(agent, "_ROLE") and persona.PERSONA_CORE not in agent._ROLE:  # type: ignore[attr-defined]
         agent._ROLE = persona.PERSONA_CORE + "\n" + agent._ROLE  # type: ignore[attr-defined]
+    if hasattr(agent, "_ALGORITHM") and _NATIVE_MANDATE not in agent._ALGORITHM:  # type: ignore[attr-defined]
+        agent._ALGORITHM = _NATIVE_MANDATE + "\n" + agent._ALGORITHM  # type: ignore[attr-defined]
 except Exception as exc:  # noqa: BLE001
-    log.debug("persona patch skipped: %s", exc)
+    log.debug("persona/native mandate patch skipped: %s", exc)
 
-# Native host tools are registered here so we do not have to rewrite the large
-# ToolRegistry implementation. They become first-class ReAct tools immediately
-# after orchestrator import.
 try:
     from . import native_ops
     native_ops.register(agent._registry)  # type: ignore[attr-defined]
