@@ -13,6 +13,7 @@
     inference.py — двухрежимный инференс (MoE-турбо / dense-гибрид Gemma 4, v2.0).
     media.py     — мультимедиа HEVC/H.265 с аппаратным ускорением (v2.0).
     tools.py     — реестр инструментов (код, Windows, GUI, веб, git, навыки, память).
+    persona.py   — каноническая личность Core JARVIS и стиль ответов.
     agent.py     — ReAct-оркестратор (планирование инструментами → потоковый ответ).
     graph.py     — слой совместимости (ре-экспорт run_task/run_chat).
 """
@@ -23,8 +24,18 @@ import asyncio
 import logging
 
 from . import agent as agent  # noqa: F401
+from . import persona
 
 log = logging.getLogger("jarvis.orchestrator")
+
+# Apply the canonical Core JARVIS personality without rewriting the large agent.py.
+# agent.py still owns the operational playbooks; persona.py owns the public style.
+try:
+    agent._ANSWER_SYSTEM = persona.ANSWER_SYSTEM  # type: ignore[attr-defined]
+    if hasattr(agent, "_ROLE") and persona.PERSONA_CORE not in agent._ROLE:  # type: ignore[attr-defined]
+        agent._ROLE = persona.PERSONA_CORE + "\n" + agent._ROLE  # type: ignore[attr-defined]
+except Exception as exc:  # noqa: BLE001
+    log.debug("persona patch skipped: %s", exc)
 
 _raw_reset_context = agent.reset_context
 
@@ -49,7 +60,6 @@ def reset_context(session_id: str = "default", keep_summary: bool = False) -> No
     try:
         asyncio.get_running_loop().create_task(_purge_episodic_trace(session_id))
     except RuntimeError:
-        # Вне event loop чистка не критична: обычный backend-путь всегда в loop.
         pass
 
 
