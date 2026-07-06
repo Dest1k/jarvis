@@ -3,7 +3,7 @@
  * page.tsx — Command Center JARVIS-OS.
  */
 import { useState } from "react";
-import ControlPanel from "@/components/ControlPanel";
+import ControlPanelGemma from "@/components/ControlPanelGemma";
 import ChatView from "@/components/ChatView";
 import MonitorView from "@/components/MonitorView";
 import CognitiveView from "@/components/CognitiveView";
@@ -57,7 +57,7 @@ export default function Page() {
         <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}><ChatView /></div>
         {view === "ops" && <AgentOpsView />}
         {view === "cognitive" && <CognitiveView />}
-        {view === "control" && <ControlPanel />}
+        {view === "control" && <ControlPanelGemma />}
         {view === "monitor" && <MonitorView />}
       </main>
 
