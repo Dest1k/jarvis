@@ -1,53 +1,24 @@
 {
-  "_comment": "Профили системы JARVIS-OS для RTX 5090 (32 ГБ). Применяются кнопкой в Пульте или python jarvis.py up --profile <id>. Два типа: МОНОЛИТ (mono:true — одна жирная мультимодальная модель рулит всем: диспетчер+зрение+GUI, UI-TARS не поднимается) и ДВОЙНЫЕ (диспетчер + отдельный GUI-актуатор UI-TARS). Served-model-name диспетчера всегда qwen-coder, GUI — ui-tars; в монолите зрение/GUI перенаправляются на эндпоинт диспетчера через env.",
-  "gemma27-mono": {
-    "label": "★★ Монолит: Gemma-3-27B (AWQ) — одна умная модель рулит ВСЕМ",
-    "vram": "Gemma-3-27B AWQ-INT4 ~15.5 ГБ + KV fp8 ~6 + аудио ~2 ≈ 23-24 ГБ; резерв ~8 ГБ. UI-TARS НЕ запускается (экономия ~6-13 ГБ) — зрение и GUI делает сама Gemma.",
-    "note": "Одна жирная мультимодальная Gemma-3-27B рулит всем через инструментарий: CLI (windows.exec/powershell — почти любое администрирование), зрение (see_screen описывает экран), веб, память, код. GUI-клики тоже пробует сама. Максимум ума, минимум движущихся частей — рекомендуется, если двойная связка капризничает.",
-    "mono": true,
-    "dispatcher": {
-      "repo": "gaunernst/gemma-3-27b-it-int4-awq",
-      "name": "gemma-3-27b-awq",
-      "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma-3-27b-awq",
-        "JARVIS_QWEN_QUANT_ARGS": "",
-        "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.80",
-        "JARVIS_QWEN_MAX_LEN": "16384",
-        "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "",
-        "JARVIS_ENABLE_UITARS": "0"
-      }
-    },
-    "gui": {
-      "repo": "",
-      "name": "",
-      "env": {
-        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
-        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
-        "JARVIS_UITARS_MAX_LEN": "16384",
-        "JARVIS_UITARS_COORD_MODE": "auto",
-        "JARVIS_VISION_MODEL": "dispatcher",
-        "JARVIS_ENABLE_UITARS": "0"
-      }
-    }
-  },
+  "_comment": "JARVIS OS runtime profiles. Only Gemma 4 is active: mono is the conservative eager profile, turbo enables CUDA graphs for maximum throughput. Legacy model-specific env key names remain as compatibility aliases inside the launcher/compose, but both profiles route vision and GUI to the same Gemma dispatcher endpoint.",
   "gemma4-mono": {
-    "label": "★★ Монолит на Gemma-4-26B-A4B (NVFP4) — единый мозг рулит ВСЕМ",
-    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (util 0.82 → 26.2 ГБ: веса ~16.5 + overhead ~1 + KV fp8 ~8.7 на контекст 32k) + аудио ~2 ≈ 28.2 ГБ; резерв ~3.8 ГБ. UI-TARS НЕ запускается — освобождённые ~6 ГБ отданы под контекст (12k→32k) и KV.",
-    "note": "Монолит на ВАШЕЙ модели из data/models/gemma4-26b-a4b-nvfp4 (MoE, активно 4B → быстро, качество ~bf16 на NVFP4). Одна мультимодальная Gemma-4 рулит всем: CLI-администрирование (windows.exec/powershell), зрение (see_screen), GUI-клики (gui → тот же эндпоинт диспетчера), веб, память, код. Ресурсы поделены честно: аудио держит ~2 ГБ, всё остальное минус резерв рабочего стола — Gemma. Если не стартует из-за занятой VRAM — снизьте JARVIS_QWEN_GPU_UTIL до 0.78 или JARVIS_QWEN_MAX_LEN до 24576.",
+    "label": "Gemma 4 Mono — стабильный единый мозг",
     "mono": true,
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode. Цель — стабильный cold-start на 32 ГБ VRAM с большим контекстом и без отдельного GUI-движка.",
+    "note": "Рекомендуемый первый запуск. Одна мультимодальная Gemma 4 обслуживает диалог, код, зрение, GUI-навигацию, web/RAG и agent orchestration. Если старт нестабилен — снизь GPU util до 0.78 или max len до 24576.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
       "env": {
+        "JARVIS_QWEN_MODEL_NAME": "dispatcher",
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
         "JARVIS_QWEN_GPU_UTIL": "0.82",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "",
+        "JARVIS_QWEN_MAX_NUM_SEQS": "8",
+        "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 8192",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
@@ -56,7 +27,7 @@
       "name": "",
       "env": {
         "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
-        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MODEL_NAME": "dispatcher",
         "JARVIS_UITARS_MAX_LEN": "32768",
         "JARVIS_UITARS_COORD_MODE": "auto",
         "JARVIS_VISION_MODEL": "dispatcher",
@@ -64,123 +35,16 @@
       }
     }
   },
-  "qwen-classic": {
-    "label": "Классика: Qwen2.5-Coder-14B (AWQ) + UI-TARS-2B",
-    "vram": "Qwen 14.4 + UI-TARS-2B 6.4 + аудио 2.0 = ~22.8 ГБ; резерв ~9.2 ГБ.",
-    "note": "Стабильный профиль с ОТДЕЛЬНЫМ зрением (UI-TARS). Кодер-модель — иногда отказы на не-кодовых задачах. Если хотите единый мозг — берите gemma4-mono.",
-    "dispatcher": {
-      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
-      "name": "qwen-coder-14b",
-      "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/qwen-coder-14b",
-        "JARVIS_QWEN_QUANT_ARGS": "--quantization awq_marlin",
-        "JARVIS_QWEN_DTYPE": "half",
-        "JARVIS_QWEN_GPU_UTIL": "0.45",
-        "JARVIS_QWEN_MAX_LEN": "16384",
-        "JARVIS_QWEN_KV_DTYPE": "auto",
-        "JARVIS_QWEN_EXTRA_ARGS": "",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    },
-    "gui": {
-      "repo": "bytedance-research/UI-TARS-2B-SFT",
-      "name": "ui-tars",
-      "env": {
-        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
-        "JARVIS_UITARS_QUANT_ARGS": "",
-        "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.75",
-        "JARVIS_UITARS_MAX_LEN": "8192",
-        "JARVIS_UITARS_KV_DTYPE": "auto",
-        "JARVIS_UITARS_COORD_MODE": "normalized",
-        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
-        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    }
-  },
-  "gemma4-tars15": {
-    "label": "Умный (раздельный): Gemma-4-26B-A4B MoE (NVFP4) + ОТДЕЛЬНЫЙ UI-TARS-2B",
-    "vram": "Gemma-4-26B-A4B NVFP4 ~16.5 ГБ (util 0.62) + UI-TARS-2B ~5 (util 0.90 — КУМУЛЯТИВНЫЙ потолок!) + аудио 2 ≈ 27.4 ГБ; резерв ~4.6. KV обоих fp8.",
-    "note": "Тот же мозг Gemma-4-26B-A4B, но зрение вынесено в ОТДЕЛЬНЫЙ UI-TARS-2B (на случай, если хочется специализированный GUI-контроллер). Обычно НЕ нужен: gemma4-mono делает то же самое одним мозгом и отдаёт высвобожденную VRAM под контекст. ВАЖНО: util UI-TARS высокий (0.90) — это кумулятивный потолок vLLM на всю карту. Старт последовательный с освобождением VRAM.",
-    "dispatcher": {
-      "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
-      "name": "gemma4-26b-a4b-nvfp4",
-      "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
-        "JARVIS_QWEN_QUANT_ARGS": "",
-        "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.62",
-        "JARVIS_QWEN_MAX_LEN": "12288",
-        "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    },
-    "gui": {
-      "repo": "bytedance-research/UI-TARS-2B-SFT",
-      "name": "ui-tars",
-      "env": {
-        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars",
-        "JARVIS_UITARS_QUANT_ARGS": "",
-        "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.90",
-        "JARVIS_UITARS_MAX_LEN": "4096",
-        "JARVIS_UITARS_KV_DTYPE": "fp8",
-        "JARVIS_UITARS_COORD_MODE": "normalized",
-        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
-        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    }
-  },
-  "gemma12-tars7": {
-    "label": "★ Рекомендованный (просторный): Gemma-4-12B (NVFP4) + UI-TARS-1.5-7B (AWQ, взрослый)",
-    "vram": "Gemma-4-12B NVFP4 ~7.7 ГБ + UI-TARS-1.5-7B AWQ ~6.4 + аудио 2.0 ≈ 18-20 ГБ; резерв ~12 ГБ. Запускается даже при занятом видеопамятью десктопе.",
-    "note": "Раздельный профиль с компактной Gemma-4-12B и ВЗРОСЛЫМ UI-TARS-1.5-7B. Огромный запас VRAM. dispatcher util 0.34, UI-TARS util 0.55 (кумулятивно: второй инстанс должен покрыть и первый). Для единого мозга без UI-TARS — gemma4-mono.",
-    "dispatcher": {
-      "repo": "coolthor/gemma-4-12B-it-NVFP4A16",
-      "name": "gemma4-12b-nvfp4",
-      "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-12b-nvfp4",
-        "JARVIS_QWEN_QUANT_ARGS": "",
-        "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.35",
-        "JARVIS_QWEN_MAX_LEN": "12288",
-        "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    },
-    "gui": {
-      "repo": "flin775/UI-TARS-1.5-7B-AWQ",
-      "name": "ui-tars-1.5-7b-awq",
-      "env": {
-        "JARVIS_UITARS_MODEL_PATH": "/models/ui-tars-1.5-7b-awq",
-        "JARVIS_UITARS_QUANT_ARGS": "",
-        "JARVIS_UITARS_DTYPE": "half",
-        "JARVIS_UITARS_GPU_UTIL": "0.72",
-        "JARVIS_UITARS_MAX_LEN": "8192",
-        "JARVIS_UITARS_KV_DTYPE": "fp8",
-        "JARVIS_UITARS_COORD_MODE": "absolute",
-        "JARVIS_UITARS_URL": "http://vllm-ui-tars:8002/v1",
-        "JARVIS_UITARS_MODEL_NAME": "ui-tars",
-        "JARVIS_VISION_MODEL": "auto",
-        "JARVIS_ENABLE_UITARS": "1"
-      }
-    }
-  },
-  "moe-turbo": {
-    "label": "★ v2 moe-turbo (СОЛО): Gemma-4-26B-A4B (NVFP4) — быстрый, CUDA-графы, БЕЗ UI-TARS",
+  "gemma4-turbo": {
+    "label": "Gemma 4 Turbo — быстрый единый мозг",
     "mono": true,
-    "vram": "Веса NVFP4 ~16.5 ГБ, util 0.80 → 25.6 ГБ (KV ~8.3) + CUDA-графы ~1 + аудио ~2 = ~28.6 ГБ; резерв ~3.4 ГБ под десктоп. UI-TARS ОТКЛЮЧЁН (Gemma 4 мультимодальна — видит экран сама).",
-    "note": "Уже скачанная модель (data/models/gemma4-26b-a4b-nvfp4). CUDA-графы ВКЛЮЧЕНЫ (JARVIS_QWEN_ENFORCE_EAGER пуст) — в eager при batch=1 GPU ждал CPU (35-40% загрузки). Первый старт дольше (torch.compile, кэш на томе jarvis-vllm-cache — одноразово). Если vLLM падает на захвате графов — верните JARVIS_QWEN_ENFORCE_EAGER=--enforce-eager. UI-TARS не поднимается (JARVIS_ENABLE_UITARS=0) — иначе OOM на 32 ГБ.",
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, CUDA graphs, larger batching. Цель — максимальная скорость на прогретом vLLM-кэше при чистой VRAM.",
+    "note": "Боевой производительный режим после успешной проверки mono. Первый старт дольше из-за графов/кэша. Если vLLM падает на CUDA graph capture — вернись на gemma4-mono.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
       "env": {
+        "JARVIS_QWEN_MODEL_NAME": "dispatcher",
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
@@ -198,44 +62,12 @@
       "name": "",
       "env": {
         "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
-        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
+        "JARVIS_UITARS_MODEL_NAME": "dispatcher",
         "JARVIS_UITARS_MAX_LEN": "32768",
         "JARVIS_UITARS_COORD_MODE": "auto",
         "JARVIS_VISION_MODEL": "dispatcher",
         "JARVIS_ENABLE_UITARS": "0"
       }
     }
-  },
-  "dense-hybrid": {
-    "label": "★ v2 dense-hybrid (СОЛО): Gemma-4-31B-IT (NVFP4, 30.7B) + оффлоад в 128 ГБ RAM, БЕЗ UI-TARS",
-    "vram": "NVFP4 ~21 ГБ (резидентно ~13 при --cpu-offload-gb 8); util 0.75 → 24.0 ГБ на GPU (веса ~13 + overhead ~1 + KV ~10) + аудио ~2 = ~26 ГБ; резерв ~6 ГБ. ~8 ГБ весов и до 8 ГБ KV-свопа в 128 ГБ RAM. UI-TARS НЕ поднимается.",
-    "note": "Реальные веса (HF): nvidia/Gemma-4-31B-IT-NVFP4 (база google/gemma-4-31B-it). Требует --quantization modelopt. СОЛО: мультимодальная 31B сама видит экран (see_screen/gui → эндпоинт диспетчера), UI-TARS отключён — экономия ~5 ГБ VRAM. Эквивалент кнопки dense-hybrid в Пульте.",
-    "dispatcher": {
-      "repo": "nvidia/Gemma-4-31B-IT-NVFP4",
-      "name": "gemma4-31b-it-nvfp4",
-      "env": {
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-it-nvfp4",
-        "JARVIS_QWEN_QUANT_ARGS": "--quantization modelopt",
-        "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.75",
-        "JARVIS_QWEN_MAX_LEN": "16384",
-        "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --cpu-offload-gb 8 --swap-space 8",
-        "JARVIS_ENABLE_UITARS": "0"
-      }
-    },
-    "gui": {
-      "repo": "",
-      "name": "",
-      "env": {
-        "JARVIS_UITARS_URL": "http://vllm-qwen-coder:8001/v1",
-        "JARVIS_UITARS_MODEL_NAME": "qwen-coder",
-        "JARVIS_UITARS_MAX_LEN": "16384",
-        "JARVIS_UITARS_COORD_MODE": "auto",
-        "JARVIS_VISION_MODEL": "dispatcher",
-        "JARVIS_ENABLE_UITARS": "0"
-      }
-    },
-    "mono": true
   }
 }
