@@ -1,2 +1,1 @@
-JARVIS_VLLM_IMAGE=vllm/vllm-openai:v0.23.0
-JARVIS_QWEN_MAX_NUM_SEQS=16
+max batched tokens 8192
