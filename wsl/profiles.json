@@ -1,23 +1,24 @@
 {
-  "_comment": "JARVIS OS runtime profiles. Gemma 4 is the active unified dispatcher.",
+  "_comment": "JARVIS OS runtime profiles. Mono uses Gemma 4 31B IT NVFP4 in eager mode. Turbo uses Gemma 4 26B A4B NVFP4 without eager for graph-oriented throughput.",
   "gemma4-mono": {
-    "label": "Gemma 4 Mono — стабильный единый мозг",
+    "label": "Gemma 4 Mono — 31B стабильный единый мозг",
     "mono": true,
-    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode.",
-    "note": "Рекомендуемый первый запуск. Единая мультимодальная Gemma 4 обслуживает диалог, код, зрение и GUI-навигацию.",
+    "vram": "Gemma-4-31B-IT NVFP4, KV fp8, eager-mode, 16 seq.",
+    "note": "Стабильный профиль для основного автономного агента. Одна мультимодальная Gemma 4 обслуживает диалог, код, зрение и GUI-навигацию.",
     "dispatcher": {
-      "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
-      "name": "gemma4-26b-a4b-nvfp4",
+      "repo": "local/gemma4-31b-it-nvfp4",
+      "name": "gemma4-31b-it-nvfp4",
       "env": {
         "JARVIS_QWEN_MODEL_NAME": "dispatcher",
-        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
+        "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-31b-it-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.82",
+        "JARVIS_QWEN_GPU_UTIL": "0.86",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
+        "JARVIS_QWEN_EXTRA_ARGS": "",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
@@ -35,10 +36,10 @@
     }
   },
   "gemma4-turbo": {
-    "label": "Gemma 4 Turbo — быстрый единый мозг",
+    "label": "Gemma 4 Turbo — 26B A4B быстрый единый мозг",
     "mono": true,
-    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, CUDA graphs.",
-    "note": "Производительный режим после успешной проверки mono.",
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, CUDA graphs после успешной проверки mono.",
+    "note": "Производительный профиль. Если graph/runtime падает — вернуться на gemma4-mono.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -47,11 +48,12 @@
         "JARVIS_QWEN_MODEL_PATH": "/models/gemma4-26b-a4b-nvfp4",
         "JARVIS_QWEN_QUANT_ARGS": "",
         "JARVIS_QWEN_DTYPE": "auto",
-        "JARVIS_QWEN_GPU_UTIL": "0.80",
+        "JARVIS_QWEN_GPU_UTIL": "0.82",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "",
+        "JARVIS_QWEN_EXTRA_ARGS": "",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
