@@ -12,7 +12,7 @@ x-gpu-reservation: &gpu-all
             capabilities: [gpu]
 
 x-vllm-base: &vllm-base
-  image: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
+  image: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:nightly}
   restart: unless-stopped
   ipc: host
   volumes:
@@ -38,16 +38,16 @@ services:
     <<: *vllm-base
     container_name: jarvis-vllm-qwen
     command: >
-      --model ${JARVIS_QWEN_MODEL_PATH:-/models/gemma4-26b-a4b-nvfp4}
+      --model ${JARVIS_QWEN_MODEL_PATH:-/models/gemma4-31b-it-nvfp4}
       --served-model-name ${JARVIS_QWEN_MODEL_NAME:-dispatcher}
       --dtype ${JARVIS_QWEN_DTYPE:-auto}
       ${JARVIS_QWEN_QUANT_ARGS-}
       ${JARVIS_QWEN_ENFORCE_EAGER---enforce-eager}
       --max-model-len ${JARVIS_QWEN_MAX_LEN:-32768}
-      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.82}
+      --gpu-memory-utilization ${JARVIS_QWEN_GPU_UTIL:-0.86}
       --kv-cache-dtype ${JARVIS_QWEN_KV_DTYPE:-fp8}
       --enable-prefix-caching
-      --max-num-seqs ${JARVIS_QWEN_MAX_NUM_SEQS:-8}
+      --max-num-seqs ${JARVIS_QWEN_MAX_NUM_SEQS:-16}
       ${JARVIS_QWEN_EXTRA_ARGS:-}
       --host 0.0.0.0
       --port 8001
@@ -93,7 +93,7 @@ services:
       context: ../backend
       dockerfile: Dockerfile.audio
       args:
-        JARVIS_VLLM_IMAGE: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:latest}
+        JARVIS_VLLM_IMAGE: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:nightly}
         PIP_INDEX_URL: ${JARVIS_PIP_INDEX_URL:-https://pypi.org/simple}
     image: jarvis/audio-layer:latest
     container_name: jarvis-audio
@@ -188,20 +188,20 @@ services:
       - JARVIS_EMBED_PROVIDER=${JARVIS_EMBED_PROVIDER:-local}
       - JARVIS_EMBED_URL=${JARVIS_EMBED_URL:-}
       - JARVIS_EMBED_MODEL=${JARVIS_EMBED_MODEL:-}
-      - JARVIS_PLAN_CONCURRENCY=${JARVIS_PLAN_CONCURRENCY:-4}
+      - JARVIS_PLAN_CONCURRENCY=${JARVIS_PLAN_CONCURRENCY:-6}
       - JARVIS_EMBED_CONCURRENCY=${JARVIS_EMBED_CONCURRENCY:-8}
       - JARVIS_FEDERATION_CONCURRENCY=${JARVIS_FEDERATION_CONCURRENCY:-4}
       - JARVIS_GPU_SAMPLE_MS=${JARVIS_GPU_SAMPLE_MS:-1500}
       - JARVIS_BACKGROUND_RUNTIME=${JARVIS_BACKGROUND_RUNTIME:-1}
       - JARVIS_IDLE_AFTER_SEC=${JARVIS_IDLE_AFTER_SEC:-45}
       - JARVIS_IDLE_INTERVAL_SEC=${JARVIS_IDLE_INTERVAL_SEC:-90}
-      - JARVIS_SELF_HEAL_ENABLE=${JARVIS_SELF_HEAL_ENABLE:-0}
+      - JARVIS_SELF_HEAL_ENABLE=${JARVIS_SELF_HEAL_ENABLE:-1}
       - JARVIS_SELF_HEAL_APPLY_PATCH=${JARVIS_SELF_HEAL_APPLY_PATCH:-0}
       - JARVIS_CLUSTER_ENABLE=${JARVIS_CLUSTER_ENABLE:-0}
       - JARVIS_CLUSTER_NODES=${JARVIS_CLUSTER_NODES:-[]}
       - JARVIS_CLUSTER_TIMEOUT=${JARVIS_CLUSTER_TIMEOUT:-120}
-      - JARVIS_GPU_WARN_MEM_PCT=${JARVIS_GPU_WARN_MEM_PCT:-88}
-      - JARVIS_GPU_CRIT_MEM_PCT=${JARVIS_GPU_CRIT_MEM_PCT:-94}
+      - JARVIS_GPU_WARN_MEM_PCT=${JARVIS_GPU_WARN_MEM_PCT:-90}
+      - JARVIS_GPU_CRIT_MEM_PCT=${JARVIS_GPU_CRIT_MEM_PCT:-96}
       - JARVIS_GPU_WARN_TEMP_C=${JARVIS_GPU_WARN_TEMP_C:-78}
       - JARVIS_GPU_CRIT_TEMP_C=${JARVIS_GPU_CRIT_TEMP_C:-84}
       - JARVIS_GPU_GUARD_SAMPLE_SEC=${JARVIS_GPU_GUARD_SAMPLE_SEC:-8}
