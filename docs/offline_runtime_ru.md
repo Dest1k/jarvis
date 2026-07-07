@@ -34,19 +34,20 @@ docker image ls
 
 ## Обычный запуск оффлайн
 
-После первичной подготовки можно запускать без интернета:
+После первичной подготовки можно запускать без интернета через helper:
 
 ```powershell
-python jarvis.py up --profile gemma4-mono --offline
+scripts\offline_start.bat
 ```
 
-Или напрямую через compose:
+Или напрямую:
 
 ```powershell
+$env:JARVIS_PULL_POLICY = "never"
 docker compose -f wsl/docker-compose.agents.yml --env-file wsl/.env up -d --remove-orphans
 ```
 
-`wsl/docker-compose.agents.yml` настроен так, чтобы не требовать pull при наличии локальных образов. Если образа нет локально, запуск должен упасть явно, а не пытаться молча скачивать его.
+Если образа нет локально, запуск должен упасть явно, а не пытаться молча скачивать его.
 
 ## Когда интернет всё ещё понадобится
 
