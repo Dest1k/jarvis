@@ -13,6 +13,7 @@ x-gpu-reservation: &gpu-all
 
 x-vllm-base: &vllm-base
   image: ${JARVIS_VLLM_IMAGE:-vllm/vllm-openai:nightly}
+  pull_policy: ${JARVIS_PULL_POLICY:-if_not_present}
   restart: unless-stopped
   ipc: host
   volumes:
