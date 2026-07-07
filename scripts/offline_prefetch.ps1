@@ -1,12 +1,11 @@
 <#
 .SYNOPSIS
-  Pre-download and build all Docker/dashboard/model assets required for offline JARVIS startup.
+  Pre-download and build all assets required for offline JARVIS startup.
 
 .DESCRIPTION
-  Run this once while internet is available. After it finishes, normal starts should use local
-  Docker images, local BuildKit/package caches, local dashboard node_modules and local model files.
-
-  This script intentionally does NOT prune caches. It prepares them.
+  Run this once while internet is available. It prepares Docker images, local
+  JARVIS build images, dashboard node_modules and model volume sync. It does not
+  prune anything and does not start the runtime stack.
 #>
 param(
   [string]$Profile = "gemma4-mono",
@@ -30,6 +29,20 @@ function Read-EnvValue([string]$key, [string]$fallback = "") {
   }
   return $fallback
 }
+function Write-EnvUpdates([hashtable]$updates) {
+  $lines = @()
+  if (Test-Path $EnvFile) { $lines = @(Get-Content $EnvFile) }
+  $out = New-Object System.Collections.Generic.List[string]
+  foreach ($line in $lines) {
+    $skip = $false
+    foreach ($k in $updates.Keys) { if ($line -match "^$([regex]::Escape($k))=") { $skip = $true; break } }
+    if (-not $skip -and $line.Trim()) { [void]$out.Add($line) }
+  }
+  foreach ($k in $updates.Keys) { [void]$out.Add("$k=$($updates[$k])") }
+  $dir = Split-Path -Parent $EnvFile
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+  [IO.File]::WriteAllText($EnvFile, (($out -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+}
 function Ensure-DockerImage([string]$image) {
   if (-not $image) { return }
   Info "image: $image"
@@ -41,9 +54,27 @@ Info "Проверяю Docker"
 docker info *> $null
 if ($LASTEXITCODE -ne 0) { throw "Docker Desktop не отвечает." }
 
+$modelNames = New-Object System.Collections.Generic.List[string]
 if (Test-Path $ProfilesFile) {
-  Info "Применяю профиль $Profile"
-  python (Join-Path $Root "jarvis.py") up --profile $Profile --no-audio --offline-prepare-only
+  $profiles = Get-Content $ProfilesFile -Raw | ConvertFrom-Json
+  $profileObj = $profiles.$Profile
+  if (-not $profileObj) { throw "Профиль '$Profile' не найден в $ProfilesFile" }
+  Info "Применяю профиль $Profile в wsl/.env"
+  $updates = @{}
+  foreach ($part in @("dispatcher", "gui")) {
+    $p = $profileObj.$part
+    if ($p -and $p.env) {
+      foreach ($prop in $p.env.PSObject.Properties) { $updates[$prop.Name] = [string]$prop.Value }
+    }
+    if ($p -and $p.name) { [void]$modelNames.Add([string]$p.name) }
+    if ($p -and $p.repo -and $p.name -and -not $SkipModels -and -not ([string]$p.repo).StartsWith("local/")) {
+      $dataDir = Read-EnvValue "JARVIS_DATA_DIR" "D:/jarvis/data"
+      $dest = Join-Path (Join-Path $dataDir "models") ([string]$p.name)
+      Info "HF модель: $($p.repo) -> $dest"
+      python (Join-Path $Root "hf_downloader.py") ([string]$p.repo) --dest $dest
+    }
+  }
+  Write-EnvUpdates $updates
 } else {
   Info "profiles.json не найден, использую текущий wsl/.env"
 }
@@ -65,8 +96,22 @@ docker volume create jarvis-hf *> $null
 docker volume create jarvis-vllm-cache *> $null
 
 if (-not $SkipModels) {
-  Info "Проверяю/докачиваю модели профиля и синхронизирую их в jarvis-models"
-  python (Join-Path $Root "jarvis.py") up --profile $Profile --no-audio --offline-prepare-only --download-models
+  $dataDir = Read-EnvValue "JARVIS_DATA_DIR" "D:/jarvis/data"
+  $srcModels = Join-Path $dataDir "models"
+  if (Test-Path $srcModels) {
+    if ($modelNames.Count -eq 0) {
+      $path = Read-EnvValue "JARVIS_QWEN_MODEL_PATH" ""
+      if ($path) { [void]$modelNames.Add(($path.TrimEnd("/") -split "/")[-1]) }
+    }
+    $safeNames = @($modelNames | Where-Object { $_ -match '^[A-Za-z0-9_.-]+$' } | Select-Object -Unique)
+    if ($safeNames.Count -gt 0) {
+      Info "Синхронизирую модели в jarvis-models: $($safeNames -join ', ')"
+      $list = $safeNames -join " "
+      docker run --rm -v "jarvis-models:/dest" -v "${srcModels}:/src:ro" alpine sh -c "for n in $list; do if [ -d /src/`$n ]; then echo `$n; cp -ru /src/`$n /dest/; else echo missing:`$n; fi; done"
+    }
+  } else {
+    Info "Папка моделей не найдена: $srcModels"
+  }
 }
 
 if (Test-Path (Join-Path $Dashboard "package.json")) {
@@ -83,4 +128,4 @@ Info "Финальная проверка локальных образов"
 docker image inspect $vllmImage python:3.11-slim alpine:latest jarvis/backend:latest jarvis/sandbox:latest *> $null
 if (-not $NoAudio) { docker image inspect jarvis/audio-layer:latest *> $null }
 
-Info "Готово. Для оффлайн-старта используйте: python jarvis.py up --offline"
+Info "Готово. Обычный старт после этого должен идти из локальных образов и кешей."
