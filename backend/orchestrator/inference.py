@@ -26,22 +26,22 @@ def _solo_vision(max_len: str) -> dict[str, str]:
     }
 
 
-_GEMMA4_PATH = "/models/gemma4-26b-a4b-nvfp4"
-_GEMMA4_REPO = "nvidia/Gemma-4-26B-A4B-NVFP4"
+_MONO_PATH = "/models/gemma4-31b-it-nvfp4"
+_TURBO_PATH = "/models/gemma4-26b-a4b-nvfp4"
 
 MODES: dict[str, dict[str, Any]] = {
     "gemma4-mono": {
-        "label": "Gemma 4 Mono",
-        "model_repo": _GEMMA4_REPO,
-        "model_name": "gemma4-26b-a4b-nvfp4",
-        "summary": "Stable eager dispatcher.",
-        "vram": "util 0.82; max len 32k; max seqs 16.",
+        "label": "Gemma 4 Mono · 31B стабильный единый мозг",
+        "model_repo": "local/gemma4-31b-it-nvfp4",
+        "model_name": "gemma4-31b-it-nvfp4",
+        "summary": "Stable eager dispatcher on Gemma 4 31B IT NVFP4.",
+        "vram": "util 0.86; max len 32k; max seqs 16; eager mode.",
         "env": {
             "JARVIS_QWEN_MODEL_NAME": "dispatcher",
-            "JARVIS_QWEN_MODEL_PATH": _GEMMA4_PATH,
+            "JARVIS_QWEN_MODEL_PATH": _MONO_PATH,
             "JARVIS_QWEN_QUANT_ARGS": "",
             "JARVIS_QWEN_DTYPE": "auto",
-            "JARVIS_QWEN_GPU_UTIL": "0.82",
+            "JARVIS_QWEN_GPU_UTIL": "0.86",
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_MAX_NUM_SEQS": "16",
@@ -51,17 +51,17 @@ MODES: dict[str, dict[str, Any]] = {
         },
     },
     "gemma4-turbo": {
-        "label": "Gemma 4 Turbo",
-        "model_repo": _GEMMA4_REPO,
+        "label": "Gemma 4 Turbo · 26B A4B быстрый единый мозг",
+        "model_repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
         "model_name": "gemma4-26b-a4b-nvfp4",
-        "summary": "Graph dispatcher after mono is healthy.",
-        "vram": "util 0.80; max len 32k; max seqs 16.",
+        "summary": "Graph-oriented dispatcher on Gemma 4 26B A4B NVFP4 after mono is healthy.",
+        "vram": "util 0.82; max len 32k; max seqs 16; eager disabled.",
         "env": {
             "JARVIS_QWEN_MODEL_NAME": "dispatcher",
-            "JARVIS_QWEN_MODEL_PATH": _GEMMA4_PATH,
+            "JARVIS_QWEN_MODEL_PATH": _TURBO_PATH,
             "JARVIS_QWEN_QUANT_ARGS": "",
             "JARVIS_QWEN_DTYPE": "auto",
-            "JARVIS_QWEN_GPU_UTIL": "0.80",
+            "JARVIS_QWEN_GPU_UTIL": "0.82",
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_MAX_NUM_SEQS": "16",
