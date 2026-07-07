@@ -34,8 +34,8 @@ export default function Page() {
       <header className="topbar glass-topbar">
         <div className="presence-core"><span className="presence-ring" /><span className="brand">JARVIS</span></div>
         <span className="presence-text">На связи · командное ядро Gemma 4</span>
-        <span className="pill ok" title="Автономный контур наблюдается во вкладке «Операции»">автономия видна</span>
-        <div className="topbar-tools">
+        <span className="pill ok" title="Автономный контур виден во вкладке «Операции»">автономия под наблюдением</span>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
           <CommandPalette onNavigate={nav} />
           <GpuMeter />
           <span className="topbar-sep" />
@@ -54,7 +54,7 @@ export default function Page() {
       </nav>
 
       <main className="content deck-content">
-        <div style={{ display: view === "chat" ? "block" : "none", height: "100%" }}><ChatView /></div>
+        <div className={`view-host ${view === "chat" ? "active" : ""}`}><ChatView /></div>
         {view === "ops" && <AgentOpsView />}
         {view === "cognitive" && <CognitiveView />}
         {view === "control" && <ControlPanelGemma />}
