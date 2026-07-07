@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Dockerfile — backend-ядро JARVIS-OS (FastAPI server.py + агент-оркестратор + MCP)
 FROM python:3.11-slim
 
