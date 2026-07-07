@@ -1,11 +1,10 @@
-# syntax=docker/dockerfile:1
 # Dockerfile.audio — аудио-слой JARVIS-OS (Faster-Whisper + Kokoro TTS, GPU).
 #
 # ВАЖНО (экономия трафика/места): базируемся на ОБРАЗЕ vLLM, в котором уже есть
 # torch + CUDA + cuDNN + nvidia-* библиотеки. Их слои ОБЩИЕ с vLLM-сервисами,
 # поэтому torch/nvidia НЕ скачиваются и НЕ хранятся повторно. pip ставит только
 # небольшие аудио-зависимости и видит torch уже установленным.
-ARG JARVIS_VLLM_IMAGE=vllm/vllm-openai:latest
+ARG JARVIS_VLLM_IMAGE=vllm/vllm-openai:nightly
 FROM ${JARVIS_VLLM_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
