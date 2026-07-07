@@ -1,0 +1,21 @@
+/* Small runtime fixes kept after the cinematic layers. */
+.jarvis-hero::after {
+  pointer-events: none !important;
+  z-index: 0 !important;
+}
+
+.jarvis-hero-copy,
+.jarvis-hero-actions,
+.jarvis-hero .jarvis-orb {
+  position: relative;
+  z-index: 2;
+}
+
+.jarvis-hero-actions,
+.jarvis-hero-actions .btn {
+  pointer-events: auto;
+}
+
+.hitl-modal {
+  z-index: 200 !important;
+}
