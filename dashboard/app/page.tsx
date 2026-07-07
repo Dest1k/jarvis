@@ -33,9 +33,9 @@ export default function Page() {
       <div className="aurora aurora-b" />
       <header className="topbar glass-topbar">
         <div className="presence-core"><span className="presence-ring" /><span className="brand">JARVIS</span></div>
-        <span className="presence-text">Online · Gemma 4 Command Core</span>
-        <span className="pill ok" title="Autonomy runtime is observable from the Operations tab">autonomy visible</span>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14 }}>
+        <span className="presence-text">На связи · командное ядро Gemma 4</span>
+        <span className="pill ok" title="Автономный контур наблюдается во вкладке «Операции»">автономия видна</span>
+        <div className="topbar-tools">
           <CommandPalette onNavigate={nav} />
           <GpuMeter />
           <span className="topbar-sep" />
@@ -44,13 +44,13 @@ export default function Page() {
       </header>
 
       <nav className="sidebar glass-sidebar">
-        <div className="side-orb"><div className="jarvis-orb" /><span>Good evening, sir.</span></div>
+        <div className="side-orb"><div className="jarvis-orb" /><span>Вечер добрый, сэр.</span></div>
         {NAV.map((n) => (
           <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => setView(n.id)}>
             <span>{n.label}</span><small>{n.sub}</small>
           </button>
         ))}
-        <div className="advisor-mini"><strong>Advisor</strong><span>Для больших целей: “оформи как mission plan”.</span></div>
+        <div className="advisor-mini"><strong>Советник</strong><span>Для больших целей: «оформи как план миссии».</span></div>
       </nav>
 
       <main className="content deck-content">
