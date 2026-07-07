@@ -1,14 +1,5 @@
 # -*- coding: utf-8 -*-
-"""inference.py — Gemma 4 runtime profiles for JARVIS OS.
-
-Only two user-facing profiles are active:
-    • gemma4-mono  — conservative, eager-mode, maximum cold-start stability.
-    • gemma4-turbo — CUDA graphs + larger batching for maximum throughput.
-
-Legacy environment key names remain for compatibility with the existing launcher
-and compose file, but all visible runtime modes are Gemma 4 single-dispatcher
-profiles. Vision and GUI are routed to the same multimodal Gemma endpoint.
-"""
+"""inference.py — Gemma 4 runtime profiles for JARVIS OS."""
 
 from __future__ import annotations
 
@@ -35,20 +26,16 @@ def _solo_vision(max_len: str) -> dict[str, str]:
     }
 
 
-_GEMMA4_COMMON = "--trust-remote-code"
 _GEMMA4_PATH = "/models/gemma4-26b-a4b-nvfp4"
 _GEMMA4_REPO = "nvidia/Gemma-4-26B-A4B-NVFP4"
 
 MODES: dict[str, dict[str, Any]] = {
     "gemma4-mono": {
-        "label": "Gemma 4 Mono · стабильный единый мозг",
+        "label": "Gemma 4 Mono",
         "model_repo": _GEMMA4_REPO,
         "model_name": "gemma4-26b-a4b-nvfp4",
-        "summary": (
-            "Стабильный single-dispatcher режим: eager-mode, KV fp8, большой контекст, "
-            "vision/GUI/код/чат через одну мультимодальную Gemma 4. Рекомендован для первого cold-start."
-        ),
-        "vram": "util 0.82 на RTX 5090 32 ГБ; max len 32k; запас можно увеличить снижением util до 0.78 или max len до 24576.",
+        "summary": "Stable eager dispatcher.",
+        "vram": "util 0.82; max len 32k; max seqs 16.",
         "env": {
             "JARVIS_QWEN_MODEL_NAME": "dispatcher",
             "JARVIS_QWEN_MODEL_PATH": _GEMMA4_PATH,
@@ -57,21 +44,18 @@ MODES: dict[str, dict[str, Any]] = {
             "JARVIS_QWEN_GPU_UTIL": "0.82",
             "JARVIS_QWEN_MAX_LEN": "32768",
             "JARVIS_QWEN_KV_DTYPE": "fp8",
-            "JARVIS_QWEN_MAX_NUM_SEQS": "8",
+            "JARVIS_QWEN_MAX_NUM_SEQS": "16",
             "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
-            "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --max-num-batched-tokens 8192",
+            "JARVIS_QWEN_EXTRA_ARGS": "",
             **_solo_vision("32768"),
         },
     },
     "gemma4-turbo": {
-        "label": "Gemma 4 Turbo · быстрый единый мозг",
+        "label": "Gemma 4 Turbo",
         "model_repo": _GEMMA4_REPO,
         "model_name": "gemma4-26b-a4b-nvfp4",
-        "summary": (
-            "Производительный режим после успешной проверки Mono: CUDA graphs, larger batching, "
-            "агрессивное prefix caching и тот же единый мультимодальный dispatcher."
-        ),
-        "vram": "util 0.80; CUDA graph capture требует чистого VRAM-запаса. Если capture падает — вернуться на gemma4-mono.",
+        "summary": "Graph dispatcher after mono is healthy.",
+        "vram": "util 0.80; max len 32k; max seqs 16.",
         "env": {
             "JARVIS_QWEN_MODEL_NAME": "dispatcher",
             "JARVIS_QWEN_MODEL_PATH": _GEMMA4_PATH,
@@ -82,7 +66,7 @@ MODES: dict[str, dict[str, Any]] = {
             "JARVIS_QWEN_KV_DTYPE": "fp8",
             "JARVIS_QWEN_MAX_NUM_SEQS": "16",
             "JARVIS_QWEN_ENFORCE_EAGER": "",
-            "JARVIS_QWEN_EXTRA_ARGS": f"{_GEMMA4_COMMON} --max-num-batched-tokens 8192",
+            "JARVIS_QWEN_EXTRA_ARGS": "",
             **_solo_vision("32768"),
         },
     },
