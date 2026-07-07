@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Dockerfile.sandbox — изолированная среда исполнения кода кодер-агента.
 # Добавляет компиляторы C/C++ и Node.js поверх python-slim, чтобы инструмент
 # run_code мог исполнять не только Python/Bash, но и C++/C/JavaScript.
