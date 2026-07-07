@@ -3,7 +3,7 @@
   "gemma4-mono": {
     "label": "Gemma 4 Mono — стабильный единый мозг",
     "mono": true,
-    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode. Цель — стабильный cold-start на 32 ГБ VRAM с большим контекстом и без отдельного GUI-движка.",
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode. Scheduler поднят до 16 seq и 16k batched tokens, чтобы входящие агентские задачи лучше загружали GPU без CUDA graph capture.",
     "note": "Рекомендуемый первый запуск. Одна мультимодальная Gemma 4 обслуживает диалог, код, зрение, GUI-навигацию, web/RAG и agent orchestration. Если старт нестабилен — снизь GPU util до 0.78 или max len до 24576.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
@@ -16,9 +16,9 @@
         "JARVIS_QWEN_GPU_UTIL": "0.82",
         "JARVIS_QWEN_MAX_LEN": "32768",
         "JARVIS_QWEN_KV_DTYPE": "fp8",
-        "JARVIS_QWEN_MAX_NUM_SEQS": "8",
+        "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 8192",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 16384",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
@@ -53,7 +53,7 @@
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 8192",
+        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 16384",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
