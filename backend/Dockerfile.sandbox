@@ -1,17 +1,16 @@
 # syntax=docker/dockerfile:1
 # Dockerfile.sandbox — изолированная среда исполнения кода кодер-агента.
 # Добавляет компиляторы C/C++ и Node.js поверх python-slim, чтобы инструмент
-# run_code мог исполнять не только Python/Bash, но и C++/C/JavaScript
-# (например, «hello world на C++»). GPU не пробрасывается, сеть — internal.
+# run_code мог исполнять не только Python/Bash, но и C++/C/JavaScript.
 FROM python:3.11-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
-# build-essential → gcc/g++/make; nodejs → JS. Чистим кэш apt для лёгкости образа.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential gcc g++ make nodejs \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential gcc g++ make nodejs ca-certificates
 
 WORKDIR /workspace
-# Запуск под непривилегированным пользователем (тот же uid, что в compose).
 CMD ["sleep", "infinity"]
