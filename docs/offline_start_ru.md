@@ -6,7 +6,7 @@
 
 1. В Dockerfile убраны явные строки `# syntax=docker/dockerfile:1`. Они заставляли BuildKit отдельно резолвить frontend-образ `docker/dockerfile` перед сборкой.
 
-2. Для vLLM-сервисов в compose задан `pull_policy: ${JARVIS_PULL_POLICY:-if_not_present}`. Docker не должен тянуть vLLM-образ повторно, если он уже есть локально. Для строгого оффлайн-режима можно поставить:
+2. Для vLLM-сервисов в compose задан `pull_policy: ${JARVIS_PULL_POLICY:-if_not_present}`. Docker не должен тянуть vLLM-образ повторно, если он уже есть локально. Для строгого оффлайн-режима используется:
 
 ```env
 JARVIS_PULL_POLICY=never
@@ -18,7 +18,18 @@ JARVIS_PULL_POLICY=never
 powershell -ExecutionPolicy Bypass -File scripts/offline_prefetch.ps1 -Profile gemma4-mono
 ```
 
-Он должен выполняться один раз при наличии интернета.
+Его нужно выполнять один раз при наличии интернета. Для подготовки обоих профилей выполните его дважды:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/offline_prefetch.ps1 -Profile gemma4-mono
+powershell -ExecutionPolicy Bypass -File scripts/offline_prefetch.ps1 -Profile gemma4-turbo
+```
+
+4. Добавлен оффлайн-стартер, который применяет профиль в `wsl/.env`, ставит `JARVIS_PULL_POLICY=never` и запускает JARVIS без сетевого profile-download пути:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/offline_start.ps1 -Profile gemma4-mono
+```
 
 ## Что prefetch готовит
 
@@ -31,19 +42,19 @@ powershell -ExecutionPolicy Bypass -File scripts/offline_prefetch.ps1 -Profile g
 
 ## После подготовки
 
-Обычный запуск:
+Строгий оффлайн-запуск:
 
 ```powershell
-python jarvis.py up --profile gemma4-mono
+powershell -ExecutionPolicy Bypass -File scripts/offline_start.ps1 -Profile gemma4-mono
 ```
 
-Для жёсткого оффлайн-режима добавьте в `wsl/.env`:
+Обычный запуск тоже должен пользоваться локальными образами, если `JARVIS_PULL_POLICY=if_not_present` и все image уже есть:
 
-```env
-JARVIS_PULL_POLICY=never
+```powershell
+python jarvis.py up
 ```
 
-Если при этом образа не хватает, Docker должен не лезть в интернет, а сразу упасть с понятной ошибкой, какой image отсутствует. Тогда нужно временно вернуть интернет и снова выполнить `scripts/offline_prefetch.ps1`.
+Если `JARVIS_PULL_POLICY=never` и какого-то образа не хватает, Docker должен не лезть в интернет, а сразу упасть с понятной ошибкой, какой image отсутствует. Тогда нужно временно вернуть интернет и снова выполнить `scripts/offline_prefetch.ps1`.
 
 ## Что всё ещё может потребовать интернет
 
