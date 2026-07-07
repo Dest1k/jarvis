@@ -9,24 +9,91 @@ const LS_CHATS = "jarvis_chats";
 const TARGET_SR = 16000;
 
 const ACTORS: Record<string, { icon: string; name: string }> = {
-  dispatcher: { icon: "🧠", name: "Core" }, researcher: { icon: "🔎", name: "Researcher" },
-  coder: { icon: "🧑‍💻", name: "Coder" }, sysadmin: { icon: "🛠️", name: "SysAdmin" },
-  critic: { icon: "🛡️", name: "Critic" }, "ui-tars": { icon: "👁️", name: "Vision" },
-  sandbox: { icon: "📦", name: "Sandbox" }, host: { icon: "🪟", name: "Host" },
-  web: { icon: "🌐", name: "Web" }, memory: { icon: "💾", name: "Memory" },
-  local: { icon: "⚡", name: "Local" }, mcp: { icon: "🧩", name: "MCP" }, mission: { icon: "🧭", name: "Mission" },
+  dispatcher: { icon: "🧠", name: "Ядро" }, researcher: { icon: "🔎", name: "Поиск" },
+  coder: { icon: "🧑‍💻", name: "Код" }, sysadmin: { icon: "🛠️", name: "Админ" },
+  critic: { icon: "🛡️", name: "Контроль" }, "ui-tars": { icon: "👁️", name: "Зрение" },
+  sandbox: { icon: "📦", name: "Песочница" }, host: { icon: "🪟", name: "Система" },
+  web: { icon: "🌐", name: "Веб" }, memory: { icon: "💾", name: "Память" },
+  local: { icon: "⚡", name: "Локально" }, mcp: { icon: "🧩", name: "MCP" }, mission: { icon: "🧭", name: "Миссия" },
 };
 const actorInfo = (a?: string) => ACTORS[a || ""] || { icon: "•", name: a || "" };
 
+const TOOL_LABELS: Record<string, string> = {
+  windows: "Windows",
+  shell: "песочница",
+  run_code: "код",
+  gui: "экранный агент",
+  see_screen: "чтение экрана",
+  open_url: "браузер",
+  web_search: "поиск в интернете",
+  web_fetch: "чтение страницы",
+  weather: "погода",
+  wikipedia: "справка",
+  http_request: "HTTP-запрос",
+  exchange_rate: "курс валют",
+  define: "словарь",
+  translate: "перевод",
+  memory_save: "память",
+  memory_search: "поиск в памяти",
+  list_memory: "память",
+  calculator: "калькулятор",
+  now: "время",
+  list_dir: "папка",
+  system_info: "система",
+};
+
 const SUGGESTIONS = [
-  "Оформи это как mission plan: ",
+  "Оформи это как план миссии: ",
   "Проведи диагностику JARVIS и предложи улучшения",
-  "Сделай self-heal check и объясни результат",
+  "Сделай самопроверку JARVIS и объясни результат",
   "Разложи задачу на шаги, риски и план реализации",
-  "Проверь систему через native Windows tools",
+  "Проверь систему через встроенные инструменты Windows",
 ];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const clip = (text: string, max = 240) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+const pickText = (data: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return "";
+};
+const humanAction = (action: string) => action.replace(/_/g, " ").trim() || "действие";
+const formatToolName = (tool = "") => {
+  if (!tool) return "инструмент";
+  if (tool.startsWith("mcp_")) return `MCP «${tool.slice(4).replace(/_/g, " ")}»`;
+  return TOOL_LABELS[tool] || tool.replace(/_/g, " ");
+};
+function formatToolCall(tool: string, args: unknown): string {
+  const label = formatToolName(tool);
+  if (!isRecord(args)) return `Запускаю ${label}.`;
+  const action = pickText(args, ["action", "fn", "method", "operation"]);
+  const goal = pickText(args, ["goal", "task", "instruction", "query", "url", "path", "command", "text", "location"]);
+
+  if (tool === "windows") {
+    const command = pickText(args, ["command", "cmd", "app", "path"]);
+    if (action === "powershell") return `PowerShell: ${clip(command || "выполняю команду")}`;
+    if (action === "exec") return `Команда ОС: ${clip(command || "выполняю команду")}`;
+    if (action === "open_app") return `Открываю приложение: ${clip(command || goal || "указанное окно")}`;
+    if (action === "open_url") return `Открываю ссылку: ${clip(command || goal || "указанный адрес")}`;
+    if (action === "paste_text") return "Вставляю подготовленный текст в активное окно.";
+    if (action === "send_keys") return `Отправляю клавиши: ${clip(pickText(args, ["keys", "text"]) || "комбинация")}`;
+    return `Windows: ${humanAction(action)}${command ? ` — ${clip(command)}` : ""}.`;
+  }
+  if (tool === "gui") return `Работаю с интерфейсом: ${clip(goal || "выполняю визуальный шаг")}`;
+  if (tool === "see_screen") return "Смотрю, что сейчас на экране.";
+  if (tool === "shell") return `Команда в песочнице: ${clip(goal || "выполняю команду")}`;
+  if (tool === "run_code") return "Запускаю код в изолированной среде.";
+  if (tool === "calculator") return `Считаю: ${clip(goal || "выражение")}`;
+  if (tool === "weather") return `Проверяю погоду: ${clip(goal || "указанное место")}`;
+  if (tool === "web_search") return `Ищу в интернете: ${clip(goal || "запрос")}`;
+  if (tool === "web_fetch") return `Читаю страницу: ${clip(goal || "ссылка")}`;
+  if (tool.startsWith("mcp_")) return `${label}: ${clip(goal || action || "выполняю действие")}`;
+  return `${label}: ${clip(goal || humanAction(action) || "выполняю действие")}`;
+}
 
 type StepKind = "thought" | "tool_call" | "tool_result";
 interface Step { kind: StepKind; text: string; tool?: string; ok?: boolean; actor?: string }
@@ -135,7 +202,7 @@ export default function ChatView() {
       const clearActor = () => setActorBySession((p) => ({ ...p, [session]: "" }));
       switch (msg.type) {
         case "thought": upsert(session, id, (m) => m.steps.push({ kind: "thought", text: String(msg.text ?? ""), actor })); break;
-        case "tool_call": upsert(session, id, (m) => m.steps.push({ kind: "tool_call", tool: String(msg.tool ?? ""), actor, text: JSON.stringify(msg.args ?? {}) })); break;
+        case "tool_call": upsert(session, id, (m) => m.steps.push({ kind: "tool_call", tool: String(msg.tool ?? ""), actor, text: formatToolCall(String(msg.tool ?? ""), msg.args ?? {}) })); break;
         case "tool_result": upsert(session, id, (m) => m.steps.push({ kind: "tool_result", tool: String(msg.tool ?? ""), actor, ok: Boolean(msg.ok), text: String(msg.summary ?? "") })); break;
         case "assistant_start": upsert(session, id, (m) => { m.streaming = true; }); break;
         case "token": upsert(session, id, (m) => { m.text += String(msg.content ?? ""); }); break;
@@ -202,14 +269,14 @@ export default function ChatView() {
       <div className="jarvis-hero panel">
         <div className={`jarvis-orb ${activeWorking ? "thinking" : ""}`}><span /></div>
         <div className="jarvis-hero-copy">
-          <div className="eyebrow">JARVIS CORE · GEMMA 4</div>
+          <div className="eyebrow">ЯДРО JARVIS · GEMMA 4</div>
           <h2>{activeWorking ? "Выполняю задачу, сэр." : "Готов к работе."}</h2>
-          <p>{activeWorking && activeActor ? `Сейчас активен ${actorInfo(activeActor).name}. Я сохраню контекст, проверю риски и верну аккуратный результат.` : "Сформулируйте цель обычными словами — я превращу её в план, инструменты и проверяемый результат."}</p>
+          <p>{activeWorking && activeActor ? `Сейчас активен контур «${actorInfo(activeActor).name}». Я сохраню контекст, проверю риски и верну аккуратный результат.` : "Сформулируйте цель обычными словами — я превращу её в план, инструменты и проверяемый результат."}</p>
         </div>
         <div className="jarvis-hero-actions">
-          <span className={`pill ${ready ? "ok" : "warn"}`}>{ready ? "online" : "connecting"}</span>
-          <button className={`btn ${speak ? "primary" : ""}`} onClick={() => setSpeak((v) => !v)} title="Озвучивать ответы">🔊 Voice</button>
-          <button className="btn" onClick={() => setMemOpen(true)} title="Память">🧠 Memory</button>
+          <span className={`pill ${ready ? "ok" : "warn"}`}>{ready ? "на связи" : "подключение"}</span>
+          <button className={`btn ${speak ? "primary" : ""}`} onClick={() => setSpeak((v) => !v)} title="Озвучивать ответы">🔊 Голос</button>
+          <button className="btn" onClick={() => setMemOpen(true)} title="Память">🧠 Память</button>
         </div>
       </div>
       <div className="tab-bar">{tabs.map((t) => <div key={t.id} className={`tab ${t.id === active ? "active" : ""}`} onClick={() => setActive(t.id)}><span className="tab-title">{t.title}{workingSessions.includes(t.id) ? " •" : ""}</span><span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }} title="Закрыть диалог">×</span></div>)}<button className="tab-new" onClick={newTab} title="Новый диалог">＋</button></div>
@@ -217,14 +284,14 @@ export default function ChatView() {
       {attachments.length > 0 && <div className="attach-row">{attachments.map((a) => <div key={a.id} className={`attach-card ${a.status}`} title={a.error || a.name}><span className="attach-icon">{a.status === "uploading" ? "⏳" : a.status === "ready" ? "📄" : "⚠"}</span><span className="attach-name">{a.name}</span>{a.status === "uploading" && <span className="attach-bar"><span className="attach-fill" style={{ width: `${a.percent}%` }} /></span>}{a.status === "ready" && <span className="attach-meta">✓ {a.chunks ?? 0} фрагм.</span>}{a.status === "failed" && <span className="attach-meta err">ошибка</span>}<button className="attach-x" onClick={() => dismissAttach(a)} title="Убрать">×</button></div>)}</div>}
       {micError && <div className="mic-error">⚠ {micError}</div>}
       <div className="prompt-strip">{SUGGESTIONS.map((s) => <button key={s} className="prompt-chip" onClick={() => prime(s)}>{s.replace(": ", "")}</button>)}</div>
-      <div className={`chat-input panel ${listening ? "recording" : ""}`}><input ref={fileInputRef} type="file" multiple style={{ display: "none" }} onChange={(e) => { Array.from(e.target.files || []).forEach(uploadFile); e.target.value = ""; }} /><button className="btn attach-btn" onClick={() => fileInputRef.current?.click()} title="Прикрепить файл">＋</button><button className={`btn mic ${listening ? "recording" : ""}`} onClick={() => (listening ? stopMic() : startMic())}>{listening ? "⏹" : "🎤"}</button>{listening ? <div className="rec-banner"><span className="rec-dot" /><span className="rec-text">Слушаю. Говорите спокойно — я соберу мысль в задачу.</span><div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div></div> : <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Сообщение JARVIS… например: оформи это как mission plan" rows={1} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />}{activeWorking ? <button className="btn danger send" onClick={cancel}>⏹</button> : <button className="btn primary send" onClick={send} disabled={listening}>➤</button>}</div>
+      <div className={`chat-input panel ${listening ? "recording" : ""}`}><input ref={fileInputRef} type="file" multiple style={{ display: "none" }} onChange={(e) => { Array.from(e.target.files || []).forEach(uploadFile); e.target.value = ""; }} /><button className="btn attach-btn" onClick={() => fileInputRef.current?.click()} title="Прикрепить файл">＋</button><button className={`btn mic ${listening ? "recording" : ""}`} onClick={() => (listening ? stopMic() : startMic())}>{listening ? "⏹" : "🎤"}</button>{listening ? <div className="rec-banner"><span className="rec-dot" /><span className="rec-text">Слушаю. Говорите спокойно — я соберу мысль в задачу.</span><div className="vu-meter mic-vu"><div className="vu-fill" style={{ width: `${level * 100}%` }} /></div></div> : <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Сообщение JARVIS… например: оформи это как план миссии" rows={1} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />}{activeWorking ? <button className="btn danger send" onClick={cancel}>⏹</button> : <button className="btn primary send" onClick={send} disabled={listening}>➤</button>}</div>
       {memOpen && <MemoryPanel mem={mem} session={active} onClose={() => setMemOpen(false)} onAction={memAction} />}
     </div>
   );
 }
 
 function EmptyState({ onPick }: { onPick: (s: string) => void }) {
-  return <div className="chat-hello cinematic"><div className="hello-orb"><span /></div><div className="eyebrow">Премиальный режим ассистента</div><h2>Что строим сегодня?</h2><p>Можно дать цель целиком: я разложу её на mission plan, подключу роли, проверю риски и сохраню полезные выводы в память.</p><div className="hello-grid">{SUGGESTIONS.slice(0, 4).map((s) => <button key={s} className="hello-card" onClick={() => onPick(s)}>{s}</button>)}</div><p className="hello-foot">Файлы можно просто перетащить сюда — подключу их к RAG-контексту.</p></div>;
+  return <div className="chat-hello cinematic"><div className="hello-orb"><span /></div><div className="eyebrow">Премиальный режим ассистента</div><h2>Что строим сегодня?</h2><p>Можно дать цель целиком: я разложу её на план миссии, подключу роли, проверю риски и сохраню полезные выводы в память.</p><div className="hello-grid">{SUGGESTIONS.slice(0, 4).map((s) => <button key={s} className="hello-card" onClick={() => onPick(s)}>{s}</button>)}</div><p className="hello-foot">Файлы можно просто перетащить сюда — подключу их к контексту диалога.</p></div>;
 }
 
 function MessageBubble({ m, session, epoch }: { m: ChatMessage; session: string; epoch: number }) {
@@ -234,12 +301,12 @@ function MessageBubble({ m, session, epoch }: { m: ChatMessage; session: string;
   const isUser = m.role === "user";
   useEffect(() => { setOpen(false); setWhy(null); }, [epoch]);
   const explain = async () => { if (why !== null) { setWhy(null); return; } setBusy(true); try { const r = await fetch(`/api/core/api/cognitive/db/episodic_memory_logs?q=${encodeURIComponent(session)}&limit=8`, { cache: "no-store" }); const d = await r.json(); setWhy((d?.data?.rows || []).map((x: any) => ({ content: String(x.content || ""), entry_type: String(x.entry_type || "") }))); } catch { setWhy([]); } setBusy(false); };
-  return <div className={`msg-row ${isUser ? "user" : "assistant"}`}><div className={`bubble ${isUser ? "user" : "assistant"} ${m.error ? "error" : ""}`}>{!isUser && m.steps.length > 0 && <div className="steps"><button className="steps-toggle" onClick={() => setOpen((v) => !v)}>{open ? "▾" : "▸"} Ход выполнения ({m.steps.length})</button>{open && <div className="steps-body">{m.steps.map((s, i) => <div key={i} className={`step ${s.kind}`}><span className="step-actor" title={actorInfo(s.actor).name}>{actorInfo(s.actor).icon}</span>{" "}{s.kind === "thought" && <span>{s.text}</span>}{s.kind === "tool_call" && <span>🔧 <code>{s.tool}</code> {s.text}</span>}{s.kind === "tool_result" && <span>{s.ok ? "✅" : "⚠️"} <code>{s.tool}</code>: {s.text}</span>}</div>)}</div>}</div>}<div className="bubble-text">{renderContent(m.text)}</div>{m.streaming && <span className="caret">▋</span>}{!isUser && !m.streaming && m.text && m.steps.length > 0 && <div className="why-row"><button className="why-btn" onClick={explain} disabled={busy}>{busy ? "…" : why !== null ? "скрыть ▲" : "почему? ▾"}</button>{why && <div className="why-panel">{why.length === 0 && <div className="why-empty">Трасса пуста для этого диалога.</div>}{why.map((w, i) => <div key={i} className={`why-item why-${w.entry_type}`}><span className="why-type">{w.entry_type}</span> {w.content.slice(0, 240)}</div>)}</div>}</div>}</div></div>;
+  return <div className={`msg-row ${isUser ? "user" : "assistant"}`}><div className={`bubble ${isUser ? "user" : "assistant"} ${m.error ? "error" : ""}`}>{!isUser && m.steps.length > 0 && <div className="steps"><button className="steps-toggle" onClick={() => setOpen((v) => !v)}>{open ? "▾" : "▸"} Ход выполнения ({m.steps.length})</button>{open && <div className="steps-body">{m.steps.map((s, i) => <div key={i} className={`step ${s.kind}`}><span className="step-actor" title={actorInfo(s.actor).name}>{actorInfo(s.actor).icon}</span>{" "}{s.kind === "thought" && <span>{s.text}</span>}{s.kind === "tool_call" && <span className="tool-call-summary">🔧 {s.text}</span>}{s.kind === "tool_result" && <span>{s.ok ? "✅" : "⚠️"} {formatToolName(s.tool)}: {s.text}</span>}</div>)}</div>}</div>}<div className="bubble-text">{renderContent(m.text)}</div>{m.streaming && <span className="caret">▋</span>}{!isUser && !m.streaming && m.text && m.steps.length > 0 && <div className="why-row"><button className="why-btn" onClick={explain} disabled={busy}>{busy ? "…" : why !== null ? "скрыть ▲" : "почему? ▾"}</button>{why && <div className="why-panel">{why.length === 0 && <div className="why-empty">Трасса пуста для этого диалога.</div>}{why.map((w, i) => <div key={i} className={`why-item why-${w.entry_type}`}><span className="why-type">{w.entry_type}</span> {w.content.slice(0, 240)}</div>)}</div>}</div>}</div></div>;
 }
 
 function MemoryPanel({ mem, session, onClose, onAction }: { mem: MemoryOverview | null; session: string; onClose: () => void; onAction: (a: string, extra?: Record<string, unknown>) => void }) {
   const [note, setNote] = useState("");
-  return <div className="hitl-modal" onClick={onClose}><div className="hitl-card mem-card" onClick={(e) => e.stopPropagation()}><h3 style={{ marginTop: 0 }}>🧠 Память JARVIS · диалог «{session}»</h3><div className="mem-section"><strong>Оперативный контекст</strong><p style={{ color: "var(--muted)", fontSize: 13, margin: "4px 0" }}>Реплик в активном окне: {mem?.recent_count ?? "—"}. Runtime trace/«почему» очищается вместе с reset/flush.</p>{mem?.summary && <pre className="log-stream" style={{ height: "12vh" }}>{mem.summary}</pre>}<div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}><button className="btn" onClick={() => onAction("flush")}>📥 Сжать в сводку и скрыть «почему»</button><button className="btn danger" onClick={() => onAction("reset")}>🧹 Очистить контекст и экран</button></div></div><div className="mem-section"><strong>Долговременная память ({mem?.longterm_count ?? 0})</strong><div className="log-stream" style={{ height: "22vh", marginTop: 6 }}>{(mem?.longterm ?? []).length === 0 && <span style={{ color: "var(--muted)" }}>пусто</span>}{(mem?.longterm ?? []).map((it) => <div key={it.id} className="log-line"><span style={{ color: "var(--accent)" }}>[{it.kind}]</span> {it.text}</div>)}</div><div style={{ display: "flex", gap: 8, marginTop: 8 }}><input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Запомнить факт…" style={{ flex: 1 }} /><button className="btn" onClick={() => { if (note.trim()) { onAction("save", { text: note.trim() }); setNote(""); } }}>＋ Запомнить</button><button className="btn danger" onClick={() => onAction("clear_longterm")}>Очистить всё</button></div></div><div style={{ textAlign: "right", marginTop: 10 }}><button className="btn" onClick={onClose}>Закрыть</button></div></div></div>;
+  return <div className="hitl-modal" onClick={onClose}><div className="hitl-card mem-card" onClick={(e) => e.stopPropagation()}><h3 style={{ marginTop: 0 }}>🧠 Память JARVIS · диалог «{session}»</h3><div className="mem-section"><strong>Оперативный контекст</strong><p style={{ color: "var(--muted)", fontSize: 13, margin: "4px 0" }}>Реплик в активном окне: {mem?.recent_count ?? "—"}. След выполнения и блок «почему» очищаются вместе со сбросом или сжатием.</p>{mem?.summary && <pre className="log-stream" style={{ height: "12vh" }}>{mem.summary}</pre>}<div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}><button className="btn" onClick={() => onAction("flush")}>📥 Сжать в сводку и скрыть «почему»</button><button className="btn danger" onClick={() => onAction("reset")}>🧹 Очистить контекст и экран</button></div></div><div className="mem-section"><strong>Долговременная память ({mem?.longterm_count ?? 0})</strong><div className="log-stream" style={{ height: "22vh", marginTop: 6 }}>{(mem?.longterm ?? []).length === 0 && <span style={{ color: "var(--muted)" }}>пусто</span>}{(mem?.longterm ?? []).map((it) => <div key={it.id} className="log-line"><span style={{ color: "var(--accent)" }}>[{it.kind}]</span> {it.text}</div>)}</div><div style={{ display: "flex", gap: 8, marginTop: 8 }}><input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Запомнить факт…" style={{ flex: 1 }} /><button className="btn" onClick={() => { if (note.trim()) { onAction("save", { text: note.trim() }); setNote(""); } }}>＋ Запомнить</button><button className="btn danger" onClick={() => onAction("clear_longterm")}>Очистить всё</button></div></div><div style={{ textAlign: "right", marginTop: 10 }}><button className="btn" onClick={onClose}>Закрыть</button></div></div></div>;
 }
 
 function renderContent(text: string) {
