@@ -147,6 +147,7 @@ export default function ChatView() {
   const speakRef = useRef(false);
   const activeRef = useRef(active);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const feedRef = useRef<HTMLDivElement | null>(null);
   const workingIds = useRef<Record<string, string>>({});
   const msgToSession = useRef<Record<string, string>>({});
   const micCtxRef = useRef<AudioContext | null>(null);
@@ -231,7 +232,12 @@ export default function ChatView() {
   }, [upsert, clearUI]);
 
   const messages = chats[active] || [];
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!feed || messages.length === 0) return;
+    const id = window.requestAnimationFrame(() => { feed.scrollTop = feed.scrollHeight; });
+    return () => window.cancelAnimationFrame(id);
+  }, [messages]);
 
   const newTab = () => { const id = "s_" + uid(); setTabs((t) => [...t, { id, title: `Чат ${t.length + 1}` }]); setChats((c) => ({ ...c, [id]: [] })); setActive(id); };
   const closeTab = (id: string) => { setTabs((t) => { const left = t.filter((x) => x.id !== id); if (!left.length) { setActive("default"); return [{ id: "default", title: "Чат 1" }]; } if (active === id) setActive(left[0].id); return left; }); setChats((c) => { const n = { ...c }; delete n[id]; return n; }); clearUI(id, "reset"); chatRef.current?.sendJson({ type: "reset_context", session: id }); };
@@ -280,7 +286,7 @@ export default function ChatView() {
         </div>
       </div>
       <div className="tab-bar">{tabs.map((t) => <div key={t.id} className={`tab ${t.id === active ? "active" : ""}`} onClick={() => setActive(t.id)}><span className="tab-title">{t.title}{workingSessions.includes(t.id) ? " •" : ""}</span><span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }} title="Закрыть диалог">×</span></div>)}<button className="tab-new" onClick={newTab} title="Новый диалог">＋</button></div>
-      <div className="chat-feed">{messages.length === 0 && <EmptyState onPick={prime} />}{messages.map((m) => <MessageBubble key={`${m.id}:${activeEpoch}`} m={m} session={active} epoch={activeEpoch} />)}<div ref={bottomRef} /></div>
+      <div className="chat-feed" ref={feedRef}>{messages.length === 0 && <EmptyState onPick={prime} />}{messages.map((m) => <MessageBubble key={`${m.id}:${activeEpoch}`} m={m} session={active} epoch={activeEpoch} />)}<div ref={bottomRef} /></div>
       {attachments.length > 0 && <div className="attach-row">{attachments.map((a) => <div key={a.id} className={`attach-card ${a.status}`} title={a.error || a.name}><span className="attach-icon">{a.status === "uploading" ? "⏳" : a.status === "ready" ? "📄" : "⚠"}</span><span className="attach-name">{a.name}</span>{a.status === "uploading" && <span className="attach-bar"><span className="attach-fill" style={{ width: `${a.percent}%` }} /></span>}{a.status === "ready" && <span className="attach-meta">✓ {a.chunks ?? 0} фрагм.</span>}{a.status === "failed" && <span className="attach-meta err">ошибка</span>}<button className="attach-x" onClick={() => dismissAttach(a)} title="Убрать">×</button></div>)}</div>}
       {micError && <div className="mic-error">⚠ {micError}</div>}
       <div className="prompt-strip">{SUGGESTIONS.map((s) => <button key={s} className="prompt-chip" onClick={() => prime(s)}>{s.replace(": ", "")}</button>)}</div>
