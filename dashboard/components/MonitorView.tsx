@@ -66,7 +66,7 @@ export default function MonitorView() {
   const shown = useMemo(() => (expanded ? [expanded] : services), [expanded, services]);
 
   return (
-    <div style={{ display: "grid", gridTemplateRows: "auto 1fr", gap: 12, height: "100%", minHeight: 0 }}>
+    <div style={{ display: "grid", gridTemplateRows: "auto minmax(0, 1fr)", gap: 12, height: "100%", minHeight: 0, overflow: "hidden" }}>
       <div className="panel monitor-bar">
         <span className={`status-dot ${conn === "open" ? "ok" : "warn"}`} />
         <strong>Мониторная</strong>
@@ -85,7 +85,12 @@ export default function MonitorView() {
 }
 
 function LogPane({ svc, label, lines, expanded, onToggle }: { svc: string; label: string; lines: Line[]; expanded: boolean; onToggle: () => void }) {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { bottomRef.current?.scrollIntoView(); }, [lines]);
-  return <div className="panel log-pane"><div className="log-pane-head"><strong>{label}</strong><span style={{ color: "var(--muted)", fontSize: 11 }}>{lines.length}</span><button className="btn pane-btn" onClick={onToggle} title="Развернуть/свернуть">{expanded ? "⤡" : "⤢"}</button></div><div className="log-stream log-pane-body" data-svc={svc}>{lines.length === 0 && <span style={{ color: "var(--muted)" }}>ожидание логов…</span>}{lines.map((l, i) => <div key={i} className={`log-line ${l.level}`}>{l.line}</div>)}<div ref={bottomRef} /></div></div>;
+  const streamRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    const id = window.requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+    return () => window.cancelAnimationFrame(id);
+  }, [lines]);
+  return <div className="panel log-pane"><div className="log-pane-head"><strong>{label}</strong><span style={{ color: "var(--muted)", fontSize: 11 }}>{lines.length}</span><button className="btn pane-btn" onClick={onToggle} title="Развернуть/свернуть">{expanded ? "⤡" : "⤢"}</button></div><div className="log-stream log-pane-body" data-svc={svc} ref={streamRef}>{lines.length === 0 && <span style={{ color: "var(--muted)" }}>ожидание логов…</span>}{lines.map((l, i) => <div key={i} className={`log-line ${l.level}`}>{l.line}</div>)}</div></div>;
 }
