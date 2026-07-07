@@ -1,10 +1,10 @@
 {
-  "_comment": "JARVIS OS runtime profiles. Only Gemma 4 is active: mono is the conservative eager profile, turbo enables CUDA graphs for maximum throughput. Legacy model-specific env key names remain as compatibility aliases inside the launcher/compose, but both profiles route vision and GUI to the same Gemma dispatcher endpoint.",
+  "_comment": "JARVIS OS runtime profiles. Gemma 4 is the active unified dispatcher.",
   "gemma4-mono": {
     "label": "Gemma 4 Mono — стабильный единый мозг",
     "mono": true,
-    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode. Scheduler поднят до 16 seq и 16k batched tokens, чтобы входящие агентские задачи лучше загружали GPU без CUDA graph capture.",
-    "note": "Рекомендуемый первый запуск. Одна мультимодальная Gemma 4 обслуживает диалог, код, зрение, GUI-навигацию, web/RAG и agent orchestration. Если старт нестабилен — снизь GPU util до 0.78 или max len до 24576.",
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, eager-mode.",
+    "note": "Рекомендуемый первый запуск. Единая мультимодальная Gemma 4 обслуживает диалог, код, зрение и GUI-навигацию.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -18,7 +18,6 @@
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "--enforce-eager",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 16384",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
@@ -38,8 +37,8 @@
   "gemma4-turbo": {
     "label": "Gemma 4 Turbo — быстрый единый мозг",
     "mono": true,
-    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, CUDA graphs, larger batching. Цель — максимальная скорость на прогретом vLLM-кэше при чистой VRAM.",
-    "note": "Боевой производительный режим после успешной проверки mono. Первый старт дольше из-за графов/кэша. Если vLLM падает на CUDA graph capture — вернись на gemma4-mono.",
+    "vram": "Gemma-4-26B-A4B NVFP4, KV fp8, CUDA graphs.",
+    "note": "Производительный режим после успешной проверки mono.",
     "dispatcher": {
       "repo": "nvidia/Gemma-4-26B-A4B-NVFP4",
       "name": "gemma4-26b-a4b-nvfp4",
@@ -53,7 +52,6 @@
         "JARVIS_QWEN_KV_DTYPE": "fp8",
         "JARVIS_QWEN_MAX_NUM_SEQS": "16",
         "JARVIS_QWEN_ENFORCE_EAGER": "",
-        "JARVIS_QWEN_EXTRA_ARGS": "--trust-remote-code --max-num-batched-tokens 16384",
         "JARVIS_ENABLE_UITARS": "0"
       }
     },
