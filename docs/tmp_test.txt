@@ -1,1 +1,1 @@
-max batched tokens 8192
+JARVIS_SELF_HEAL_ENABLE=1
