@@ -15,6 +15,14 @@ import GpuMeter from "@/components/GpuMeter";
 
 type View = "chat" | "control" | "monitor" | "cognitive" | "ops";
 
+const ACTIVE_VIEW_KEY = "jarvis_active_view";
+const VIEWS = new Set<View>(["chat", "control", "monitor", "cognitive", "ops"]);
+const readInitialView = (): View => {
+  if (typeof window === "undefined") return "chat";
+  const stored = window.localStorage.getItem(ACTIVE_VIEW_KEY) as View | null;
+  return stored && VIEWS.has(stored) ? stored : "chat";
+};
+
 const NAV: { id: View; label: string; sub: string }[] = [
   { id: "chat", label: "💬 Чат", sub: "диалог" },
   { id: "ops", label: "🧭 Операции", sub: "автономия" },
@@ -24,8 +32,18 @@ const NAV: { id: View; label: string; sub: string }[] = [
 ];
 
 export default function Page() {
-  const [view, setView] = useState<View>("chat");
-  const nav = (v: string) => setView(v as View);
+  const [view, setViewState] = useState<View>("chat");
+  const [hydrated, setHydrated] = useState(false);
+  const setView = (next: View) => {
+    setViewState(next);
+    if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_VIEW_KEY, next);
+  };
+  const nav = (v: string) => { if (VIEWS.has(v as View)) setView(v as View); };
+
+  useEffect(() => {
+    setViewState(readInitialView());
+    setHydrated(true);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -74,10 +92,10 @@ export default function Page() {
 
       <main className="content deck-content">
         <div className={`view-host ${view === "chat" ? "active" : ""}`}><ChatView /></div>
-        {view === "ops" && <AgentOpsView />}
-        {view === "cognitive" && <CognitiveView />}
-        {view === "control" && <ControlPanelGemma />}
-        {view === "monitor" && <MonitorView />}
+        {hydrated && view === "ops" && <AgentOpsView />}
+        {hydrated && view === "cognitive" && <CognitiveView />}
+        {hydrated && view === "control" && <ControlPanelGemma />}
+        {hydrated && view === "monitor" && <MonitorView />}
       </main>
 
       <HitlGate />
