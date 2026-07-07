@@ -2,7 +2,7 @@
 /**
  * page.tsx — Command Center JARVIS-OS.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ControlPanelGemma from "@/components/ControlPanelGemma";
 import ChatView from "@/components/ChatView";
 import MonitorView from "@/components/MonitorView";
@@ -26,6 +26,25 @@ const NAV: { id: View; label: string; sub: string }[] = [
 export default function Page() {
   const [view, setView] = useState<View>("chat");
   const nav = (v: string) => setView(v as View);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
+    const resetWindowScroll = () => {
+      if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    };
+    resetWindowScroll();
+    const id = window.setInterval(resetWindowScroll, 150);
+    const stop = window.setTimeout(() => window.clearInterval(id), 2500);
+    window.addEventListener("scroll", resetWindowScroll, { passive: true });
+    return () => {
+      window.clearInterval(id);
+      window.clearTimeout(stop);
+      window.removeEventListener("scroll", resetWindowScroll);
+    };
+  }, []);
 
   return (
     <div className="app-grid command-deck">
