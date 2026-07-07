@@ -2,14 +2,17 @@
 # Dockerfile — backend-ядро JARVIS-OS (FastAPI server.py + агент-оркестратор + MCP)
 FROM python:3.11-slim
 
-# Системные утилиты: docker-cli (управление sandbox), git (GitPython/MCP), ffmpeg,
-# xdotool (проброс ввода), Xvfb + fluxbox (виртуальный десктоп), curl (healthcheck),
-# nodejs/npm — для TS-based MCP-серверов.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Системные утилиты. BuildKit cache mounts сохраняют apt metadata/.deb между
+# пересборками: при нестабильном интернете незавершённый слой может стартовать
+# заново, но уже скачанные пакеты остаются в builder cache.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         curl git ffmpeg xdotool docker.io \
         xvfb fluxbox x11-utils \
-        nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
+        nodejs npm
 
 WORKDIR /app
 
@@ -31,7 +34,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -c constraints.txt \
         mcp mcp-server-fetch mcp-server-time mcp-server-git mcp-server-sqlite \
     || echo "[warn] MCP python-серверы не установились — агент будет без них"
-RUN npm install -g --no-fund --no-audit \
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g --no-fund --no-audit \
         @modelcontextprotocol/server-filesystem \
         @modelcontextprotocol/server-memory \
         @modelcontextprotocol/server-sequential-thinking \
