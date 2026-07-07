@@ -52,3 +52,30 @@
 .service-row { border-top: 1px solid var(--border); padding: 8px 0; color: var(--muted); font-family: "JetBrains Mono", "Cascadia Code", monospace; font-size: 12px; }
 .small-log { height: 180px !important; }
 @media (max-width: 860px) { .app-grid { grid-template-columns: 1fr; grid-template-rows: 64px auto 1fr; } .topbar { grid-column: 1; } .sidebar { grid-row: 2; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); } .side-orb,.advisor-mini { display: none; } .control-hero { align-items: flex-start; flex-direction: column; } }
+
+/* Layout fix: the shell must own the viewport; only the chat feed scrolls. */
+html, body { height: 100%; min-height: 100%; overflow: hidden; }
+.app-grid.command-deck {
+  display: grid;
+  grid-template-areas: "topbar topbar" "sidebar content";
+  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-rows: 68px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.topbar { grid-area: topbar; min-width: 0; overflow: hidden; }
+.topbar-tools { margin-left: auto; display: flex; align-items: center; gap: 14px; min-width: 0; }
+.sidebar.glass-sidebar { grid-area: sidebar; min-height: 0; overflow: hidden; }
+.content.deck-content { grid-area: content; min-width: 0; min-height: 0; height: 100%; overflow: hidden !important; display: flex; flex-direction: column; }
+.content.deck-content > div { min-width: 0; min-height: 0; height: 100%; }
+.chat-wrap { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: hidden; }
+.chat-feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-right: 10px; }
+.chat-input.panel { position: sticky; bottom: 0; z-index: 6; }
+.bubble { max-width: min(72rem, calc(100% - 56px)); overflow-wrap: anywhere; }
+.step { overflow-wrap: anywhere; }
+.control-v3 { height: 100%; min-height: 0; overflow: auto; }
+@media (max-width: 1100px) { .app-grid.command-deck { grid-template-columns: 82px minmax(0, 1fr); } .presence-text, .side-orb span, .advisor-mini, .nav-item small { display: none; } }
+@media (max-width: 760px) { .app-grid.command-deck { grid-template-areas: "topbar" "sidebar" "content"; grid-template-columns: minmax(0, 1fr); grid-template-rows: 64px auto minmax(0, 1fr); } .topbar { grid-column: auto; } .sidebar.glass-sidebar { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); } .nav-item { min-width: 72px; margin-bottom: 0; } }
