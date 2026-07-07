@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, AsyncIterator, Optional
 
 from . import agent as agent  # noqa: F401
@@ -97,6 +98,84 @@ if _CLUSTER_ENABLED:
         log.debug("sub-agent cluster patch skipped: %s", exc)
 else:
     log.info("Cluster offload disabled (JARVIS_CLUSTER_ENABLE=0).")
+
+
+def _strip_outer_quotes(text: str) -> str:
+    text = (text or "").strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"`":
+        text = text[1:-1].strip()
+    return text
+
+
+def _extract_powershell_payload(command: str) -> str:
+    """powershell -NoExit -Command "..." → только полезная команда без оболочки."""
+    text = (command or "").strip()
+    m = re.match(r"(?is)^\s*(?:powershell|pwsh)(?:\.exe)?\s+(.*)$", text)
+    if not m:
+        return text
+    tail = m.group(1).strip()
+    cm = re.search(r"(?is)(?:--%\s+)?(?:-|/)c(?:ommand)?\s+(.+)$", tail)
+    if cm:
+        return _strip_outer_quotes(cm.group(1))
+    # Без явного -Command: убираем типовые флаги оболочки, остальное считаем командой.
+    tail = re.sub(r"(?is)(?:^|\s)-(?:NoExit|NoProfile|NonInteractive|ExecutionPolicy)\b(?:\s+\S+)?", " ", tail)
+    return _strip_outer_quotes(tail.strip()) or text
+
+
+def _coerce_windows_args(args: Any) -> dict[str, Any]:
+    """
+    Защитная нормализация Windows-вызовов.
+
+    Gemma иногда отдаёт `action=windows` и строковый input вида
+    `powershell -NoExit -Command "..."`. Старый handler видел action='' и падал
+    «Неизвестное действие». Здесь превращаем такие формы в валидный вызов.
+    """
+    if not isinstance(args, dict):
+        args = {"command": str(args or "")}
+    args = dict(args or {})
+    action = str(args.get("action") or "").strip()
+    command = str(args.get("command") or args.get("cmd") or args.get("value") or "").strip()
+
+    if not action and command:
+        low = command.lower().strip()
+        if re.match(r"^(powershell|pwsh)(\.exe)?\b", low):
+            args["action"] = "powershell"
+            args["command"] = _extract_powershell_payload(command)
+        elif low.startswith(("cmd /k", "cmd.exe /k")):
+            args["action"] = "open_app"
+            args["command"] = command
+        else:
+            args["action"] = "exec"
+            args["command"] = command
+        return args
+
+    if action in ("powershell", "exec") and command and re.match(r"(?is)^\s*(powershell|pwsh)(\.exe)?\b", command):
+        args["action"] = "powershell"
+        args["command"] = _extract_powershell_payload(command)
+    return args
+
+
+try:
+    _raw_normalize_plan = agent._normalize_plan  # type: ignore[attr-defined]
+
+    def _normalize_plan_with_windows_repair(action: str, args: Any) -> tuple[str, dict[str, Any]]:
+        normalized_action, normalized_args = _raw_normalize_plan(action, args)
+        if normalized_action == "windows":
+            normalized_args = _coerce_windows_args(normalized_args)
+        return normalized_action, normalized_args
+
+    agent._normalize_plan = _normalize_plan_with_windows_repair  # type: ignore[attr-defined]
+
+    _windows_tool = agent._registry.get("windows")  # type: ignore[attr-defined]
+    if _windows_tool is not None:
+        _raw_windows_handler = _windows_tool.handler
+
+        async def _windows_handler_with_repair(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+            return await _raw_windows_handler(_coerce_windows_args(args), ctx)
+
+        _windows_tool.handler = _windows_handler_with_repair
+except Exception as exc:  # noqa: BLE001
+    log.debug("windows tool repair patch skipped: %s", exc)
 
 _raw_reset_context = agent.reset_context
 _raw_run_chat = agent.run_chat
