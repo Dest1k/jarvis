@@ -1,3 +1,3 @@
 # Runtime advisory
 
-This note is kept intentionally short. The active runtime defaults are now defined in compose and the inference profiles.
+The active runtime defaults are defined in compose and inference profiles.
