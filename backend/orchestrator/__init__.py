@@ -16,14 +16,35 @@ from . import persona
 
 log = logging.getLogger("jarvis.orchestrator")
 
+# agent.py читает флаг автономности при импорте. В тестах и smoke-прогонах пакет
+# иногда уже импортирован в процессе до установки env, поэтому синхронизируем флаг
+# здесь и перед каждым ходом (см. run_chat ниже). Это не выключает автономность в
+# обычном запуске, а делает JARVIS_AUTONOMOUS=0 надёжным и детерминированным.
+def _sync_runtime_flags() -> None:
+    try:
+        agent.AUTONOMOUS_ENABLED = os.environ.get("JARVIS_AUTONOMOUS", "1") != "0"  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        log.debug("runtime flag sync skipped: %s", exc)
+
+
+_sync_runtime_flags()
+
 _NATIVE_MANDATE = (
-    "NATIVE HOST API MANDATE: для системной информации, процессов, служб, событий, "
-    "железа и окон сначала используй native_host/native_window/native_ui (WMI/CIM, "
-    "Win32 HWND, UI Automation). windows.exec/powershell и текстовый CLI-парсинг — "
-    "fallback, только если native tool недоступен или вернул недостаточно данных. "
-    "Для широких целей используй mission:plan/status/execute/run_role/learning_tick, "
-    "чтобы создавать durable project plan, исполнять runnable-задачи и подключать "
-    "суб-агентов, а не держать всё в одном сообщении."
+    "NATIVE LOW-LEVEL CONTROL MANDATE: работай с ОС и приложениями на системном "
+    "уровне. Для системной информации, процессов, служб, событий, железа, окон и "
+    "элементов интерфейса сначала используй native_host/native_window/native_ui "
+    "(WMI/CIM, Win32 HWND, UI Automation, доступные Linux desktop APIs). "
+    "windows.exec/powershell и текстовый CLI-парсинг — fallback, только если "
+    "native-инструмент недоступен или вернул недостаточно данных. Визуальные клики "
+    "через gui — последний fallback, когда native/API/CLI путь не сработал или "
+    "цель действительно только интерактивная. Если пользователь просит открыть "
+    "консоль и видеть вывод в ней — открывай реальное окно терминала; если просит "
+    "просто получить данные — выполняй команду и кратко пересказывай наблюдение. "
+    "Кластеризацию НЕ включай и не предлагай: это дорожная карта, текущий режим — "
+    "локальный JARVIS без offload на внешние узлы. Для широких целей используй "
+    "mission:plan/status/execute/run_role/learning_tick, чтобы создавать durable "
+    "project plan, исполнять runnable-задачи и подключать суб-агентов, а не держать "
+    "всё в одном сообщении."
 )
 
 try:
@@ -49,29 +70,33 @@ try:
 except Exception as exc:  # noqa: BLE001
     log.debug("mission tool registration skipped: %s", exc)
 
-try:
-    from cognitive_core import subagents as _cc_subagents
-    from .cluster import cluster_router
-    _raw_cc_run_role = _cc_subagents.run_role
+_CLUSTER_ENABLED = os.environ.get("JARVIS_CLUSTER_ENABLE", "0") == "1"
+if _CLUSTER_ENABLED:
+    try:
+        from cognitive_core import subagents as _cc_subagents
+        from .cluster import cluster_router
+        _raw_cc_run_role = _cc_subagents.run_role
 
-    async def _cluster_run_role(role: str, task: str, *, chat: Any, context: str = "") -> dict[str, Any]:
-        if os.environ.get("JARVIS_CLUSTER_ENABLE", "1") != "0":
-            messages = [{"role": "system", "content": f"Ты — {role}-Agent JARVIS. Верни краткий рабочий brief для Core JARVIS."}]
-            if context:
-                messages.append({"role": "system", "content": "Контекст:\n" + context})
-            messages.append({"role": "user", "content": task})
-            try:
-                res = await cluster_router.offload_chat(messages, role=role, max_tokens=1200)
-                if res.get("ok"):
-                    return {"ok": True, "role": role, "content": res.get("content", ""), "node": res.get("node"), "offloaded": True}
-            except Exception as exc:  # noqa: BLE001
-                log.debug("cluster offload skipped for role=%s: %s", role, exc)
-        return await _raw_cc_run_role(role, task, chat=chat, context=context)
+        async def _cluster_run_role(role: str, task: str, *, chat: Any, context: str = "") -> dict[str, Any]:
+            if os.environ.get("JARVIS_CLUSTER_ENABLE", "0") == "1":
+                messages = [{"role": "system", "content": f"Ты — {role}-Agent JARVIS. Верни краткий рабочий brief для Core JARVIS."}]
+                if context:
+                    messages.append({"role": "system", "content": "Контекст:\n" + context})
+                messages.append({"role": "user", "content": task})
+                try:
+                    res = await cluster_router.offload_chat(messages, role=role, max_tokens=1200)
+                    if res.get("ok"):
+                        return {"ok": True, "role": role, "content": res.get("content", ""), "node": res.get("node"), "offloaded": True}
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("cluster offload skipped for role=%s: %s", role, exc)
+            return await _raw_cc_run_role(role, task, chat=chat, context=context)
 
-    _cc_subagents.run_role = _cluster_run_role
-    log.info("Cognitive sub-agent cluster offload enabled.")
-except Exception as exc:  # noqa: BLE001
-    log.debug("sub-agent cluster patch skipped: %s", exc)
+        _cc_subagents.run_role = _cluster_run_role
+        log.info("Cognitive sub-agent cluster offload enabled.")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("sub-agent cluster patch skipped: %s", exc)
+else:
+    log.info("Cluster offload disabled (JARVIS_CLUSTER_ENABLE=0).")
 
 _raw_reset_context = agent.reset_context
 _raw_run_chat = agent.run_chat
@@ -164,6 +189,7 @@ async def stop_background_runtime() -> None:
 
 
 async def run_chat(session_id: str, user_text: str, bridge: Optional[Any] = None) -> AsyncIterator[dict[str, Any]]:
+    _sync_runtime_flags()
     await ensure_background_runtime(bridge)
     if _idle_loop is not None:
         _idle_loop.mark_user_activity(active=True)
@@ -185,7 +211,8 @@ def skills_overview() -> dict[str, Any]:
     data["runtime"] = background_status()
     data["native_tools"] = ["native_host", "native_window", "native_ui"]
     data["mission_tool"] = "mission"
-    data["cluster"] = cluster_router.status() if "cluster_router" in globals() else None
+    data["cluster"] = (cluster_router.status() if _CLUSTER_ENABLED and "cluster_router" in globals()
+                       else {"enabled": False, "reason": "JARVIS_CLUSTER_ENABLE=0"})
     return data
 
 
