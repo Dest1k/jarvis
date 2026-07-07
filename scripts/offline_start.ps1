@@ -11,4 +11,4 @@ $env:JARVIS_PULL_POLICY = "never"
 $env:COMPOSE_DOCKER_CLI_BUILD = "1"
 $env:DOCKER_BUILDKIT = "1"
 
-python jarvis.py up --profile $Profile --offline
+python jarvis.py up --profile $Profile
