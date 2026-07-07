@@ -13,6 +13,10 @@ Both profiles use one multimodal Gemma 4 dispatcher for conversation, coding,
 vision reasoning and GUI intent. No separate GUI model is part of the active
 runtime.
 
+Cluster offload is intentionally disabled in the active runtime. Treat LAN/Mesh
+workers as roadmap only; keep large work local through mission plans until the
+cluster path is explicitly re-enabled and tested.
+
 ## Recommended startup path
 
 ```powershell
@@ -33,6 +37,18 @@ Then enable audio only after the dispatcher is stable:
 ```powershell
 python jarvis.py up --profile gemma4-turbo
 ```
+
+## Build cache notes for weak networks
+
+The Dockerfiles use BuildKit cache mounts for package managers: apt metadata and
+packages, pip wheels, and npm cache are kept in the local builder cache between
+normal rebuilds. The model/runtime data lives in named Docker volumes such as
+`jarvis-models`, `jarvis-hf`, and `jarvis-vllm-cache`.
+
+If the connection drops during a build, repeat the same build command without
+forcing a cache reset. Avoid clearing the Docker builder cache or named volumes
+unless you intentionally want to reclaim disk space and are ready to download
+packages or models again.
 
 ## VRAM pressure response
 
@@ -59,5 +75,5 @@ JARVIS, оформи это как mission plan: <цель>
 JARVIS, выполни следующий runnable шаг mission
 ```
 
-This lets JARVIS move independent work into durable tasks, offload role briefs to
-LAN/Mesh workers when configured, and keep the chat context small.
+This lets JARVIS move independent work into durable tasks and keep the chat
+context small without enabling experimental cluster routing.
